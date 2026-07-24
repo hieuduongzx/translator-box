@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+
+# Build artifacts (PyInstaller + Inno Setup)
+/build/
+/dist/
+packaging/file_version_info.txt
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Local Claude Code settings (personal)
+.claude/settings.local.json
