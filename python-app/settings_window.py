@@ -53,7 +53,7 @@ from constants import (
     OCR_LANGUAGES,
     TRANSLATORS,
 )
-from ui_utils import _enable_dark_titlebar, _render_icon_pixmap
+from ui_utils import _enable_dark_titlebar, _fmt_hotkey, _render_icon_pixmap
 from version import APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO
 from widgets import ColorButton, HotkeyEdit
 
@@ -311,7 +311,8 @@ class SettingsWindow(QWidget):
         translate_form.addRow("Ngôn ngữ đích", self.target_box)
         layout.addWidget(translate_frame)
 
-        replace_heading = QLabel("Dịch & thay thế tại chỗ (Ctrl+Alt+B)")
+        replace_hotkey = _fmt_hotkey(self.config.hotkeys.get("selected_text_replace", ""))
+        replace_heading = QLabel(f"Dịch & thay thế tại chỗ ({replace_hotkey})")
         replace_heading.setObjectName("fieldLabel")
         layout.addWidget(replace_heading)
         replace_frame, replace_form = self._surface()

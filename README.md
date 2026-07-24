@@ -16,7 +16,7 @@ Chạy không hiện CMD, OCR offline đa engine.
 | Phím mặc định | Chức năng |
 |---|---|
 | `Ctrl+B` | Sao chép văn bản đang bôi đen, dịch và đổ vào khung HUD |
-| `Ctrl+Alt+B` | **Dịch & thay thế tại chỗ**: bôi đen văn bản trong ô nhập bất kỳ (vd Discord), nhấn phím tắt → hệ thống dịch sang ngôn ngữ đích và **dán đè** thay thế trực tiếp (không cần rời khỏi ô nhập). Clipboard cũ được khôi phục |
+| `Alt+B` | **Dịch & thay thế tại chỗ**: bôi đen văn bản trong ô nhập bất kỳ (vd Discord), nhấn phím tắt → hệ thống dịch sang ngôn ngữ đích (riêng) và **dán đè** thay thế trực tiếp (không cần rời khỏi ô nhập). Clipboard cũ được khôi phục |
 | `Ctrl+Alt+A` | Kéo chọn vùng (overlay làm tối màn hình + khung chọn), OCR rồi đổ bản dịch vào khung HUD |
 | `Ctrl+Alt+D` | Kéo chọn vùng, OCR layout và **hiển thị từng dòng dịch đúng vị trí trên màn hình** — nền thật được dựng lại (inpaint xoá chữ gốc, giữ gradient/hoạ tiết như Google Dịch ảnh); ảnh/icon xung quanh giữ nguyên. Không kéo cửa sổ app lên. Chuột trái: đóng ô đó · Chuột phải/Esc: xoá hết |
 | `Ctrl+Alt+L` | **Live dịch một vùng**: chọn vùng rồi dịch overlay **liên tục** — tự chụp lại theo chu kỳ (`live_interval_ms`, mặc định 900ms) và chỉ OCR/dịch lại khi nội dung vùng thay đổi (badge **● LIVE**). Bấm lại phím tắt, chuột phải hoặc Esc để dừng |

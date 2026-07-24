@@ -19,7 +19,7 @@ from constants import (
 
 DEFAULT_HOTKEYS = {
     "selected_text": "ctrl+b",
-    "selected_text_replace": "ctrl+alt+b",
+    "selected_text_replace": "alt+b",
     "region_to_text": "ctrl+alt+a",
     "region_to_overlay": "ctrl+alt+d",
     "region_to_live": "ctrl+alt+l",
