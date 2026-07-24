@@ -36,13 +36,13 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenTranslator2K-installer
-          path: dist/ScreenTranslator2K-*-setup.exe
+          name: TranslatorBox-installer
+          path: dist/TranslatorBox-Setup-*.exe
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ScreenTranslator2K-*-setup.exe
+          files: dist/TranslatorBox-Setup-*.exe
           generate_release_notes: true
           draft: false
           prerelease: false

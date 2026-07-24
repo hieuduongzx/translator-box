@@ -6,7 +6,7 @@
   #define AppVersion "1.0.0"
 #endif
 
-#define AppName "Screen Translator 2K"
+#define AppName "Translator Box"
 #define AppId "ScreenTranslator2K"
 #define Publisher "hieuduongzx"
 #define ExeName "ScreenTranslator2K.exe"
@@ -28,7 +28,7 @@ DisableDirPage=auto
 UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 OutputDir=..\dist
-OutputBaseFilename=ScreenTranslator2K-{#AppVersion}-setup
+OutputBaseFilename=TranslatorBox-Setup-{#AppVersion}
 SetupIconFile=..\python-app\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes

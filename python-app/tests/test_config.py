@@ -77,6 +77,83 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(payload["llm_model"], "mistral/mistral-small-latest")
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
+    def test_builtin_llm_endpoint_is_fixed_regardless_of_stored_value(self) -> None:
+        settings = config.AppConfig(
+            {
+                "translator": "llm",
+                "llm_endpoint": "http://other.test/v1",
+                "llm_api_key": "k",
+                "llm_model": "groq/openai/gpt-oss-120b",
+            }
+        )
+        service, endpoint, key, model = settings.resolve_llm()
+        self.assertEqual(service, "llm")
+        self.assertEqual(endpoint, "http://103.38.236.38:20128/v1")
+        self.assertEqual((key, model), ("k", "groq/openai/gpt-oss-120b"))
+
+    def test_builtin_openai_and_gemini_providers(self) -> None:
+        openai = config.AppConfig(
+            {
+                "translator": "openai",
+                "llm_model": "gpt-4o",
+                "ai_keys": {"openai": "sk-oa", "gemini": "sk-gm"},
+            }
+        )
+        service, endpoint, key, model = openai.resolve_llm()
+        self.assertEqual(service, "llm")
+        self.assertEqual(endpoint, "https://api.openai.com/v1")
+        self.assertEqual((key, model), ("sk-oa", "gpt-4o"))
+
+        gemini = config.AppConfig(
+            {"translator": "gemini", "ai_keys": {"gemini": "sk-gm"}}
+        )
+        service, endpoint, key, _model = gemini.resolve_llm()
+        self.assertEqual(
+            endpoint, "https://generativelanguage.googleapis.com/v1beta/openai"
+        )
+        self.assertEqual(key, "sk-gm")
+        # Model mặc định rơi về model đầu tiên của provider khi chưa hợp lệ.
+        self.assertEqual(gemini.provider_api_key("gemini"), "sk-gm")
+
+    def test_google_resolves_without_llm_params(self) -> None:
+        settings = config.AppConfig({"translator": "google"})
+        self.assertEqual(settings.resolve_llm(), ("google", "", "", ""))
+
+    def test_custom_provider_round_trips_and_resolves(self) -> None:
+        settings = config.AppConfig(
+            {
+                "translator": "custom:cp1",
+                "llm_model": "gpt-4o-mini",
+                "custom_providers": [
+                    {
+                        "id": "cp1",
+                        "name": "OpenRouter",
+                        "endpoint": "https://openrouter.ai/api/v1/",
+                        "api_key": "sk-x",
+                        "models": ["gpt-4o-mini", "llama-3"],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(settings.translator, "custom:cp1")
+        self.assertEqual(settings.active_provider()["name"], "OpenRouter")
+        service, endpoint, key, model = settings.resolve_llm()
+        self.assertEqual(service, "llm")
+        self.assertEqual(endpoint, "https://openrouter.ai/api/v1")  # trailing / trimmed
+        self.assertEqual((key, model), ("sk-x", "gpt-4o-mini"))
+
+    def test_invalid_custom_provider_and_dangling_selection_fall_back(self) -> None:
+        settings = config.AppConfig(
+            {
+                "translator": "custom:ghost",
+                "custom_providers": [
+                    {"id": "bad", "name": "", "endpoint": "ftp://x", "models": []},
+                ],
+            }
+        )
+        self.assertEqual(settings.custom_providers, [])
+        self.assertEqual(settings.translator, "google")
+
     def test_font_family_is_limited_to_supported_catalog(self) -> None:
         unsupported = config.AppConfig({"hud_font_family": "Comic Sans MS"})
         normalized = config.AppConfig({"hud_font_family": "yu gothic"})

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-APP_VERSION = "1.0.0"
-APP_NAME = "Screen Translator 2K"
+APP_VERSION = "1.0.1"
+APP_NAME = "Translator Box"
 # Tên thư mục/exe không dấu cách để đóng gói và ghi shortcut cho gọn.
 APP_ID = "ScreenTranslator2K"
 PUBLISHER = "hieuduongzx"

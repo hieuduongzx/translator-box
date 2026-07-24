@@ -31,6 +31,7 @@ from hotkeys import HotkeyManager
 from settings_window import SettingsWindow
 from translation_workflows import TranslationWorkflowController
 from update_controller import UpdateController
+from version import APP_NAME
 from ui_utils import (
     Bridge,
     TranslatorApplication,
@@ -62,7 +63,7 @@ class HUDWindow(QWidget):
         self.bridge.run.connect(lambda callback: callback())
         self.app_icon = _create_app_icon()
 
-        self.setWindowTitle("Screen Translator 2K")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self.app_icon)
         flags = Qt.FramelessWindowHint
         if self.config.hud_pinned:
@@ -136,7 +137,7 @@ class HUDWindow(QWidget):
         self.service_combo.setObjectName("barCombo")
         self.service_combo.setAccessibleName("Dịch vụ dịch")
         self.service_combo.setToolTip("Chọn dịch vụ dịch")
-        for label, key in bar_translator_entries():
+        for label, key in bar_translator_entries(self.config.custom_providers):
             self.service_combo.addItem(label, key)
 
         self.target_combo = QComboBox()
@@ -408,17 +409,16 @@ class HUDWindow(QWidget):
             self.config.llm_model = llm_model
         self.config.save()
         if self._settings_win is not None:
-            settings = self._settings_win
-            settings.service_box.blockSignals(True)
-            settings.service_box.setCurrentIndex(settings.service_box.findData(service))
-            settings.service_box.blockSignals(False)
-            if llm_model is not None:
-                settings.llm_model_box.blockSignals(True)
-                settings.llm_model_box.setCurrentIndex(
-                    settings.llm_model_box.findData(llm_model)
-                )
-                settings.llm_model_box.blockSignals(False)
-            settings._update_llm_controls()
+            self._settings_win.sync_service_controls()
+
+    def rebuild_service_combo(self) -> None:
+        """Dựng lại danh sách dịch vụ trên bar sau khi provider tùy chỉnh đổi."""
+        self.service_combo.blockSignals(True)
+        self.service_combo.clear()
+        for label, key in bar_translator_entries(self.config.custom_providers):
+            self.service_combo.addItem(label, key)
+        self.service_combo.blockSignals(False)
+        self.sync_translation_controls()
 
     def _target_changed(self) -> None:
         code = self.target_combo.currentData()
@@ -434,7 +434,7 @@ class HUDWindow(QWidget):
 
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.app_icon, QApplication.instance())
-        self.tray.setToolTip(f"Screen Translator — {self._status_text}")
+        self.tray.setToolTip(f"{APP_NAME} — {self._status_text}")
         menu = QMenu()
         for label, callback in self._tray_commands():
             action = QAction(label, menu)
@@ -517,7 +517,7 @@ class HUDWindow(QWidget):
         self._status_state = state
         self._bar.setToolTip(text)
         if hasattr(self, "tray"):
-            self.tray.setToolTip(f"Screen Translator — {text}")
+            self.tray.setToolTip(f"{APP_NAME} — {text}")
 
     def set_busy(self, busy: bool) -> None:
         for action, button in self._action_btns.items():

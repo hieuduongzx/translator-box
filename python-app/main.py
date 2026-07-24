@@ -1,4 +1,4 @@
-"""Entry point của Screen Translator 2K."""
+"""Entry point của Translator Box."""
 
 from application import main
 

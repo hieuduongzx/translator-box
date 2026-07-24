@@ -6,7 +6,7 @@ import os
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from PySide6.QtWidgets import QApplication
@@ -69,16 +69,17 @@ class TranslationWorkflowController:
 
     def _options(self) -> TranslationOptions:
         config = self.hud.config
+        service, endpoint, api_key, model = config.resolve_llm()
         return TranslationOptions(
             language=config.ocr_language,
             engine=config.ocr_engine,
             model=config.ocr_model,
             backend=config.ocr_backend if config.ocr_acceleration else "cpu",
             target=config.target_language,
-            service=config.translator,
-            llm_endpoint=config.llm_endpoint,
-            llm_api_key=config.llm_api_key,
-            llm_model=config.llm_model,
+            service=service,
+            llm_endpoint=endpoint,
+            llm_api_key=api_key,
+            llm_model=model,
         )
 
     def _emit(self, callback) -> None:
@@ -127,9 +128,9 @@ class TranslationWorkflowController:
             return
         actions = {
             "selected_text": self._translate_selected_text,
+            "selected_text_replace": self._translate_selected_text_replace,
             "region_to_text": self.start_region_capture,
             "region_to_overlay": self.start_region_overlay,
-            "fullscreen": self.start_fullscreen_capture,
         }
         handler = actions.get(action)
         if handler is not None:
@@ -147,6 +148,29 @@ class TranslationWorkflowController:
 
         self._run_text_worker(job)
 
+    def _translate_selected_text_replace(self) -> None:
+        """Dịch văn bản đang bôi đen rồi DÁN ĐÈ tại chỗ (thay input của app khác).
+
+        Không đưa HUD lên trước khi dán — nếu HUD giành focus thì Ctrl+V sẽ rơi
+        vào HUD thay vì ô nhập của người dùng (Discord…).
+        """
+        self._set_busy(True)
+        self.hud.set_status("Đang lấy văn bản chọn…", "busy")
+        # Dùng ngôn ngữ đích RIÊNG của chức năng thay thế (không chung với target chung).
+        options = replace(
+            self._options(), target=self.hud.config.replace_target_language
+        )
+
+        def job() -> tuple[str, str]:
+            original_clipboard = services.read_clipboard()
+            source = services.copy_selected_text()
+            self._emit(lambda: self.hud.set_status("Đang dịch để thay thế…", "busy"))
+            translated = self._translate_text(source, options)
+            services.paste_replacement(translated, restore=original_clipboard)
+            return source, translated
+
+        self._run_text_worker(job, on_success=self._apply_replaced)
+
     def start_region_capture(self) -> None:
         self._set_busy(True)
         self.hud.set_status("Kéo để chọn vùng · Esc huỷ", "busy")
@@ -161,14 +185,6 @@ class TranslationWorkflowController:
             self.hud.set_status("Đã huỷ.", "ready")
             return
         self._capture_to_frame(bbox, hidden_overlays)
-
-    def start_fullscreen_capture(self) -> None:
-        self._set_busy(True)
-        self.hud.set_status("Đang OCR toàn màn hình…", "busy")
-        hidden_overlays = overlay.hide_translations_for_capture()
-        self.hud.hide()
-        QApplication.processEvents()
-        self._capture_to_frame(services.full_screen_bbox(), hidden_overlays)
 
     def _capture_to_frame(self, bbox, hidden_overlays: list) -> None:
         options = self._options()
@@ -286,13 +302,14 @@ class TranslationWorkflowController:
             self.hud.ensure_visible()
 
     def _apply_overlay(self, translated, bbox, paint_regions, image_size) -> None:
+        # Overlay vẽ bản dịch ĐÈ TẠI CHỖ trên màn hình → không đổ vào khung HUD.
         self._set_busy(False)
-        self.hud.set_output(translated)
         overlay.show_translation(bbox, paint_regions, image_size)
         self.hud.set_status("Overlay sẵn sàng — trái đóng ô · phải xoá hết.", "ok")
 
     def _finish_overlay_error(self, message: str) -> None:
         self._set_busy(False)
+        self.hud.set_output(f"⚠ {message}")
         self.hud.ensure_visible()
         self.hud.set_status(message, "error")
 
@@ -411,6 +428,7 @@ class TranslationWorkflowController:
 
     def _live_error_if_current(self, token: object, message: str) -> None:
         if self._is_current(token):
+            self.hud.set_output(f"⚠ {message}")
             self.hud.set_status(f"Live: {message}", "error")
 
     def stop_live(self, message: str = "Đã dừng live.") -> None:
@@ -434,11 +452,13 @@ class TranslationWorkflowController:
         if self.live_running:
             self.stop_live("Đang thoát…")
 
-    def _run_text_worker(self, job) -> None:
+    def _run_text_worker(self, job, on_success=None) -> None:
+        handler = on_success or self._apply_result
+
         def runner() -> None:
             try:
                 _source, translated = job()
-                self._emit(lambda: self._apply_result(translated))
+                self._emit(lambda: handler(translated))
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 self._emit(lambda: self._apply_error(message))
@@ -455,8 +475,15 @@ class TranslationWorkflowController:
         self.hud.set_status("Đã dịch.", "ok")
         self.hud.ensure_visible()
 
+    def _apply_replaced(self, _translated: str) -> None:
+        # Thay chữ TRỰC TIẾP trong ô nhập của app đích → không đổ vào khung HUD,
+        # cũng không ensure_visible (giữ focus ở app đích sau khi dán đè).
+        self._set_busy(False)
+        self.hud.set_status("Đã thay thế bằng bản dịch tại chỗ.", "ok")
+
     def _apply_error(self, message: str) -> None:
         self._set_busy(False)
+        self.hud.set_output(f"⚠ {message}")
         self.hud.ensure_visible()
         self.hud.set_status(message, "error")
 

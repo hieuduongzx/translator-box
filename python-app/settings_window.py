@@ -10,6 +10,8 @@ from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -36,6 +39,10 @@ from ocr_runtime import (
     model_spec,
 )
 from constants import (
+    ADD_PROVIDER_KEY,
+    BUILTIN_AI_BY_ID,
+    BUILTIN_AI_IDS,
+    BUILTIN_AI_MODEL_IDS,
     HOTKEY_ACTIONS,
     HUD_FONT_OPTIONS,
     LANGUAGES,
@@ -68,6 +75,108 @@ def available_hud_font_options(
     return available or list(HUD_FONT_OPTIONS[:3])
 
 
+class ProviderDialog(QDialog):
+    """Tạo/sửa một provider AI tùy chỉnh: tên, endpoint, API key, nhiều model."""
+
+    def __init__(self, parent: QWidget | None = None, provider: dict | None = None):
+        super().__init__(parent)
+        source = provider or {}
+        self.setObjectName("settingsRoot")
+        self.setWindowTitle("Sửa provider" if provider else "Thêm provider tùy chỉnh")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.name_edit = QLineEdit(source.get("name", ""))
+        self.name_edit.setPlaceholderText("Tên hiển thị, vd: OpenRouter")
+        self.endpoint_edit = QLineEdit(source.get("endpoint", ""))
+        self.endpoint_edit.setPlaceholderText("http://host:port/v1")
+        self.key_edit = QLineEdit(source.get("api_key", ""))
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_edit.setPlaceholderText("API key (tùy chọn)")
+        self.key_edit.setClearButtonEnabled(True)
+        form.addRow("Tên", self.name_edit)
+        form.addRow("Endpoint", self.endpoint_edit)
+        form.addRow("API key", self.key_edit)
+        layout.addLayout(form)
+
+        models_label = QLabel("Model (thêm được nhiều)")
+        models_label.setObjectName("fieldLabel")
+        layout.addWidget(models_label)
+        self.model_list = QListWidget()
+        self.model_list.setFixedHeight(116)
+        for model_id in source.get("models", []):
+            self.model_list.addItem(model_id)
+        layout.addWidget(self.model_list)
+        add_row = QHBoxLayout()
+        add_row.setSpacing(8)
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("model id, vd: gpt-4o-mini")
+        self.model_input.returnPressed.connect(self._add_model)
+        add_button = QPushButton("Thêm model")
+        add_button.clicked.connect(self._add_model)
+        remove_button = QPushButton("Xóa model")
+        remove_button.clicked.connect(self._remove_model)
+        add_row.addWidget(self.model_input, 1)
+        add_row.addWidget(add_button)
+        add_row.addWidget(remove_button)
+        layout.addLayout(add_row)
+
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("muted")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Lưu")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primary")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
+        buttons.accepted.connect(self._try_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        _enable_dark_titlebar(self)
+
+    def _add_model(self) -> None:
+        text = self.model_input.text().strip()
+        if text and text not in self._models():
+            self.model_list.addItem(text)
+        self.model_input.clear()
+
+    def _remove_model(self) -> None:
+        for item in self.model_list.selectedItems():
+            self.model_list.takeItem(self.model_list.row(item))
+
+    def _models(self) -> list[str]:
+        return [self.model_list.item(i).text() for i in range(self.model_list.count())]
+
+    def _try_accept(self) -> None:
+        if not self.name_edit.text().strip():
+            self.error_label.setText("Nhập tên provider.")
+            return
+        endpoint = self.endpoint_edit.text().strip().rstrip("/")
+        if not endpoint.startswith(("http://", "https://")):
+            self.error_label.setText("Endpoint phải bắt đầu bằng http:// hoặc https://.")
+            return
+        if not self._models():
+            self.error_label.setText("Thêm ít nhất một model.")
+            return
+        self.accept()
+
+    def data(self) -> dict:
+        return {
+            "name": self.name_edit.text().strip(),
+            "endpoint": self.endpoint_edit.text().strip().rstrip("/"),
+            "api_key": self.key_edit.text().strip(),
+            "models": self._models(),
+        }
+
+
 class SettingsWindow(QWidget):
     """Chỉnh cấu hình và đồng bộ thay đổi về HUD."""
 
@@ -78,7 +187,7 @@ class SettingsWindow(QWidget):
         self._quitting = False
         self._model_download_running = False
         self.setObjectName("settingsRoot")
-        self.setWindowTitle("Cài đặt — Screen Translator 2K")
+        self.setWindowTitle(f"Cài đặt — {APP_NAME}")
         self.setWindowIcon(hud.app_icon)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -189,28 +298,52 @@ class SettingsWindow(QWidget):
             "Chọn dịch vụ và ngôn ngữ nhận kết quả.",
         )
         translate_frame, translate_form = self._surface()
-        self.service_box = self._combo(
-            TRANSLATORS, self.config.translator, self._on_translation_changed
+        self.service_box = QComboBox()
+        self.service_box.setToolTip(
+            "Google/Bing dịch nhanh; Translator Box và provider tùy chỉnh dùng AI."
         )
-        self.service_box.setToolTip("Bing lỗi sẽ tự chuyển sang Google.")
+        self._populate_service_box()
+        self.service_box.currentIndexChanged.connect(self._on_service_selected)
         self.target_box = self._combo(
-            LANGUAGES, self.config.target_language, self._on_translation_changed
+            LANGUAGES, self.config.target_language, self._on_target_changed
         )
         translate_form.addRow("Dịch vụ", self.service_box)
         translate_form.addRow("Ngôn ngữ đích", self.target_box)
         layout.addWidget(translate_frame)
 
+        replace_heading = QLabel("Dịch & thay thế tại chỗ (Ctrl+Alt+B)")
+        replace_heading.setObjectName("fieldLabel")
+        layout.addWidget(replace_heading)
+        replace_frame, replace_form = self._surface()
+        self.replace_target_box = self._combo(
+            LANGUAGES,
+            self.config.replace_target_language,
+            self._on_replace_target_changed,
+        )
+        replace_hint = QLabel(
+            "Ngôn ngữ đích riêng khi bôi đen rồi thay thế văn bản — độc lập với "
+            "“Ngôn ngữ đích” ở trên. Dùng chung dịch vụ/provider đang chọn."
+        )
+        replace_hint.setObjectName("engineHint")
+        replace_hint.setWordWrap(True)
+        replace_form.addRow("Ngôn ngữ khi thay thế", self.replace_target_box)
+        replace_form.addRow("", replace_hint)
+        layout.addWidget(replace_frame)
+
         self.llm_frame, llm_form = self._surface()
         self.llm_endpoint_edit = QLineEdit(self.config.llm_endpoint)
-        self.llm_endpoint_edit.setPlaceholderText("http://host:port/v1")
-        self.llm_endpoint_edit.setClearButtonEnabled(True)
+        self.llm_endpoint_edit.setReadOnly(True)
         self.llm_key_edit = QLineEdit(self.config.llm_api_key)
         self.llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_key_edit.setPlaceholderText("Nhập API key sau khi đăng ký")
         self.llm_key_edit.setClearButtonEnabled(True)
-        self.llm_model_box = self._combo(
-            LLM_MODELS, self.config.llm_model, self._on_translation_changed
-        )
+        self.llm_key_edit.editingFinished.connect(self._on_key_changed)
+        self.llm_model_box = QComboBox()
+        for label, model_id in LLM_MODELS:
+            self.llm_model_box.addItem(label, model_id)
+        model_index = self.llm_model_box.findData(self.config.llm_model)
+        self.llm_model_box.setCurrentIndex(max(0, model_index))
+        self.llm_model_box.currentIndexChanged.connect(self._on_model_changed)
         self.llm_registration_link = QLabel(
             f'<a href="{LLM_REGISTRATION_URL}">'
             '<span style="color:#a5b4fc;">'
@@ -219,16 +352,41 @@ class SettingsWindow(QWidget):
         self.llm_registration_link.setObjectName("llmRegistration")
         self.llm_registration_link.setOpenExternalLinks(True)
         self.llm_registration_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        manage_row = QHBoxLayout()
+        manage_row.setContentsMargins(0, 0, 0, 0)
+        manage_row.setSpacing(8)
+        self.provider_edit_btn = QPushButton("Chỉnh sửa provider")
+        self.provider_edit_btn.clicked.connect(self._edit_provider)
+        self.provider_delete_btn = QPushButton("Xóa provider")
+        self.provider_delete_btn.clicked.connect(self._delete_provider)
+        manage_row.addWidget(self.provider_edit_btn)
+        manage_row.addWidget(self.provider_delete_btn)
+        manage_row.addStretch(1)
+        self.provider_manage_widget = QWidget()
+        self.provider_manage_widget.setLayout(manage_row)
         llm_form.addRow("Endpoint", self.llm_endpoint_edit)
         llm_form.addRow("API key", self.llm_key_edit)
         llm_form.addRow("Model", self.llm_model_box)
         llm_form.addRow("", self.llm_registration_link)
-        self.llm_endpoint_edit.editingFinished.connect(self._on_translation_changed)
-        self.llm_key_edit.editingFinished.connect(self._on_translation_changed)
+        llm_form.addRow("", self.provider_manage_widget)
         layout.addWidget(self.llm_frame)
         self._update_llm_controls()
         layout.addStretch(1)
         return page
+
+    def _populate_service_box(self) -> None:
+        """Google/Bing/Translator Box + provider tùy chỉnh + mục thêm mới."""
+        box = self.service_box
+        box.blockSignals(True)
+        box.clear()
+        for label, code in TRANSLATORS:
+            box.addItem(label, code)
+        for provider in self.config.custom_providers:
+            box.addItem(provider["name"], f"custom:{provider['id']}")
+        box.addItem("＋ Thêm provider tùy chỉnh…", ADD_PROVIDER_KEY)
+        index = box.findData(self.config.translator)
+        box.setCurrentIndex(max(0, index))
+        box.blockSignals(False)
 
     def _build_ocr_page(self) -> QScrollArea:
         page, layout = self._page(
@@ -477,31 +635,160 @@ class SettingsWindow(QWidget):
                 f"Bạn đang dùng bản mới nhất ({APP_VERSION})."
             )
 
-    def _on_translation_changed(self) -> None:
-        endpoint = self.llm_endpoint_edit.text().strip().rstrip("/")
-        if not endpoint.startswith(("http://", "https://")):
-            self.llm_endpoint_edit.setText(self.config.llm_endpoint)
-            self.hud.set_status(
-                "Endpoint LLM phải bắt đầu bằng http:// hoặc https://.", "error"
-            )
-            return
-        self.config.translator = self.service_box.currentData()
+    def _on_target_changed(self) -> None:
         self.config.target_language = self.target_box.currentData()
-        self.config.llm_endpoint = endpoint
-        self.config.llm_api_key = self.llm_key_edit.text().strip()
-        self.config.llm_model = self.llm_model_box.currentData()
+        self.config.save()
+        self.hud.sync_translation_controls()
+
+    def _on_replace_target_changed(self) -> None:
+        self.config.replace_target_language = self.replace_target_box.currentData()
+        self.config.save()
+
+    def _on_service_selected(self) -> None:
+        data = self.service_box.currentData()
+        if data == ADD_PROVIDER_KEY:
+            self._add_provider()
+            return
+        self.config.translator = data
+        if data.startswith("custom:"):
+            provider = self.config.active_provider()
+            models = provider["models"] if provider else []
+        elif data in BUILTIN_AI_IDS:
+            models = BUILTIN_AI_MODEL_IDS[data]
+        else:
+            models = []
+        if models and self.config.llm_model not in models:
+            self.config.llm_model = models[0]
         self.config.save()
         self._update_llm_controls()
         self.hud.sync_translation_controls()
-        if self.config.translator == "llm" and not self.config.llm_api_key:
-            self.hud.set_status(
-                "LLM AI đã chọn — đăng ký và nhập API key để sử dụng.", "ready"
-            )
+        if data in BUILTIN_AI_IDS and not self.config.provider_api_key(data):
+            name = BUILTIN_AI_BY_ID[data]["name"]
+            self.hud.set_status(f"{name} đã chọn — nhập API key để sử dụng.", "ready")
         else:
             self.hud.set_status("Đã cập nhật cấu hình dịch.", "ready")
 
+    def _on_key_changed(self) -> None:
+        if self.config.translator in BUILTIN_AI_IDS:
+            self.config.set_provider_api_key(
+                self.config.translator, self.llm_key_edit.text().strip()
+            )
+            self.config.save()
+
+    def _on_model_changed(self) -> None:
+        data = self.llm_model_box.currentData()
+        if data is None:
+            return
+        self.config.llm_model = data
+        self.config.save()
+        self.hud.sync_translation_controls()
+
     def _update_llm_controls(self) -> None:
-        self.llm_frame.setVisible(self.service_box.currentData() == "llm")
+        translator = self.config.translator
+        is_builtin = translator in BUILTIN_AI_IDS
+        is_custom = translator.startswith("custom:")
+        self.llm_frame.setVisible(is_builtin or is_custom)
+        if not (is_builtin or is_custom):
+            return
+        self.llm_model_box.blockSignals(True)
+        self.llm_model_box.clear()
+        if is_builtin:
+            spec = BUILTIN_AI_BY_ID[translator]
+            for label, model_id in spec["models"]:
+                self.llm_model_box.addItem(label, model_id)
+            self.llm_endpoint_edit.setText(spec["endpoint"])
+            self.llm_key_edit.setReadOnly(False)
+            self.llm_key_edit.setText(self.config.provider_api_key(translator))
+            self.llm_registration_link.setText(
+                f'<a href="{spec["register"]}"><span style="color:#a5b4fc;">'
+                "Đăng ký tài khoản và lấy API key</span></a>"
+            )
+            self.llm_registration_link.setVisible(True)
+            self.provider_manage_widget.setVisible(False)
+        else:
+            provider = self.config.active_provider() or {
+                "endpoint": "",
+                "api_key": "",
+                "models": [],
+            }
+            for model_id in provider["models"]:
+                self.llm_model_box.addItem(model_id, model_id)
+            self.llm_endpoint_edit.setText(provider["endpoint"])
+            self.llm_key_edit.setReadOnly(True)
+            self.llm_key_edit.setText(provider["api_key"])
+            self.llm_registration_link.setVisible(False)
+            self.provider_manage_widget.setVisible(True)
+        model_index = self.llm_model_box.findData(self.config.llm_model)
+        self.llm_model_box.setCurrentIndex(max(0, model_index))
+        self.llm_model_box.blockSignals(False)
+
+    def sync_service_controls(self) -> None:
+        """Đồng bộ combo dịch vụ + khung LLM theo config (gọi từ bar)."""
+        self.service_box.blockSignals(True)
+        index = self.service_box.findData(self.config.translator)
+        self.service_box.setCurrentIndex(max(0, index))
+        self.service_box.blockSignals(False)
+        self._update_llm_controls()
+
+    def _next_provider_id(self) -> str:
+        numbers = [
+            int(provider["id"][2:])
+            for provider in self.config.custom_providers
+            if provider["id"].startswith("cp") and provider["id"][2:].isdigit()
+        ]
+        return f"cp{(max(numbers) + 1) if numbers else 1}"
+
+    def _add_provider(self) -> None:
+        dialog = ProviderDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.data()
+            provider = {"id": self._next_provider_id(), **data}
+            self.config.custom_providers = self.config.custom_providers + [provider]
+            self.config.translator = f"custom:{provider['id']}"
+            self.config.llm_model = data["models"][0]
+            self.config.save()
+            self._refresh_providers(f"Đã thêm provider “{data['name']}”.")
+        else:
+            self.sync_service_controls()
+
+    def _edit_provider(self) -> None:
+        provider = self.config.active_provider()
+        if provider is None:
+            return
+        dialog = ProviderDialog(self, provider)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            provider.update(dialog.data())
+            if self.config.llm_model not in provider["models"]:
+                self.config.llm_model = provider["models"][0]
+            self.config.save()
+            self._refresh_providers(f"Đã cập nhật “{provider['name']}”.")
+
+    def _delete_provider(self) -> None:
+        provider = self.config.active_provider()
+        if provider is None:
+            return
+        confirm = QMessageBox.question(
+            self, "Xóa provider", f"Xóa provider “{provider['name']}”?"
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self.config.custom_providers = [
+            item
+            for item in self.config.custom_providers
+            if item["id"] != provider["id"]
+        ]
+        self.config.translator = "google"
+        self.config.save()
+        self._refresh_providers(f"Đã xóa “{provider['name']}”.")
+
+    def _refresh_providers(self, message: str) -> None:
+        self._populate_service_box()
+        self._update_llm_controls()
+        if hasattr(self.hud, "rebuild_service_combo"):
+            self.hud.rebuild_service_combo()
+        else:
+            self.hud.sync_translation_controls()
+        self.hud.set_status(message, "ready")
 
     def _on_ocr_changed(self) -> None:
         self.config.ocr_engine = self.engine_box.currentData()

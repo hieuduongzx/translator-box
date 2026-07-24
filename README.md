@@ -1,6 +1,6 @@
-# Screen Translator 2K
+# Translator Box
 
-**Phiên bản 1.0.0** · Ứng dụng native Windows viết bằng Python + PySide6 (Qt).
+**Phiên bản 1.0.1** · Ứng dụng dịch màn hình native Windows viết bằng Python + PySide6 (Qt).
 
 > Tải bản cài đặt mới nhất tại [GitHub Releases](https://github.com/hieuduongzx/translator-box/releases). App tự kiểm tra và cập nhật một chạm khi có bản mới.
 
@@ -16,10 +16,10 @@ Chạy không hiện CMD, OCR offline đa engine.
 | Phím mặc định | Chức năng |
 |---|---|
 | `Ctrl+B` | Sao chép văn bản đang bôi đen, dịch và đổ vào khung HUD |
+| `Ctrl+Alt+B` | **Dịch & thay thế tại chỗ**: bôi đen văn bản trong ô nhập bất kỳ (vd Discord), nhấn phím tắt → hệ thống dịch sang ngôn ngữ đích và **dán đè** thay thế trực tiếp (không cần rời khỏi ô nhập). Clipboard cũ được khôi phục |
 | `Ctrl+Alt+A` | Kéo chọn vùng (overlay làm tối màn hình + khung chọn), OCR rồi đổ bản dịch vào khung HUD |
 | `Ctrl+Alt+D` | Kéo chọn vùng, OCR layout và **hiển thị từng dòng dịch đúng vị trí trên màn hình** — nền thật được dựng lại (inpaint xoá chữ gốc, giữ gradient/hoạ tiết như Google Dịch ảnh); ảnh/icon xung quanh giữ nguyên. Không kéo cửa sổ app lên. Chuột trái: đóng ô đó · Chuột phải/Esc: xoá hết |
 | `Ctrl+Alt+L` | **Live dịch một vùng**: chọn vùng rồi dịch overlay **liên tục** — tự chụp lại theo chu kỳ (`live_interval_ms`, mặc định 900ms) và chỉ OCR/dịch lại khi nội dung vùng thay đổi (badge **● LIVE**). Bấm lại phím tắt, chuột phải hoặc Esc để dừng |
-| `Ctrl+Alt+X` | OCR toàn bộ desktop rồi đổ bản dịch vào khung HUD |
 | `Ctrl+Alt+Q` | Thoát ứng dụng |
 
 - **HUD trong suốt**: bar chức năng phía trên + vùng trong suốt hiển thị bản
@@ -39,13 +39,15 @@ Chạy không hiện CMD, OCR offline đa engine.
 - **Ghim HUD**: mặc định ghim trên cùng. Khi bỏ ghim, HUD tự ẩn lúc chuyển sang
   ứng dụng khác; `Ctrl+B` sẽ gọi HUD hiện lại để trả kết quả dịch văn bản bôi đen.
 - **Windows OCR**: lựa chọn nhẹ dành cho Windows 10/11, sử dụng language pack của hệ điều hành.
-- **Dịch vụ dịch**: Google, Bing/Microsoft hoặc LLM AI qua endpoint
-  OpenAI-compatible `http://103.38.236.38:20128/v1`. Trên thanh bar, **mỗi model
-  LLM hiện thành một mục riêng** (Mistral Small, GPT-OSS 120B) thay vì gộp chung
-  "LLM AI" — chọn model là tự bật LLM và đặt model đó. Người dùng tự
-  [đăng ký tài khoản/lấy API key](http://103.38.236.38:20128/) rồi nhập trong
-  **Cài đặt → Dịch**. API key không được đóng gói sẵn. Endpoint trả về dạng
-  event-stream (`data: [DONE]`) vẫn được bóc tách đúng.
+- **Dịch vụ dịch**: Google, Bing/Microsoft, và các provider AI tích hợp
+  **Translator Box** (`http://103.38.236.38:20128/v1`), **OpenAI**
+  (`https://api.openai.com/v1`), **Google Gemini**
+  (`https://generativelanguage.googleapis.com/v1beta/openai`) — endpoint cố định,
+  chỉ cần nhập API key và chọn model. Ngoài ra thêm được **provider tùy chỉnh**
+  (endpoint + API key + nhiều model bất kỳ) qua **Cài đặt → Dịch → ＋ Thêm provider
+  tùy chỉnh**. Trên thanh bar, **mỗi model của mỗi provider hiện thành một mục
+  riêng**. API key không đóng gói sẵn. Endpoint trả về dạng event-stream
+  (`data: [DONE]`) vẫn bóc tách đúng. Mọi lỗi dịch/AI được in thẳng vào khung dịch.
 - **Cập nhật tự động**: khi mở app sẽ kiểm tra [GitHub Releases](https://github.com/hieuduongzx/translator-box/releases);
   có bản mới thì hiện thông báo, bấm **Cập nhật ngay** để tải + cài + khởi động
   lại một chạm. Kiểm tra thủ công và bật/tắt trong **Cài đặt → Giới thiệu**.
@@ -130,9 +132,9 @@ Chỉ build exe (bỏ installer): `pwsh -File packaging/build.ps1 -SkipInstaller
 cài sẽ thấy bản mới qua GitHub Releases API và cập nhật một chạm.
 
 ```powershell
-# ví dụ phát hành 1.0.0
-git tag v1.0.0
-git push origin v1.0.0
+# ví dụ phát hành 1.0.1
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 ## Cấu trúc

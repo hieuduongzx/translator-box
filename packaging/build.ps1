@@ -41,12 +41,12 @@ VSVersionInfo(
   kids=[
     StringFileInfo([StringTable('040904B0', [
       StringStruct('CompanyName', 'hieuduongzx'),
-      StringStruct('FileDescription', 'Screen Translator 2K'),
+      StringStruct('FileDescription', 'Translator Box'),
       StringStruct('FileVersion', '$version'),
       StringStruct('InternalName', 'ScreenTranslator2K'),
       StringStruct('LegalCopyright', 'Copyright (c) hieuduongzx'),
       StringStruct('OriginalFilename', 'ScreenTranslator2K.exe'),
-      StringStruct('ProductName', 'Screen Translator 2K'),
+      StringStruct('ProductName', 'Translator Box'),
       StringStruct('ProductVersion', '$version')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
@@ -84,5 +84,5 @@ if (-not $iscc) {
 Write-Host "==> Inno Setup ($iscc)..." -ForegroundColor Cyan
 & $iscc "/DAppVersion=$version" "$root\packaging\installer.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup thất bại (exit $LASTEXITCODE)" }
-$setup = "$root\dist\ScreenTranslator2K-$version-setup.exe"
+$setup = "$root\dist\TranslatorBox-Setup-$version.exe"
 Write-Host "==> Installer: $setup" -ForegroundColor Green

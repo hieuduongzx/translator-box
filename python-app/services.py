@@ -465,18 +465,6 @@ def _ocr_windows_data(
     return asyncio.run(_run())
 
 
-def full_screen_bbox() -> tuple[int, int, int, int]:
-    """bbox=(left, top, right, bottom) của toàn bộ desktop ảo."""
-    import ctypes
-
-    user32 = ctypes.windll.user32
-    x = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-    y = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-    w = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-    h = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
-    return (x, y, x + max(1, w), y + max(1, h))
-
-
 def capture(bbox: tuple[int, int, int, int], path: str | Path) -> None:
     """Chụp vùng bbox=(left, top, right, bottom) và lưu PNG."""
     from PIL import ImageGrab
@@ -911,7 +899,9 @@ def _translate_llm(
     if not endpoint.startswith(("http://", "https://")):
         raise RuntimeError("Endpoint LLM không hợp lệ.")
     if not api_key.strip():
-        raise RuntimeError("LLM AI chưa có API key. Mở Cài đặt → Dịch để nhập key.")
+        raise RuntimeError(
+            "Provider AI chưa có API key. Mở Cài đặt → Dịch để nhập key."
+        )
     if not model.strip():
         raise RuntimeError("Chưa chọn model LLM.")
 
@@ -946,7 +936,7 @@ def _translate_llm(
         with urllib.request.urlopen(request, timeout=45) as response:
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"LLM AI trả về HTTP {exc.code}.") from exc
+        raise RuntimeError(f"Provider AI trả về HTTP {exc.code}.") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Không kết nối được endpoint LLM: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -956,7 +946,7 @@ def _translate_llm(
 
     content = _llm_content_from_body(raw)
     if not content.strip():
-        raise RuntimeError("LLM AI không trả về bản dịch.")
+        raise RuntimeError("Provider AI không trả về bản dịch.")
     return content.strip()
 
 
@@ -1098,12 +1088,39 @@ def _translate_bing(text: str, target: str) -> str:
     raise RuntimeError("Bing không trả về bản dịch.")
 
 
+def _wait_modifiers_released(timeout: float = 1.0) -> None:
+    """Chờ đến khi người dùng NHẢ các phím bổ trợ vật lý rồi mới mô phỏng Ctrl+C/V.
+
+    Phím tắt như Ctrl+Alt+B khiến người dùng vẫn đang GIỮ Ctrl+Alt lúc handler
+    chạy; nếu gửi Ctrl+C ngay thì OS thấy Ctrl+Alt+C (không phải copy). Ta CHỜ
+    (thụ động) tới khi các modifier được nhả — KHÔNG gửi key-up tổng hợp, vì
+    `keyboard.release()` khi phím đang giữ vật lý sẽ làm lệch state của thư viện
+    và gây kẹt Ctrl toàn hệ thống. Hết `timeout` thì tiếp tục (best-effort).
+    """
+    import keyboard
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        held = False
+        for key in ("ctrl", "alt", "shift"):
+            try:
+                if keyboard.is_pressed(key):
+                    held = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+        if not held:
+            return
+        time.sleep(0.03)
+
+
 def copy_selected_text() -> str:
     """Mô phỏng Ctrl+C rồi đọc clipboard để lấy văn bản đang bôi đen."""
     import keyboard
     import pyperclip
 
-    time.sleep(0.12)
+    _wait_modifiers_released()
+    time.sleep(0.05)
     previous = ""
     try:
         previous = pyperclip.paste()
@@ -1127,3 +1144,37 @@ def copy_selected_text() -> str:
             pass
         raise RuntimeError("Chưa thấy văn bản được chọn.")
     return text
+
+
+def read_clipboard() -> str:
+    """Đọc nội dung clipboard hiện tại (rỗng nếu lỗi) — để khôi phục sau khi dán."""
+    import pyperclip
+
+    try:
+        return pyperclip.paste() or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def paste_replacement(text: str, restore: str | None = None) -> None:
+    """Dán `text` (Ctrl+V) để thay vùng đang bôi đen, rồi khôi phục clipboard cũ.
+
+    Ứng dụng đích vẫn đang giữ focus (HUD không cướp focus), nên Ctrl+V rơi vào
+    đúng ô nhập của họ. `restore` là nội dung clipboard cần trả lại sau khi dán.
+    """
+    import keyboard
+    import pyperclip
+
+    try:
+        pyperclip.copy(text)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Không ghi được clipboard để dán bản dịch.") from exc
+    _wait_modifiers_released()
+    time.sleep(0.06)
+    keyboard.send("ctrl+v")
+    time.sleep(0.16)
+    if restore is not None:
+        try:
+            pyperclip.copy(restore)
+        except Exception:  # noqa: BLE001
+            pass

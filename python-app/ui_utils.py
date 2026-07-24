@@ -122,6 +122,13 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
         line(8, 12, 32, 12)
         line(8, 20, 26, 20)
         line(8, 28, 30, 28)
+    elif kind == "replace":  # hai mũi tên ngược chiều — dịch & thay thế tại chỗ
+        line(10, 16, 29, 16)
+        line(29, 16, 25, 12)
+        line(29, 16, 25, 20)
+        line(30, 25, 11, 25)
+        line(11, 25, 15, 21)
+        line(11, 25, 15, 29)
     elif kind == "scan":  # khung quét 4 góc + vạch ngang giữa
         line(9, 15, 9, 9)
         line(9, 9, 15, 9)
@@ -154,15 +161,6 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
         painter.setPen(pen)
         painter.drawArc(QRectF(14 * s, 14 * s, 12 * s, 12 * s), -50 * 16, 100 * 16)
         painter.drawArc(QRectF(14 * s, 14 * s, 12 * s, 12 * s), 130 * 16, 100 * 16)
-    elif kind == "fullscreen":  # 4 mũi tên hướng ra góc
-        line(9, 15, 9, 9)
-        line(9, 9, 15, 9)
-        line(31, 15, 31, 9)
-        line(31, 9, 25, 9)
-        line(9, 25, 9, 31)
-        line(9, 31, 15, 31)
-        line(31, 25, 31, 31)
-        line(31, 31, 25, 31)
     elif kind == "pin":  # ghim cửa sổ
         line(14, 9, 26, 9)
         line(16, 9, 17, 18)

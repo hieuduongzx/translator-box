@@ -26,11 +26,11 @@ OCR_LANGUAGES = [
 ]
 HOTKEY_ACTIONS = [
     ("Dịch văn bản chọn", "selected_text"),
+    ("Dịch & thay thế tại chỗ", "selected_text_replace"),
     ("Vùng → Khung dịch", "region_to_text"),
     ("Vùng → Live vào khung", "region_to_live_frame"),
     ("Vùng → Overlay", "region_to_overlay"),
     ("Vùng → Live overlay", "region_to_live"),
-    ("Toàn màn hình", "fullscreen"),
     ("Thoát", "quit"),
 ]
 OCR_ENGINES = [
@@ -43,43 +43,98 @@ OCR_ENGINE_DESCRIPTIONS = {
     "windows": "Nhanh, offline, tốn ít tài nguyên nhất trên Windows.",
     "rapidocr": "OCR tích hợp chạy hoàn toàn ngoại tuyến bằng RapidOCR.",
 }
-TRANSLATORS = [
-    ("Google", "google"),
-    ("Bing", "bing"),
-    ("LLM AI", "llm"),
-]
-LLM_MODELS = [
-    ("Mistral Small", "mistral/mistral-small-latest"),
-    ("GPT-OSS 120B", "groq/openai/gpt-oss-120b"),
+DEFAULT_LLM_ENDPOINT = "http://103.38.236.38:20128/v1"
+LLM_REGISTRATION_URL = "http://103.38.236.38:20128/"
+
+# Provider AI tích hợp sẵn — endpoint CỐ ĐỊNH (OpenAI-compatible), user chỉ nhập
+# API key và chọn model. "id" cũng là mã translator lưu trong config.
+BUILTIN_AI_PROVIDERS = [
+    {
+        "id": "llm",
+        "name": "Translator Box",
+        "endpoint": DEFAULT_LLM_ENDPOINT,
+        "models": [
+            ("Mistral Small", "mistral/mistral-small-latest"),
+            ("GPT-OSS 120B", "groq/openai/gpt-oss-120b"),
+        ],
+        "register": LLM_REGISTRATION_URL,
+    },
+    {
+        "id": "openai",
+        "name": "OpenAI",
+        "endpoint": "https://api.openai.com/v1",
+        "models": [
+            ("GPT-4o mini", "gpt-4o-mini"),
+            ("GPT-4o", "gpt-4o"),
+            ("GPT-4.1 mini", "gpt-4.1-mini"),
+        ],
+        "register": "https://platform.openai.com/api-keys",
+    },
+    {
+        "id": "gemini",
+        "name": "Google Gemini",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "models": [
+            ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+            ("Gemini 2.5 Pro", "gemini-2.5-pro"),
+            ("Gemini 2.0 Flash", "gemini-2.0-flash"),
+        ],
+        "register": "https://aistudio.google.com/apikey",
+    },
 ]
 
-# Tiền tố key cho combo dịch vụ trên thanh bar khi item là một model LLM.
-_LLM_BAR_PREFIX = "llm::"
+BUILTIN_AI_IDS = tuple(provider["id"] for provider in BUILTIN_AI_PROVIDERS)
+BUILTIN_AI_BY_ID = {provider["id"]: provider for provider in BUILTIN_AI_PROVIDERS}
+BUILTIN_AI_ENDPOINTS = {p["id"]: p["endpoint"] for p in BUILTIN_AI_PROVIDERS}
+BUILTIN_AI_MODEL_IDS = {
+    p["id"]: [model_id for _label, model_id in p["models"]]
+    for p in BUILTIN_AI_PROVIDERS
+}
+# Model của provider "Translator Box" — giữ tên cũ cho tương thích.
+LLM_MODELS = BUILTIN_AI_BY_ID["llm"]["models"]
+
+TRANSLATORS = [("Google", "google"), ("Bing", "bing")] + [
+    (provider["name"], provider["id"]) for provider in BUILTIN_AI_PROVIDERS
+]
+
+# Sentinel cho mục "Thêm provider tùy chỉnh…" ở cuối combo dịch vụ (Cài đặt).
+ADD_PROVIDER_KEY = "__add_provider__"
+
+_CUSTOM_BAR_PREFIX = "custom::"
 
 
 def bar_service_key(translator: str, llm_model: str) -> str:
-    """Key combo trên bar: mã dịch vụ, hoặc 'llm::<model_id>' cho từng model LLM."""
-    return f"{_LLM_BAR_PREFIX}{llm_model}" if translator == "llm" else translator
+    """Key combo bar: 'google'/'bing', '<ai_id>::<model>', 'custom::<pid>::<model>'."""
+    if translator in ("google", "bing"):
+        return translator
+    if translator.startswith("custom:"):
+        pid = translator.split(":", 1)[1]
+        return f"{_CUSTOM_BAR_PREFIX}{pid}::{llm_model}"
+    return f"{translator}::{llm_model}"  # provider AI tích hợp (llm/openai/gemini)
 
 
 def parse_bar_service_key(key: str) -> tuple[str, str | None]:
-    """Giải mã key combo bar → (translator, llm_model | None)."""
-    if key.startswith(_LLM_BAR_PREFIX):
-        return "llm", key[len(_LLM_BAR_PREFIX) :]
-    return key, None
+    """Giải mã key combo bar → (translator, model | None)."""
+    if "::" not in key:
+        return key, None  # google/bing
+    head, _, rest = key.partition("::")
+    if head == "custom":
+        pid, _, model = rest.partition("::")
+        return f"custom:{pid}", model or None
+    return head, rest or None  # provider AI tích hợp
 
 
-def bar_translator_entries() -> list[tuple[str, str]]:
-    """(nhãn, key) cho combo dịch vụ trên bar — mỗi model LLM hiện thành mục riêng."""
-    entries = [(label, code) for label, code in TRANSLATORS if code != "llm"]
-    entries += [
-        (label, bar_service_key("llm", model_id)) for label, model_id in LLM_MODELS
-    ]
+def bar_translator_entries(custom_providers: list | None = None) -> list[tuple[str, str]]:
+    """(nhãn, key) cho combo bar — mỗi model của mỗi provider AI là một mục riêng."""
+    entries: list[tuple[str, str]] = [("Google", "google"), ("Bing", "bing")]
+    for provider in BUILTIN_AI_PROVIDERS:
+        for label, model_id in provider["models"]:
+            entries.append((f"{provider['name']} · {label}", f"{provider['id']}::{model_id}"))
+    for provider in custom_providers or []:
+        for model_id in provider.get("models", []):
+            label = f"{provider['name']} · {model_id}"
+            entries.append((label, f"{_CUSTOM_BAR_PREFIX}{provider['id']}::{model_id}"))
     return entries
-
-
-DEFAULT_LLM_ENDPOINT = "http://103.38.236.38:20128/v1"
-LLM_REGISTRATION_URL = "http://103.38.236.38:20128/"
 
 # Danh mục font HUD có giới hạn. Qt vẫn tự ghép font fallback cho glyph còn thiếu.
 HUD_FONT_OPTIONS = (
@@ -124,12 +179,17 @@ BAR_GROUP_FRAME = [
         "region_to_live_frame",
         "OCR liên tục một vùng, đổ bản dịch vào khung (bấm lại để dừng)",
     ),
-    ("fullscreen", "Toàn màn hình", "fullscreen", "OCR cả màn hình rồi dịch vào khung"),
     (
         "text",
         "Dịch văn bản chọn",
         "selected_text",
         "Copy văn bản đang bôi đen rồi dịch",
+    ),
+    (
+        "replace",
+        "Dịch & thay thế",
+        "selected_text_replace",
+        "Bôi đen văn bản rồi thay bằng bản dịch (dán đè tại chỗ)",
     ),
 ]
 BAR_ACTIONS = BAR_GROUP_OVERLAY + BAR_GROUP_FRAME

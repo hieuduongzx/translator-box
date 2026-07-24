@@ -8,15 +8,22 @@ import re
 from pathlib import Path
 from typing import Any
 
-from constants import DEFAULT_LLM_ENDPOINT, HUD_FONT_FAMILIES, LLM_MODELS
+from constants import (
+    BUILTIN_AI_ENDPOINTS,
+    BUILTIN_AI_IDS,
+    BUILTIN_AI_MODEL_IDS,
+    DEFAULT_LLM_ENDPOINT,
+    HUD_FONT_FAMILIES,
+    LLM_MODELS,
+)
 
 DEFAULT_HOTKEYS = {
     "selected_text": "ctrl+b",
+    "selected_text_replace": "ctrl+alt+b",
     "region_to_text": "ctrl+alt+a",
     "region_to_overlay": "ctrl+alt+d",
     "region_to_live": "ctrl+alt+l",
     "region_to_live_frame": "ctrl+alt+f",
-    "fullscreen": "ctrl+alt+x",
     "quit": "ctrl+alt+q",
 }
 
@@ -32,8 +39,10 @@ _OCR_MODELS = {
     "latin_ppocrv5_mobile",
 }
 _OCR_BACKENDS = {"auto", "cpu", "directml", "cuda", "openvino"}
-_TRANSLATORS = {"google", "bing", "llm"}
-_LLM_MODEL_IDS = {model_id for _label, model_id in LLM_MODELS}
+_TRANSLATORS = {"google", "bing", *BUILTIN_AI_IDS}
+_LLM_MODEL_IDS = {
+    model_id for models in BUILTIN_AI_MODEL_IDS.values() for model_id in models
+}
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _HEX_ARGB_COLOR = re.compile(r"^#[0-9a-fA-F]{8}$")
 
@@ -102,12 +111,69 @@ def _font_family(value: Any) -> str:
     return "Yu Gothic"
 
 
+def _clean_models(value: Any) -> list[str]:
+    """Danh sách model id đã làm sạch, giữ thứ tự, bỏ trùng và rỗng."""
+    models: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                cleaned = item.strip()[:128]
+                if cleaned not in models:
+                    models.append(cleaned)
+    return models
+
+
+def _ai_keys(value: Any) -> dict[str, str]:
+    """API key của các provider AI tích hợp khác 'llm' (openai, gemini…)."""
+    keys: dict[str, str] = {}
+    if isinstance(value, dict):
+        for pid, key in value.items():
+            if pid in BUILTIN_AI_IDS and pid != "llm" and isinstance(key, str):
+                keys[pid] = key.strip()[:512]
+    return keys
+
+
+def _custom_providers(value: Any) -> list[dict[str, Any]]:
+    """Provider AI tùy chỉnh hợp lệ: {id, name, endpoint http(s), api_key, models[]}."""
+    providers: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return providers
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("id")
+        if not isinstance(pid, str) or not pid.strip() or pid in seen:
+            continue
+        name = _optional_string(item.get("name"), 64)
+        endpoint = _optional_string(item.get("endpoint"), 2048).rstrip("/")
+        models = _clean_models(item.get("models"))
+        if not name or not endpoint.startswith(("http://", "https://")) or not models:
+            continue
+        seen.add(pid)
+        providers.append(
+            {
+                "id": pid,
+                "name": name,
+                "endpoint": endpoint,
+                "api_key": _optional_string(item.get("api_key"), 512),
+                "models": models,
+            }
+        )
+    return providers
+
+
 class AppConfig:
     """Validated in-memory config với persistence nguyên tử."""
 
     def __init__(self, data: dict[str, Any] | None = None) -> None:
         source = data if isinstance(data, dict) else {}
         self.target_language = _string(source.get("target_language"), "vi")
+        # Ngôn ngữ đích RIÊNG cho "Dịch & thay thế tại chỗ" (Ctrl+Alt+B) — mặc định
+        # tiếng Anh, độc lập với ngôn ngữ đích của các chức năng còn lại.
+        self.replace_target_language = _string(
+            source.get("replace_target_language"), "en"
+        )
         self.ocr_language = _string(source.get("ocr_language"), "jpn+eng")
 
         engine = source.get("ocr_engine")
@@ -125,18 +191,32 @@ class AppConfig:
             backend if isinstance(backend, str) and backend in _OCR_BACKENDS else "auto"
         )
         self.ocr_acceleration = _boolean(source.get("ocr_acceleration"), False)
+        self.custom_providers = _custom_providers(source.get("custom_providers"))
+        custom_ids = {provider["id"] for provider in self.custom_providers}
         translator = source.get("translator")
         self.translator = (
             translator
-            if isinstance(translator, str) and translator in _TRANSLATORS
+            if isinstance(translator, str)
+            and (
+                translator in _TRANSLATORS
+                or (
+                    translator.startswith("custom:")
+                    and translator.split(":", 1)[1] in custom_ids
+                )
+            )
             else "google"
         )
         self.llm_endpoint = _http_endpoint(source.get("llm_endpoint"))
         self.llm_api_key = _optional_string(source.get("llm_api_key"), 512)
+        self.ai_keys = _ai_keys(source.get("ai_keys"))
+        # Model hợp lệ = model tích hợp ∪ mọi model của provider tùy chỉnh.
+        valid_models = _LLM_MODEL_IDS | {
+            model for provider in self.custom_providers for model in provider["models"]
+        }
         llm_model = source.get("llm_model")
         self.llm_model = (
             llm_model
-            if isinstance(llm_model, str) and llm_model in _LLM_MODEL_IDS
+            if isinstance(llm_model, str) and llm_model in valid_models
             else LLM_MODELS[0][1]
         )
 
@@ -181,6 +261,53 @@ class AppConfig:
             for action, default in DEFAULT_HOTKEYS.items()
         }
 
+    def active_provider(self) -> dict[str, Any] | None:
+        """Provider tùy chỉnh đang chọn, hoặc None nếu không phải custom."""
+        if self.translator.startswith("custom:"):
+            pid = self.translator.split(":", 1)[1]
+            for provider in self.custom_providers:
+                if provider["id"] == pid:
+                    return provider
+        return None
+
+    def provider_api_key(self, provider_id: str) -> str:
+        """API key của một provider AI tích hợp ('llm' dùng field riêng)."""
+        if provider_id == "llm":
+            return self.llm_api_key
+        return self.ai_keys.get(provider_id, "")
+
+    def set_provider_api_key(self, provider_id: str, key: str) -> None:
+        if provider_id == "llm":
+            self.llm_api_key = key
+        elif provider_id in BUILTIN_AI_IDS:
+            self.ai_keys[provider_id] = key
+
+    def resolve_llm(self) -> tuple[str, str, str, str]:
+        """(service, endpoint, api_key, model) cho dịch vụ đang chọn.
+
+        - google/bing: service tương ứng, tham số LLM bỏ trống.
+        - Provider AI tích hợp (Translator Box/OpenAI/Gemini): endpoint CỐ ĐỊNH,
+          key + model do người dùng nhập/chọn.
+        - Provider tùy chỉnh: endpoint/key theo provider, model kẹp về danh sách.
+        """
+        if self.translator in ("google", "bing"):
+            return self.translator, "", "", ""
+        if self.translator in BUILTIN_AI_IDS:
+            models = BUILTIN_AI_MODEL_IDS[self.translator]
+            model = self.llm_model if self.llm_model in models else (models[0] if models else "")
+            return (
+                "llm",
+                BUILTIN_AI_ENDPOINTS[self.translator],
+                self.provider_api_key(self.translator),
+                model,
+            )
+        provider = self.active_provider()
+        if provider is not None:
+            models = provider["models"]
+            model = self.llm_model if self.llm_model in models else (models[0] if models else "")
+            return "llm", provider["endpoint"], provider["api_key"], model
+        return "google", "", "", ""
+
     @classmethod
     def load(cls) -> "AppConfig":
         path = config_path()
@@ -193,6 +320,7 @@ class AppConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "target_language": self.target_language,
+            "replace_target_language": self.replace_target_language,
             "ocr_language": self.ocr_language,
             "ocr_engine": self.ocr_engine,
             "ocr_model": self.ocr_model,
@@ -202,6 +330,8 @@ class AppConfig:
             "llm_endpoint": self.llm_endpoint,
             "llm_api_key": self.llm_api_key,
             "llm_model": self.llm_model,
+            "ai_keys": self.ai_keys,
+            "custom_providers": self.custom_providers,
             "auto_update": self.auto_update,
             "skipped_update_version": self.skipped_update_version,
             "live_interval_ms": self.live_interval_ms,
