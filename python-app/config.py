@@ -17,9 +17,38 @@ from constants import (
     LLM_MODELS,
 )
 
+# Bộ kiểu chữ mặc định cho khung dịch: thân trắng lạnh, viền xanh-đen và glow
+# cyan. Viền giữ nét trên nền sáng; thân chữ + glow bật trên nền tối. Đây cũng là
+# giá trị nút "Đặt lại mặc định" ở tab Khung dịch dùng.
+HUD_STYLE_DEFAULTS: dict[str, Any] = {
+    "hud_font_family": "Segoe UI",
+    "hud_font_size": 18,
+    "hud_text_color": "#f8fcff",
+    "hud_border_width": 0.9,
+    "hud_border_color": "#06131f",
+    "hud_background_color": "#00000000",
+    "hud_shadow_radius": 8.0,
+    "hud_shadow_color": "#804bcbff",
+}
+
+# Chỉ dùng để nhận ra chính xác preset mặc định của bản trước. Kiểu do người dùng
+# tự chỉnh không bị ghi đè khi nâng cấp.
+_LEGACY_HUD_STYLE_DEFAULTS: dict[str, Any] = {
+    "hud_font_family": "Segoe UI",
+    "hud_font_size": 18,
+    "hud_text_color": "#ffffff",
+    "hud_border_width": 0.5,
+    "hud_border_color": "#101114",
+    "hud_background_color": "#00000000",
+    "hud_shadow_radius": 6.0,
+    "hud_shadow_color": "#cc000000",
+}
+
 DEFAULT_HOTKEYS = {
     "selected_text": "ctrl+b",
     "selected_text_replace": "alt+b",
+    "clipboard_image_replace": "ctrl+alt+v",
+    "clipboard_image_to_text": "ctrl+alt+t",
     "region_to_text": "ctrl+alt+a",
     "region_to_overlay": "ctrl+alt+d",
     "region_to_live": "ctrl+alt+l",
@@ -108,7 +137,7 @@ def _font_family(value: Any) -> str:
         for family in HUD_FONT_FAMILIES:
             if family.casefold() == requested:
                 return family
-    return "Yu Gothic"
+    return HUD_STYLE_DEFAULTS["hud_font_family"]
 
 
 def _clean_models(value: Any) -> list[str]:
@@ -131,6 +160,17 @@ def _ai_keys(value: Any) -> dict[str, str]:
             if pid in BUILTIN_AI_IDS and pid != "llm" and isinstance(key, str):
                 keys[pid] = key.strip()[:512]
     return keys
+
+def _ai_models(value: Any) -> dict[str, list[str]]:
+    """Model bổ sung do người dùng thêm cho provider AI tích hợp."""
+    models: dict[str, list[str]] = {}
+    if isinstance(value, dict):
+        for provider_id, entries in value.items():
+            if provider_id in BUILTIN_AI_IDS:
+                cleaned = _clean_models(entries)
+                if cleaned:
+                    models[provider_id] = cleaned
+    return models
 
 
 def _custom_providers(value: Any) -> list[dict[str, Any]]:
@@ -209,8 +249,17 @@ class AppConfig:
         self.llm_endpoint = _http_endpoint(source.get("llm_endpoint"))
         self.llm_api_key = _optional_string(source.get("llm_api_key"), 512)
         self.ai_keys = _ai_keys(source.get("ai_keys"))
-        # Model hợp lệ = model tích hợp ∪ mọi model của provider tùy chỉnh.
+        self.ai_models = _ai_models(source.get("ai_models"))
+        if not self.ai_provider_configured(self.translator):
+            self.translator = (
+                self.translator
+                if self.translator in ("google", "bing")
+                else "google"
+            )
+        # Model hợp lệ = model tích hợp ∪ model bổ sung ∪ model provider tùy chỉnh.
         valid_models = _LLM_MODEL_IDS | {
+            model for models in self.ai_models.values() for model in models
+        } | {
             model for provider in self.custom_providers for model in provider["models"]
         }
         llm_model = source.get("llm_model")
@@ -236,15 +285,44 @@ class AppConfig:
             else None
             for key in ("x", "y", "w", "h")
         }
-        self.hud_font_family = _font_family(source.get("hud_font_family"))
-        self.hud_font_size = _bounded_int(source.get("hud_font_size"), 16, 8, 96)
-        self.hud_text_color = _color(source.get("hud_text_color"), "#000000")
-        self.hud_border_width = _bounded_float(
-            source.get("hud_border_width"), 1.0, 0.0, 8.0
+        defaults = HUD_STYLE_DEFAULTS
+        uses_legacy_default = all(
+            source.get(key) == value
+            for key, value in _LEGACY_HUD_STYLE_DEFAULTS.items()
         )
-        self.hud_border_color = _color(source.get("hud_border_color"), "#ffffff")
+        style_source = defaults if uses_legacy_default else source
+        self.hud_font_family = _font_family(
+            style_source.get("hud_font_family", defaults["hud_font_family"])
+        )
+        self.hud_font_size = _bounded_int(
+            style_source.get("hud_font_size"), defaults["hud_font_size"], 8, 96
+        )
+        self.hud_text_color = _color(
+            style_source.get("hud_text_color"), defaults["hud_text_color"]
+        )
+        self.hud_border_width = _bounded_float(
+            style_source.get("hud_border_width"),
+            defaults["hud_border_width"],
+            0.0,
+            8.0,
+        )
+        self.hud_border_color = _color(
+            style_source.get("hud_border_color"), defaults["hud_border_color"]
+        )
         self.hud_background_color = _argb_color(
-            source.get("hud_background_color"), "#00000000"
+            style_source.get("hud_background_color"),
+            defaults["hud_background_color"],
+        )
+        # Glow dùng lại khoá `shadow` trong file config để không làm mất tuỳ chỉnh
+        # đã lưu. Config cũ có kiểu chữ riêng vẫn giữ glow tắt như trước.
+        shadow_default = defaults["hud_shadow_radius"]
+        if "hud_shadow_radius" not in style_source and "hud_text_color" in style_source:
+            shadow_default = 0.0
+        self.hud_shadow_radius = _bounded_float(
+            style_source.get("hud_shadow_radius"), shadow_default, 0.0, 16.0
+        )
+        self.hud_shadow_color = _argb_color(
+            style_source.get("hud_shadow_color"), defaults["hud_shadow_color"]
         )
         self.hud_pinned = _boolean(source.get("hud_pinned"), True)
 
@@ -252,6 +330,16 @@ class AppConfig:
         configured_hotkeys = (
             configured_hotkeys if isinstance(configured_hotkeys, dict) else {}
         )
+        # Bản trước dùng Ctrl+Alt+V cho chế độ ảnh → text. Khi tách thành hai
+        # chức năng, giữ Ctrl+Alt+V cho ảnh đã thay chữ và chuyển text sang phím mới.
+        if (
+            "clipboard_image_replace" not in configured_hotkeys
+            and configured_hotkeys.get("clipboard_image_to_text") == "ctrl+alt+v"
+        ):
+            configured_hotkeys = dict(configured_hotkeys)
+            configured_hotkeys["clipboard_image_to_text"] = DEFAULT_HOTKEYS[
+                "clipboard_image_to_text"
+            ]
         self.hotkeys = {
             action: (
                 configured_hotkeys[action].strip().lower()
@@ -277,10 +365,54 @@ class AppConfig:
         return self.ai_keys.get(provider_id, "")
 
     def set_provider_api_key(self, provider_id: str, key: str) -> None:
+        cleaned = key.strip()[:512]
         if provider_id == "llm":
-            self.llm_api_key = key
+            self.llm_api_key = cleaned
         elif provider_id in BUILTIN_AI_IDS:
-            self.ai_keys[provider_id] = key
+            if cleaned:
+                self.ai_keys[provider_id] = cleaned
+            else:
+                self.ai_keys.pop(provider_id, None)
+
+    def provider_models(self, provider_id: str) -> list[str]:
+        """Danh sách model hiệu lực của provider, giữ thứ tự và bỏ trùng."""
+        if provider_id in BUILTIN_AI_IDS:
+            models = list(BUILTIN_AI_MODEL_IDS[provider_id])
+            for model in self.ai_models.get(provider_id, []):
+                if model not in models:
+                    models.append(model)
+            return models
+        if provider_id.startswith("custom:"):
+            custom_id = provider_id.split(":", 1)[1]
+            for provider in self.custom_providers:
+                if provider["id"] == custom_id:
+                    return list(provider["models"])
+        return []
+
+    def ai_provider_configured(self, provider_id: str) -> bool:
+        """Provider chỉ sẵn sàng chọn model khi đã có API key."""
+        if provider_id in BUILTIN_AI_IDS:
+            return bool(self.provider_api_key(provider_id))
+        if provider_id.startswith("custom:"):
+            custom_id = provider_id.split(":", 1)[1]
+            return any(
+                provider["id"] == custom_id and bool(provider["api_key"])
+                for provider in self.custom_providers
+            )
+        return provider_id in ("google", "bing")
+
+    def configured_ai_provider_ids(self) -> set[str]:
+        configured = {
+            provider_id
+            for provider_id in BUILTIN_AI_IDS
+            if self.ai_provider_configured(provider_id)
+        }
+        configured.update(
+            f"custom:{provider['id']}"
+            for provider in self.custom_providers
+            if provider["api_key"]
+        )
+        return configured
 
     def resolve_llm(self) -> tuple[str, str, str, str]:
         """(service, endpoint, api_key, model) cho dịch vụ đang chọn.
@@ -292,8 +424,10 @@ class AppConfig:
         """
         if self.translator in ("google", "bing"):
             return self.translator, "", "", ""
+        if not self.ai_provider_configured(self.translator):
+            return "google", "", "", ""
         if self.translator in BUILTIN_AI_IDS:
-            models = BUILTIN_AI_MODEL_IDS[self.translator]
+            models = self.provider_models(self.translator)
             model = self.llm_model if self.llm_model in models else (models[0] if models else "")
             return (
                 "llm",
@@ -331,6 +465,7 @@ class AppConfig:
             "llm_api_key": self.llm_api_key,
             "llm_model": self.llm_model,
             "ai_keys": self.ai_keys,
+            "ai_models": self.ai_models,
             "custom_providers": self.custom_providers,
             "auto_update": self.auto_update,
             "skipped_update_version": self.skipped_update_version,
@@ -342,6 +477,8 @@ class AppConfig:
             "hud_border_width": self.hud_border_width,
             "hud_border_color": self.hud_border_color,
             "hud_background_color": self.hud_background_color,
+            "hud_shadow_radius": self.hud_shadow_radius,
+            "hud_shadow_color": self.hud_shadow_color,
             "hud_pinned": self.hud_pinned,
             "hotkeys": self.hotkeys,
         }

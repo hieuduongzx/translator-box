@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -38,27 +39,45 @@ from ocr_runtime import (
     model_installed,
     model_spec,
 )
+from config import DEFAULT_HOTKEYS, HUD_STYLE_DEFAULTS
 from constants import (
-    ADD_PROVIDER_KEY,
     BUILTIN_AI_BY_ID,
     BUILTIN_AI_IDS,
-    BUILTIN_AI_MODEL_IDS,
     HOTKEY_ACTIONS,
     HUD_FONT_OPTIONS,
     LANGUAGES,
-    LLM_MODELS,
     LLM_REGISTRATION_URL,
     OCR_ENGINE_DESCRIPTIONS,
     OCR_ENGINES,
     OCR_LANGUAGES,
-    TRANSLATORS,
+    bar_service_key,
+    bar_translator_entries,
+    parse_bar_service_key,
 )
-from ui_utils import _enable_dark_titlebar, _fmt_hotkey, _render_icon_pixmap
+from theme import TOKENS
+from ui_utils import (
+    _brand_pixmap,
+    _enable_dark_titlebar,
+    _fmt_hotkey,
+    _nav_icon,
+)
 from version import APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO
-from widgets import ColorButton, HotkeyEdit
+from widgets import Card, CheckerFrame, ColorButton, HotkeyEdit, HudTextView
 
 if TYPE_CHECKING:
     from hud_window import HUDWindow
+
+# Nhóm cài đặt bên trái: (nhãn, icon, mô tả trang).
+NAV_SECTIONS = (
+    ("Dịch", "globe", "Chọn dịch vụ và ngôn ngữ nhận kết quả."),
+    ("Dịch vụ AI", "ai", "API key, model và provider OpenAI-compatible."),
+    ("OCR", "scan", "Engine, mô hình và thiết bị xử lý nhận dạng ngoại tuyến."),
+    ("Khung dịch", "type", "Kiểu chữ và màu của bản dịch hiện trên màn hình."),
+    ("Phím tắt", "keyboard", "Tổ hợp phím toàn cục cho từng lệnh dịch."),
+    ("Giới thiệu", "info", "Phiên bản, cập nhật và mã nguồn."),
+)
+
+PREVIEW_SAMPLE = "Xin chào · Hello · こんにちは"
 
 
 def available_hud_font_options(
@@ -75,6 +94,34 @@ def available_hud_font_options(
     return available or list(HUD_FONT_OPTIONS[:3])
 
 
+def _link_label(url: str, text: str) -> QLabel:
+    """Nhãn dạng link mở bằng trình duyệt hệ thống."""
+    label = QLabel(f'<a href="{url}" style="color:{TOKENS["ACCENT_HI"]};">{text}</a>')
+    label.setObjectName("link")
+    label.setOpenExternalLinks(True)
+    label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+    return label
+
+
+def _kbd(combo: str) -> QLabel:
+    """Chip hiển thị tổ hợp phím."""
+    label = QLabel(_fmt_hotkey(combo))
+    label.setObjectName("kbd")
+    return label
+
+
+def _button_row(*buttons: QWidget) -> QWidget:
+    """Hàng nút căn trái, dùng cho các khối trong thẻ."""
+    holder = QWidget()
+    layout = QHBoxLayout(holder)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+    for button in buttons:
+        layout.addWidget(button)
+    layout.addStretch(1)
+    return holder
+
+
 class ProviderDialog(QDialog):
     """Tạo/sửa một provider AI tùy chỉnh: tên, endpoint, API key, nhiều model."""
 
@@ -83,11 +130,22 @@ class ProviderDialog(QDialog):
         source = provider or {}
         self.setObjectName("settingsRoot")
         self.setWindowTitle("Sửa provider" if provider else "Thêm provider tùy chỉnh")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(500)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        heading = QLabel("Provider OpenAI-compatible")
+        heading.setObjectName("pageTitle")
+        subtitle = QLabel(
+            "Bất kỳ endpoint theo chuẩn OpenAI đều dùng được — OpenRouter, "
+            "LM Studio, Ollama, proxy nội bộ…"
+        )
+        subtitle.setObjectName("pageSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(subtitle)
+
         form = QFormLayout()
         form.setSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -97,7 +155,7 @@ class ProviderDialog(QDialog):
         self.endpoint_edit.setPlaceholderText("http://host:port/v1")
         self.key_edit = QLineEdit(source.get("api_key", ""))
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_edit.setPlaceholderText("API key (tùy chọn)")
+        self.key_edit.setPlaceholderText("API key (cần để hiện model ở tab Dịch)")
         self.key_edit.setClearButtonEnabled(True)
         form.addRow("Tên", self.name_edit)
         form.addRow("Endpoint", self.endpoint_edit)
@@ -120,6 +178,7 @@ class ProviderDialog(QDialog):
         add_button = QPushButton("Thêm model")
         add_button.clicked.connect(self._add_model)
         remove_button = QPushButton("Xóa model")
+        remove_button.setObjectName("ghost")
         remove_button.clicked.connect(self._remove_model)
         add_row.addWidget(self.model_input, 1)
         add_row.addWidget(add_button)
@@ -191,11 +250,12 @@ class SettingsWindow(QWidget):
         self.setWindowIcon(hud.app_icon)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.resize(820, 700)
-        self.setMinimumSize(700, 560)
+        self.resize(960, 740)
+        self.setMinimumSize(820, 620)
         self._build_ui()
         _enable_dark_titlebar(self)
 
+    # ----------------------------------------------------------------- helpers
     @staticmethod
     def _combo(
         options: list[tuple[str, str]], selected_code: str, on_change: Callable
@@ -209,53 +269,60 @@ class SettingsWindow(QWidget):
         return combo
 
     @staticmethod
-    def _surface() -> tuple[QFrame, QFormLayout]:
-        frame = QFrame()
-        frame.setObjectName("surface")
-        form = QFormLayout(frame)
-        form.setContentsMargins(14, 12, 14, 12)
-        form.setSpacing(12)
-        form.setHorizontalSpacing(16)
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        return frame, form
+    def _divider(vertical: bool = False) -> QFrame:
+        line = QFrame()
+        line.setObjectName("vDivider" if vertical else "divider")
+        if vertical:
+            line.setFixedWidth(1)
+        else:
+            line.setFixedHeight(1)
+        return line
 
+    # -------------------------------------------------------------------- shell
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(22, 18, 22, 12)
-        header.setSpacing(10)
-        mark = QLabel()
-        mark.setPixmap(_render_icon_pixmap(26))
-        mark.setFixedSize(26, 26)
-        wordmark = QLabel(APP_NAME)
-        wordmark.setObjectName("brandWordmark")
-        version_tag = QLabel(APP_VERSION)
-        version_tag.setObjectName("brandVersion")
-        header.addWidget(mark)
-        header.addWidget(wordmark)
-        header.addWidget(version_tag)
-        header.addStretch(1)
-        root.addLayout(header)
-
-        content = QHBoxLayout()
-        content.setContentsMargins(14, 4, 14, 14)
-        content.setSpacing(14)
+        sidebar = QFrame()
+        sidebar.setObjectName("settingsSidebar")
+        sidebar.setFixedWidth(212)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(16, 18, 14, 16)
+        sidebar_layout.setSpacing(0)
+        sidebar_layout.addWidget(self._build_header())
+        sidebar_layout.addSpacing(26)
+        section_label = QLabel("CẤU HÌNH")
+        section_label.setObjectName("sidebarLabel")
+        sidebar_layout.addWidget(section_label)
+        sidebar_layout.addSpacing(8)
 
         self.navigation = QListWidget()
         self.navigation.setObjectName("settingsNav")
-        self.navigation.setFixedWidth(168)
         self.navigation.setAccessibleName("Nhóm cài đặt")
+        self.navigation.setIconSize(QSize(17, 17))
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label in ("Dịch", "OCR", "Khung dịch", "Phím tắt", "Giới thiệu"):
-            self.navigation.addItem(label)
+        for label, icon_kind, description in NAV_SECTIONS:
+            item = QListWidgetItem(_nav_icon(icon_kind), label)
+            item.setToolTip(description)
+            self.navigation.addItem(item)
+        navigation_height = sum(
+            self.navigation.sizeHintForRow(row)
+            for row in range(self.navigation.count())
+        )
+        self.navigation.setFixedHeight(
+            navigation_height + self.navigation.frameWidth() * 2
+        )
+        sidebar_layout.addWidget(self.navigation)
+        sidebar_layout.addStretch(1)
+        sidebar_layout.addWidget(self._build_footer())
 
         self.pages = QStackedWidget()
         self.pages.setObjectName("settingsPages")
         for page in (
             self._build_translation_page(),
+            self._build_ai_page(),
             self._build_ocr_page(),
             self._build_hud_page(),
             self._build_hotkeys_page(),
@@ -265,10 +332,51 @@ class SettingsWindow(QWidget):
         self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.navigation.setCurrentRow(0)
 
-        content.addWidget(self.navigation)
-        content.addWidget(self.pages, 1)
+        content = QVBoxLayout()
+        content.setContentsMargins(26, 22, 24, 18)
+        content.addWidget(self.pages)
+        root.addWidget(sidebar)
         root.addLayout(content, 1)
         self._update_engine_info()
+
+    def _build_header(self) -> QWidget:
+        header = QWidget()
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(2, 0, 0, 0)
+        layout.setSpacing(7)
+        brand = QWidget()
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(9)
+        mark = QLabel()
+        mark.setPixmap(_brand_pixmap(28))
+        mark.setFixedSize(28, 28)
+        wordmark = QLabel(APP_NAME)
+        wordmark.setObjectName("brandWordmark")
+        brand_layout.addWidget(mark)
+        brand_layout.addWidget(wordmark)
+        brand_layout.addStretch(1)
+        version_tag = QLabel(APP_VERSION)
+        version_tag.setObjectName("brandVersion")
+        version_tag.setToolTip("Phiên bản đang chạy")
+        layout.addWidget(brand)
+        layout.addWidget(version_tag, 0, Qt.AlignLeft)
+        return header
+
+    def _build_footer(self) -> QWidget:
+        footer = QWidget()
+        layout = QVBoxLayout(footer)
+        layout.setContentsMargins(2, 0, 0, 0)
+        layout.setSpacing(10)
+        hint = QLabel("Tự động lưu · Phím tắt cần bấm Lưu")
+        hint.setObjectName("sidebarHint")
+        hint.setWordWrap(True)
+        close_button = QPushButton("Đóng cửa sổ")
+        close_button.setObjectName("ghost")
+        close_button.clicked.connect(self.hide)
+        layout.addWidget(hint)
+        layout.addWidget(close_button)
+        return footer
 
     @staticmethod
     def _page(title: str, description: str) -> tuple[QScrollArea, QVBoxLayout]:
@@ -279,122 +387,199 @@ class SettingsWindow(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(8, 4, 8, 12)
+        layout.setContentsMargins(0, 0, 10, 18)
         layout.setSpacing(12)
         heading = QLabel(title)
-        heading.setObjectName("tabTitle")
+        heading.setObjectName("pageTitle")
         summary = QLabel(description)
-        summary.setObjectName("tabDescription")
+        summary.setObjectName("pageSubtitle")
         summary.setWordWrap(True)
         layout.addWidget(heading)
         layout.addWidget(summary)
-        layout.addSpacing(4)
+        layout.addSpacing(6)
         scroll.setWidget(body)
         return scroll, layout
 
+    # ---------------------------------------------------------------- trang Dịch
     def _build_translation_page(self) -> QScrollArea:
-        page, layout = self._page(
-            "Dịch",
-            "Chọn dịch vụ và ngôn ngữ nhận kết quả.",
+        page, layout = self._page("Dịch", NAV_SECTIONS[0][2])
+
+        service_card = Card(
+            "Model & ngôn ngữ",
+            "Chọn trực tiếp model đã sẵn sàng; provider chưa có API key sẽ bị ẩn.",
         )
-        translate_frame, translate_form = self._surface()
         self.service_box = QComboBox()
+        self.service_box.setAccessibleName("Model hoặc dịch vụ dịch")
         self.service_box.setToolTip(
-            "Google/Bing dịch nhanh; Translator Box và provider tùy chỉnh dùng AI."
+            "Google/Bing luôn khả dụng; model AI chỉ hiện sau khi provider có API key."
         )
         self._populate_service_box()
         self.service_box.currentIndexChanged.connect(self._on_service_selected)
         self.target_box = self._combo(
             LANGUAGES, self.config.target_language, self._on_target_changed
         )
-        translate_form.addRow("Dịch vụ", self.service_box)
-        translate_form.addRow("Ngôn ngữ đích", self.target_box)
-        layout.addWidget(translate_frame)
+        service_card.add_row(
+            "Model dịch",
+            self.service_box,
+            "Mỗi model là một lựa chọn riêng; cấu hình provider ở tab Dịch vụ AI.",
+        )
+        service_card.add_row("Ngôn ngữ đích", self.target_box)
+        layout.addWidget(service_card)
 
-        replace_hotkey = _fmt_hotkey(self.config.hotkeys.get("selected_text_replace", ""))
-        replace_heading = QLabel(f"Dịch & thay thế tại chỗ ({replace_hotkey})")
-        replace_heading.setObjectName("fieldLabel")
-        layout.addWidget(replace_heading)
-        replace_frame, replace_form = self._surface()
+        replace_combo = self.config.hotkeys.get("selected_text_replace", "")
+        replace_card = Card(
+            "Dịch & thay thế tại chỗ",
+            "Bôi đen văn bản trong ứng dụng khác rồi dán đè bằng bản dịch.",
+            trailing=_kbd(replace_combo),
+        )
         self.replace_target_box = self._combo(
             LANGUAGES,
             self.config.replace_target_language,
             self._on_replace_target_changed,
         )
-        replace_hint = QLabel(
-            "Ngôn ngữ đích riêng khi bôi đen rồi thay thế văn bản — độc lập với "
-            "“Ngôn ngữ đích” ở trên. Dùng chung dịch vụ/provider đang chọn."
+        replace_card.add_row(
+            "Ngôn ngữ khi thay thế",
+            self.replace_target_box,
+            "Độc lập với “Ngôn ngữ đích” ở trên; dùng chung dịch vụ đang chọn.",
         )
-        replace_hint.setObjectName("engineHint")
-        replace_hint.setWordWrap(True)
-        replace_form.addRow("Ngôn ngữ khi thay thế", self.replace_target_box)
-        replace_form.addRow("", replace_hint)
-        layout.addWidget(replace_frame)
+        layout.addWidget(replace_card)
 
-        self.llm_frame, llm_form = self._surface()
-        self.llm_endpoint_edit = QLineEdit(self.config.llm_endpoint)
+        layout.addStretch(1)
+        return page
+
+    # ---------------------------------------------------------- trang Dịch vụ AI
+    def _build_ai_page(self) -> QScrollArea:
+        page, layout = self._page("Dịch vụ AI", NAV_SECTIONS[1][2])
+
+        self.ai_provider_state = QLabel()
+        self.ai_provider_state.setObjectName("aiProviderStatus")
+        provider_card = Card(
+            "Provider & API key",
+            "Chỉ provider đã có API key mới hiện model trong tab Dịch.",
+            trailing=self.ai_provider_state,
+        )
+        self.ai_provider_box = QComboBox()
+        self.ai_provider_box.setAccessibleName("Provider AI cần cấu hình")
+        self._populate_ai_provider_box()
+        self.ai_provider_box.currentIndexChanged.connect(self._on_ai_provider_selected)
+        provider_card.add_row(
+            "Provider AI",
+            self.ai_provider_box,
+            "Chọn provider để xem API key, endpoint và model tương ứng.",
+            control_width=280,
+        )
+        self.activate_ai_btn = QPushButton("Dùng model đã chọn")
+        self.activate_ai_btn.setObjectName("primary")
+        self.activate_ai_btn.clicked.connect(self._activate_ai_provider)
+        self.add_provider_btn = QPushButton("Thêm provider")
+        self.add_provider_btn.clicked.connect(self._add_provider)
+        provider_card.add_block(
+            _button_row(self.activate_ai_btn, self.add_provider_btn)
+        )
+        layout.addWidget(provider_card)
+
+        self.llm_frame = Card(
+            "Kết nối & model",
+            "Xem kết nối, chọn model hoặc thêm model ID riêng cho provider.",
+        )
+        self.llm_endpoint_edit = QLineEdit()
         self.llm_endpoint_edit.setReadOnly(True)
-        self.llm_key_edit = QLineEdit(self.config.llm_api_key)
+        self.llm_key_edit = QLineEdit()
         self.llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.llm_key_edit.setPlaceholderText("Nhập API key sau khi đăng ký")
+        self.llm_key_edit.setPlaceholderText(
+            "Nhập API key để model xuất hiện ở tab Dịch"
+        )
         self.llm_key_edit.setClearButtonEnabled(True)
         self.llm_key_edit.editingFinished.connect(self._on_key_changed)
         self.llm_model_box = QComboBox()
-        for label, model_id in LLM_MODELS:
-            self.llm_model_box.addItem(label, model_id)
-        model_index = self.llm_model_box.findData(self.config.llm_model)
-        self.llm_model_box.setCurrentIndex(max(0, model_index))
         self.llm_model_box.currentIndexChanged.connect(self._on_model_changed)
-        self.llm_registration_link = QLabel(
-            f'<a href="{LLM_REGISTRATION_URL}">'
-            '<span style="color:#a5b4fc;">'
-            "Đăng ký tài khoản và lấy API key</span></a>"
+        self.llm_registration_link = _link_label(
+            LLM_REGISTRATION_URL, "Đăng ký tài khoản và lấy API key →"
         )
         self.llm_registration_link.setObjectName("llmRegistration")
-        self.llm_registration_link.setOpenExternalLinks(True)
-        self.llm_registration_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        manage_row = QHBoxLayout()
-        manage_row.setContentsMargins(0, 0, 0, 0)
-        manage_row.setSpacing(8)
         self.provider_edit_btn = QPushButton("Chỉnh sửa provider")
         self.provider_edit_btn.clicked.connect(self._edit_provider)
         self.provider_delete_btn = QPushButton("Xóa provider")
+        self.provider_delete_btn.setObjectName("danger")
         self.provider_delete_btn.clicked.connect(self._delete_provider)
-        manage_row.addWidget(self.provider_edit_btn)
-        manage_row.addWidget(self.provider_delete_btn)
-        manage_row.addStretch(1)
-        self.provider_manage_widget = QWidget()
-        self.provider_manage_widget.setLayout(manage_row)
-        llm_form.addRow("Endpoint", self.llm_endpoint_edit)
-        llm_form.addRow("API key", self.llm_key_edit)
-        llm_form.addRow("Model", self.llm_model_box)
-        llm_form.addRow("", self.llm_registration_link)
-        llm_form.addRow("", self.provider_manage_widget)
+        self.provider_manage_widget = _button_row(
+            self.provider_edit_btn, self.provider_delete_btn
+        )
+        self.llm_frame.add_row("Endpoint", self.llm_endpoint_edit, control_width=300)
+        self.llm_frame.add_row("API key", self.llm_key_edit, control_width=300)
+        self.llm_frame.add_row("Model", self.llm_model_box, control_width=300)
+        self.model_id_input = QLineEdit()
+        self.model_id_input.setPlaceholderText("Model ID, vd: gpt-4.1-mini")
+        self.model_id_input.returnPressed.connect(self._add_ai_model)
+        self.add_ai_model_btn = QPushButton("Thêm model")
+        self.add_ai_model_btn.clicked.connect(self._add_ai_model)
+        self.remove_ai_model_btn = QPushButton("Xóa model")
+        self.remove_ai_model_btn.setObjectName("ghost")
+        self.remove_ai_model_btn.clicked.connect(self._remove_ai_model)
+        model_actions = QWidget()
+        model_actions_layout = QHBoxLayout(model_actions)
+        model_actions_layout.setContentsMargins(0, 0, 0, 0)
+        model_actions_layout.setSpacing(8)
+        model_actions_layout.addWidget(self.model_id_input, 1)
+        model_actions_layout.addWidget(self.add_ai_model_btn)
+        model_actions_layout.addWidget(self.remove_ai_model_btn)
+        self.llm_frame.add_block(model_actions)
+        self.llm_frame.add_block(self.llm_registration_link)
+        self.llm_frame.add_block(self.provider_manage_widget)
         layout.addWidget(self.llm_frame)
         self._update_llm_controls()
         layout.addStretch(1)
         return page
 
-    def _populate_service_box(self) -> None:
-        """Google/Bing/Translator Box + provider tùy chỉnh + mục thêm mới."""
-        box = self.service_box
+    def _populate_ai_provider_box(self, selected: str | None = None) -> None:
+        box = self.ai_provider_box
+        current = selected or box.currentData()
+        if current is None and (
+            self.config.translator in BUILTIN_AI_IDS
+            or self.config.translator.startswith("custom:")
+        ):
+            current = self.config.translator
         box.blockSignals(True)
         box.clear()
-        for label, code in TRANSLATORS:
-            box.addItem(label, code)
+        for provider_id in BUILTIN_AI_IDS:
+            box.addItem(BUILTIN_AI_BY_ID[provider_id]["name"], provider_id)
         for provider in self.config.custom_providers:
             box.addItem(provider["name"], f"custom:{provider['id']}")
-        box.addItem("＋ Thêm provider tùy chỉnh…", ADD_PROVIDER_KEY)
-        index = box.findData(self.config.translator)
-        box.setCurrentIndex(max(0, index))
+        index = box.findData(current)
+        box.setCurrentIndex(index if index >= 0 else 0)
         box.blockSignals(False)
 
-    def _build_ocr_page(self) -> QScrollArea:
-        page, layout = self._page(
-            "OCR",
-            "Chọn engine, mô hình và thiết bị xử lý nhận dạng ngoại tuyến.",
+    def _configured_service_entries(self) -> list[tuple[str, str]]:
+        models = {
+            provider_id: self.config.provider_models(provider_id)
+            for provider_id in BUILTIN_AI_IDS
+        }
+        return bar_translator_entries(
+            self.config.custom_providers,
+            builtin_models=models,
+            enabled_providers=self.config.configured_ai_provider_ids(),
         )
-        ocr_frame, ocr_form = self._surface()
+
+    def _populate_service_box(self) -> None:
+        """Google/Bing + từng model thuộc provider đã có API key."""
+        box = self.service_box
+        selected = bar_service_key(self.config.translator, self.config.llm_model)
+        box.blockSignals(True)
+        box.clear()
+        for label, key in self._configured_service_entries():
+            box.addItem(label, key)
+        index = box.findData(selected)
+        box.setCurrentIndex(index if index >= 0 else 0)
+        box.blockSignals(False)
+
+    # ----------------------------------------------------------------- trang OCR
+    def _build_ocr_page(self) -> QScrollArea:
+        page, layout = self._page("OCR", NAV_SECTIONS[2][2])
+
+        ocr_card = Card(
+            "Nhận dạng ký tự",
+            "Ảnh chụp vùng được xử lý ngay trên máy, không gửi lên dịch vụ nào.",
+        )
         self.engine_box = self._combo(
             OCR_ENGINES, self.config.ocr_engine, self._on_ocr_changed
         )
@@ -411,8 +596,9 @@ class SettingsWindow(QWidget):
         self.backend_box = self._combo(
             list(OCR_BACKENDS), self.config.ocr_backend, self._on_ocr_changed
         )
-        self.acceleration_check = QCheckBox("Sử dụng GPU / OpenVINO")
+        self.acceleration_check = QCheckBox()
         self.acceleration_check.setChecked(self.config.ocr_acceleration)
+        self.acceleration_check.setAccessibleName("Sử dụng GPU / OpenVINO")
         self.acceleration_check.setToolTip(
             "Tắt để luôn dùng CPU. Bật để cho phép backend tăng tốc đã chọn."
         )
@@ -420,16 +606,23 @@ class SettingsWindow(QWidget):
         self.ocr_box = self._combo(
             OCR_LANGUAGES, self.config.ocr_language, self._on_ocr_changed
         )
-        ocr_form.addRow("Engine", self.engine_box)
-        ocr_form.addRow("Mô hình", self.model_box)
-        ocr_form.addRow("Tăng tốc", self.acceleration_check)
-        ocr_form.addRow("Backend tăng tốc", self.backend_box)
-        ocr_form.addRow("Ngôn ngữ", self.ocr_box)
-        layout.addWidget(ocr_frame)
+        ocr_card.add_row("Engine", self.engine_box)
+        ocr_card.add_row("Mô hình", self.model_box)
+        ocr_card.add_row("Ngôn ngữ nguồn", self.ocr_box)
+        ocr_card.add_row(
+            "Tăng tốc phần cứng",
+            self.acceleration_check,
+            "Tắt để luôn chạy trên CPU — ổn định nhất.",
+            control_width=0,
+        )
+        ocr_card.add_row("Backend tăng tốc", self.backend_box)
+        layout.addWidget(ocr_card)
 
         engine_info = QFrame()
         engine_info.setObjectName("engineInfo")
         info_layout = QHBoxLayout(engine_info)
+        info_layout.setContentsMargins(15, 13, 15, 13)
+        info_layout.setSpacing(12)
         self.engine_badge = QLabel()
         self.engine_badge.setObjectName("engineBadge")
         self.engine_hint = QLabel()
@@ -442,8 +635,8 @@ class SettingsWindow(QWidget):
         model_meta = QFrame()
         model_meta.setObjectName("modelMeta")
         model_meta_layout = QVBoxLayout(model_meta)
-        model_meta_layout.setContentsMargins(12, 10, 12, 10)
-        model_meta_layout.setSpacing(5)
+        model_meta_layout.setContentsMargins(15, 13, 15, 13)
+        model_meta_layout.setSpacing(7)
         self.model_title = QLabel()
         self.model_title.setObjectName("modelTitle")
         self.model_metrics = QLabel()
@@ -452,27 +645,39 @@ class SettingsWindow(QWidget):
         self.model_languages = QLabel()
         self.model_languages.setObjectName("modelLanguages")
         self.model_languages.setWordWrap(True)
-        model_action_row = QHBoxLayout()
-        model_action_row.setContentsMargins(0, 4, 0, 0)
         self.model_download_button = QPushButton("Tải mô hình")
         self.model_download_button.setObjectName("modelDownload")
         self.model_download_button.clicked.connect(self._download_selected_model)
-        model_action_row.addWidget(self.model_download_button)
-        model_action_row.addStretch(1)
         model_meta_layout.addWidget(self.model_title)
         model_meta_layout.addWidget(self.model_metrics)
         model_meta_layout.addWidget(self.model_languages)
-        model_meta_layout.addLayout(model_action_row)
+        model_meta_layout.addSpacing(2)
+        model_meta_layout.addWidget(_button_row(self.model_download_button))
         layout.addWidget(model_meta)
         layout.addStretch(1)
         return page
 
+    # ---------------------------------------------------------- trang Khung dịch
     def _build_hud_page(self) -> QScrollArea:
-        page, layout = self._page(
-            "Khung dịch",
-            "Kiểu chữ và màu được áp dụng trực tiếp lên nội dung bản dịch.",
+        page, layout = self._page("Khung dịch", NAV_SECTIONS[3][2])
+
+        preview_card = Card(
+            "Xem trước",
+            "Nền bàn cờ chỉ để minh hoạ phần trong suốt — khi dùng thật bạn sẽ "
+            "thấy desktop phía sau.",
         )
-        hud_frame, hud_form = self._surface()
+        preview_surface = CheckerFrame()
+        preview_surface.setMinimumHeight(96)
+        preview_layout = QVBoxLayout(preview_surface)
+        preview_layout.setContentsMargins(14, 12, 14, 12)
+        self.preview_view = HudTextView()
+        self.preview_view.setMinimumHeight(64)
+        self.preview_view.setText(PREVIEW_SAMPLE)
+        preview_layout.addWidget(self.preview_view)
+        preview_card.add_block(preview_surface)
+        layout.addWidget(preview_card)
+
+        text_card = Card("Chữ")
         self.font_family_box = QComboBox()
         self.font_family_box.setAccessibleName("Font chữ cho bản dịch")
         self.font_family_box.setToolTip(
@@ -491,109 +696,174 @@ class SettingsWindow(QWidget):
         self.font_size_spin.setRange(8, 96)
         self.font_size_spin.setValue(self.config.hud_font_size)
         self.font_size_spin.setSuffix(" pt")
+        self.text_color_btn = ColorButton(self.config.hud_text_color)
+        text_card.add_row(
+            "Font chữ",
+            self.font_family_box,
+            "Chọn font có glyph cho ngôn ngữ đích để tránh ô vuông.",
+            control_width=240,
+        )
+        text_card.add_row("Cỡ chữ", self.font_size_spin, control_width=110)
+        text_card.add_row("Màu chữ", self.text_color_btn, control_width=0)
+        layout.addWidget(text_card)
+
+        edge_card = Card(
+            "Viền, glow & nền",
+            "Viền tối giữ nét trên nền sáng; glow cyan làm chữ bật trên nền tối.",
+        )
         self.border_width_spin = QDoubleSpinBox()
         self.border_width_spin.setRange(0.0, 8.0)
         self.border_width_spin.setDecimals(1)
         self.border_width_spin.setSingleStep(0.1)
         self.border_width_spin.setValue(self.config.hud_border_width)
         self.border_width_spin.setSuffix(" px")
-        self.text_color_btn = ColorButton(self.config.hud_text_color)
         self.border_color_btn = ColorButton(self.config.hud_border_color)
+        self.shadow_radius_spin = QDoubleSpinBox()
+        self.shadow_radius_spin.setRange(0.0, 16.0)
+        self.shadow_radius_spin.setDecimals(1)
+        self.shadow_radius_spin.setSingleStep(0.5)
+        self.shadow_radius_spin.setValue(self.config.hud_shadow_radius)
+        self.shadow_radius_spin.setSuffix(" px")
+        self.shadow_radius_spin.setToolTip("0 px = tắt glow chữ")
+        self.shadow_color_btn = ColorButton(
+            self.config.hud_shadow_color, allow_alpha=True
+        )
         self.background_color_btn = ColorButton(
             self.config.hud_background_color, allow_alpha=True
         )
+        edge_card.add_row("Độ dày viền", self.border_width_spin, control_width=110)
+        edge_card.add_row("Màu viền", self.border_color_btn, control_width=0)
+        edge_card.add_row(
+            "Độ rộng glow",
+            self.shadow_radius_spin,
+            "Quầng sáng mềm quanh chữ · 0 px là tắt.",
+            control_width=110,
+        )
+        edge_card.add_row("Màu glow", self.shadow_color_btn, control_width=0)
+        edge_card.add_row(
+            "Màu nền",
+            self.background_color_btn,
+            "Để trong suốt nếu muốn chỉ thấy chữ nổi trên desktop.",
+            control_width=0,
+        )
+        layout.addWidget(edge_card)
+
         self.font_family_box.currentIndexChanged.connect(self._on_hud_style_changed)
         self.font_size_spin.valueChanged.connect(self._on_hud_style_changed)
         self.border_width_spin.valueChanged.connect(self._on_hud_style_changed)
-        self.text_color_btn.picked.connect(self._on_hud_style_changed)
-        self.border_color_btn.picked.connect(self._on_hud_style_changed)
-        self.background_color_btn.picked.connect(self._on_hud_style_changed)
-        self.text_color_btn.previewed.connect(self._preview_hud_style)
-        self.border_color_btn.previewed.connect(self._preview_hud_style)
-        self.background_color_btn.previewed.connect(self._preview_hud_style)
-        hud_form.addRow("Font chữ", self.font_family_box)
-        hud_form.addRow("Cỡ chữ", self.font_size_spin)
-        hud_form.addRow("Màu chữ", self.text_color_btn)
-        hud_form.addRow("Viền chữ", self.border_width_spin)
-        hud_form.addRow("Màu viền", self.border_color_btn)
-        hud_form.addRow("Màu nền", self.background_color_btn)
-        layout.addWidget(hud_frame)
+        self.shadow_radius_spin.valueChanged.connect(self._on_hud_style_changed)
+        for button in (
+            self.text_color_btn,
+            self.border_color_btn,
+            self.shadow_color_btn,
+            self.background_color_btn,
+        ):
+            button.picked.connect(self._on_hud_style_changed)
+            button.previewed.connect(self._preview_hud_style)
+
+        reset_button = QPushButton("Đặt lại mặc định")
+        reset_button.setObjectName("ghost")
+        reset_button.setToolTip(
+            "Trả về chữ trắng lạnh · viền xanh-đen · glow cyan — rõ trên nền sáng và tối."
+        )
+        reset_button.clicked.connect(self._reset_hud_style)
+        layout.addWidget(_button_row(reset_button))
+        self._sync_preview()
         layout.addStretch(1)
         return page
 
+    # ----------------------------------------------------------- trang Phím tắt
     def _build_hotkeys_page(self) -> QScrollArea:
-        page, layout = self._page(
-            "Phím tắt",
-            "Ghi tổ hợp phím toàn cục. Nhấn Del trong một ô để tắt phím đó.",
+        page, layout = self._page("Phím tắt", NAV_SECTIONS[4][2])
+
+        card = Card(
+            "Tổ hợp phím toàn cục",
+            "Bấm vào ô rồi nhấn tổ hợp phím · Del để tắt · Esc để huỷ.",
         )
-        hint = QLabel("Bấm vào ô rồi nhấn tổ hợp phím. Del để tắt phím đó.")
-        hint.setObjectName("muted")
-        layout.addWidget(hint)
-        hotkey_frame = QFrame()
-        hotkey_frame.setObjectName("surface")
-        hotkey_layout = QVBoxLayout(hotkey_frame)
         self.hotkey_edits: dict[str, HotkeyEdit] = {}
         for label, action in HOTKEY_ACTIONS:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label), 1)
             edit = HotkeyEdit(self.config.hotkeys.get(action, ""))
-            edit.setMinimumWidth(160)
+            edit.setFixedWidth(178)
+            edit.changed.connect(self._mark_hotkey_conflicts)
             self.hotkey_edits[action] = edit
-            row.addWidget(edit)
-            hotkey_layout.addLayout(row)
-        layout.addWidget(hotkey_frame)
+            card.add_row(label, edit, control_width=0)
+        layout.addWidget(card)
+
+        self.hotkey_warning = QLabel("")
+        self.hotkey_warning.setObjectName("stateBadge")
+        self.hotkey_warning.setProperty("state", "missing")
+        self.hotkey_warning.setVisible(False)
+        layout.addWidget(self.hotkey_warning)
 
         save_button = QPushButton("Lưu phím tắt")
         save_button.setObjectName("primary")
         save_button.clicked.connect(self._apply_hotkeys)
-        layout.addWidget(save_button, alignment=Qt.AlignLeft)
+        reset_button = QPushButton("Đặt lại mặc định")
+        reset_button.setObjectName("ghost")
+        reset_button.clicked.connect(self._reset_hotkeys)
+        layout.addWidget(_button_row(save_button, reset_button))
         layout.addStretch(1)
         return page
 
+    # ---------------------------------------------------------- trang Giới thiệu
     def _build_about_page(self) -> QScrollArea:
-        page, layout = self._page(
-            "Giới thiệu",
-            f"{APP_NAME} {APP_VERSION} · kho mã {GITHUB_REPO}.",
-        )
+        page, layout = self._page("Giới thiệu", NAV_SECTIONS[5][2])
 
-        update_frame = QFrame()
-        update_frame.setObjectName("surface")
-        update_layout = QVBoxLayout(update_frame)
-        update_layout.setContentsMargins(16, 14, 16, 14)
-        update_layout.setSpacing(10)
+        about_card = Card()
+        identity = QWidget()
+        identity_layout = QHBoxLayout(identity)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(14)
+        mark = QLabel()
+        mark.setPixmap(_brand_pixmap(44))
+        mark.setFixedSize(44, 44)
+        texts = QVBoxLayout()
+        texts.setContentsMargins(0, 0, 0, 0)
+        texts.setSpacing(3)
+        name = QLabel(APP_NAME)
+        name.setObjectName("cardTitle")
+        version = QLabel(f"Phiên bản {APP_VERSION}")
+        version.setObjectName("cardHint")
+        texts.addWidget(name)
+        texts.addWidget(version)
+        texts.addWidget(_link_label(f"https://github.com/{GITHUB_REPO}", GITHUB_REPO))
+        identity_layout.addWidget(mark, 0, Qt.AlignTop)
+        identity_layout.addLayout(texts, 1)
+        about_card.add_block(identity)
+        layout.addWidget(about_card)
+
+        update_card = Card("Cập nhật", "Tải và cài bản mới trực tiếp từ GitHub.")
         self.update_status_label = QLabel()
         self.update_status_label.setObjectName("engineHint")
         self.update_status_label.setWordWrap(True)
-        update_layout.addWidget(self.update_status_label)
-        self.auto_update_check = QCheckBox("Tự động kiểm tra cập nhật khi mở app")
+        update_card.add_block(self.update_status_label)
+        self.auto_update_check = QCheckBox()
         self.auto_update_check.setChecked(self.config.auto_update)
         self.auto_update_check.toggled.connect(self._on_auto_update_toggled)
-        update_layout.addWidget(self.auto_update_check)
-        button_row = QHBoxLayout()
-        button_row.setSpacing(8)
+        update_card.add_row(
+            "Tự kiểm tra khi mở app",
+            self.auto_update_check,
+            "Chỉ đọc danh sách release công khai, không gửi dữ liệu của bạn.",
+            control_width=0,
+        )
         self.check_update_button = QPushButton("Kiểm tra cập nhật")
         self.check_update_button.clicked.connect(self._check_updates)
         self.install_update_button = QPushButton("Cài đặt bản mới")
         self.install_update_button.setObjectName("primary")
         self.install_update_button.clicked.connect(self._install_update)
-        button_row.addWidget(self.check_update_button)
-        button_row.addWidget(self.install_update_button)
-        button_row.addStretch(1)
-        update_layout.addLayout(button_row)
-        layout.addWidget(update_frame)
-
-        links = QLabel(
-            f'<a href="{GITHUB_RELEASES_URL}"><span style="color:#a5b4fc;">'
-            "Xem tất cả phiên bản trên GitHub</span></a>"
+        update_card.add_block(
+            _button_row(self.install_update_button, self.check_update_button)
         )
-        links.setObjectName("llmRegistration")
-        links.setOpenExternalLinks(True)
-        links.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        layout.addWidget(links)
+        layout.addWidget(update_card)
+
+        layout.addWidget(
+            _link_label(GITHUB_RELEASES_URL, "Xem tất cả phiên bản trên GitHub →")
+        )
         layout.addStretch(1)
         self.refresh_update_state()
         return page
 
+    # ------------------------------------------------------------------ cập nhật
     def _on_auto_update_toggled(self, checked: bool) -> None:
         self.config.auto_update = checked
         self.config.save()
@@ -636,6 +906,7 @@ class SettingsWindow(QWidget):
                 f"Bạn đang dùng bản mới nhất ({APP_VERSION})."
             )
 
+    # -------------------------------------------------------------------- dịch
     def _on_target_changed(self) -> None:
         self.config.target_language = self.target_box.currentData()
         self.config.save()
@@ -646,68 +917,201 @@ class SettingsWindow(QWidget):
         self.config.save()
 
     def _on_service_selected(self) -> None:
-        data = self.service_box.currentData()
-        if data == ADD_PROVIDER_KEY:
-            self._add_provider()
+        key = self.service_box.currentData()
+        if not isinstance(key, str):
             return
-        self.config.translator = data
-        if data.startswith("custom:"):
-            provider = self.config.active_provider()
-            models = provider["models"] if provider else []
-        elif data in BUILTIN_AI_IDS:
-            models = BUILTIN_AI_MODEL_IDS[data]
-        else:
-            models = []
-        if models and self.config.llm_model not in models:
-            self.config.llm_model = models[0]
+        translator, model = parse_bar_service_key(key)
+        self.config.translator = translator
+        if model is not None:
+            self.config.llm_model = model
         self.config.save()
-        self._update_llm_controls()
-        self.hud.sync_translation_controls()
-        if data in BUILTIN_AI_IDS and not self.config.provider_api_key(data):
-            name = BUILTIN_AI_BY_ID[data]["name"]
-            self.hud.set_status(f"{name} đã chọn — nhập API key để sử dụng.", "ready")
+        if translator in BUILTIN_AI_IDS or translator.startswith("custom:"):
+            self.ai_provider_box.blockSignals(True)
+            index = self.ai_provider_box.findData(translator)
+            self.ai_provider_box.setCurrentIndex(max(0, index))
+            self.ai_provider_box.blockSignals(False)
+            self._update_llm_controls(model)
         else:
-            self.hud.set_status("Đã cập nhật cấu hình dịch.", "ready")
+            self._sync_ai_state()
+        self.hud.sync_translation_controls()
+        self.hud.set_status("Đã cập nhật model dịch.", "ready")
+
+    def _selected_ai_code(self) -> str:
+        data = self.ai_provider_box.currentData()
+        return data if isinstance(data, str) else BUILTIN_AI_IDS[0]
+
+    def _custom_provider(self, code: str) -> dict | None:
+        if not code.startswith("custom:"):
+            return None
+        provider_id = code.split(":", 1)[1]
+        return next(
+            (
+                provider
+                for provider in self.config.custom_providers
+                if provider["id"] == provider_id
+            ),
+            None,
+        )
+
+    def _on_ai_provider_selected(self) -> None:
+        self._update_llm_controls()
+
+    def _activate_ai_provider(self) -> None:
+        code = self._selected_ai_code()
+        if not self.config.ai_provider_configured(code):
+            self.hud.set_status(
+                "Nhập API key trước khi dùng provider này.", "error"
+            )
+            return
+        self.config.translator = code
+        model = self.llm_model_box.currentData()
+        if isinstance(model, str):
+            self.config.llm_model = model
+        self.config.save()
+        self._populate_service_box()
+        self._sync_ai_state()
+        self._notify_service_entries_changed()
+        self.hud.set_status("Đã chuyển sang model AI đã chọn.", "ok")
 
     def _on_key_changed(self) -> None:
-        if self.config.translator in BUILTIN_AI_IDS:
-            self.config.set_provider_api_key(
-                self.config.translator, self.llm_key_edit.text().strip()
-            )
-            self.config.save()
+        code = self._selected_ai_code()
+        if code not in BUILTIN_AI_IDS:
+            return
+        key = self.llm_key_edit.text().strip()
+        self.config.set_provider_api_key(code, key)
+        if not key and self.config.translator == code:
+            self.config.translator = "google"
+        self.config.save()
+        self._populate_service_box()
+        self._sync_ai_state()
+        self._notify_service_entries_changed()
 
     def _on_model_changed(self) -> None:
-        data = self.llm_model_box.currentData()
-        if data is None:
+        model = self.llm_model_box.currentData()
+        if model is None or self._selected_ai_code() != self.config.translator:
+            self._update_model_remove_state()
             return
-        self.config.llm_model = data
+        self.config.llm_model = model
         self.config.save()
+        self._populate_service_box()
+        self._update_model_remove_state()
         self.hud.sync_translation_controls()
 
-    def _update_llm_controls(self) -> None:
-        translator = self.config.translator
-        is_builtin = translator in BUILTIN_AI_IDS
-        is_custom = translator.startswith("custom:")
-        self.llm_frame.setVisible(is_builtin or is_custom)
-        if not (is_builtin or is_custom):
+    def _add_ai_model(self) -> None:
+        model_id = self.model_id_input.text().strip()
+        if not model_id:
             return
+        code = self._selected_ai_code()
+        if model_id in self.config.provider_models(code):
+            self.hud.set_status("Model này đã có trong provider.", "ready")
+            return
+        if code in BUILTIN_AI_IDS:
+            self.config.ai_models.setdefault(code, []).append(model_id)
+        else:
+            provider = self._custom_provider(code)
+            if provider is None:
+                return
+            provider["models"].append(model_id)
+        if self.config.translator == code:
+            self.config.llm_model = model_id
+        self.config.save()
+        self.model_id_input.clear()
+        self._refresh_model_choices(model_id)
+        self.hud.set_status(f"Đã thêm model “{model_id}”.", "ok")
+
+    def _remove_ai_model(self) -> None:
+        code = self._selected_ai_code()
+        model_id = self.llm_model_box.currentData()
+        if not isinstance(model_id, str):
+            return
+        if code in BUILTIN_AI_IDS:
+            extras = self.config.ai_models.get(code, [])
+            if model_id not in extras:
+                self.hud.set_status("Model tích hợp không thể xóa.", "error")
+                return
+            extras.remove(model_id)
+            if not extras:
+                self.config.ai_models.pop(code, None)
+        else:
+            provider = self._custom_provider(code)
+            if provider is None or len(provider["models"]) <= 1:
+                self.hud.set_status("Provider phải còn ít nhất một model.", "error")
+                return
+            provider["models"].remove(model_id)
+        models = self.config.provider_models(code)
+        replacement = models[0] if models else ""
+        if self.config.translator == code and self.config.llm_model == model_id:
+            self.config.llm_model = replacement
+        self.config.save()
+        self._refresh_model_choices(replacement)
+        self.hud.set_status(f"Đã xóa model “{model_id}”.", "ready")
+
+    def _refresh_model_choices(self, preferred_model: str | None = None) -> None:
+        self._populate_service_box()
+        self._update_llm_controls(preferred_model)
+        self._notify_service_entries_changed()
+
+    def _notify_service_entries_changed(self) -> None:
+        if hasattr(self.hud, "rebuild_service_combo"):
+            self.hud.rebuild_service_combo()
+        else:
+            self.hud.sync_translation_controls()
+
+    def _sync_ai_state(self) -> None:
+        code = self._selected_ai_code()
+        configured = self.config.ai_provider_configured(code)
+        active = configured and code == self.config.translator
+        if active:
+            label = "ĐANG DÙNG"
+        elif configured:
+            label = "SẴN SÀNG"
+        else:
+            label = "CHƯA CÓ API KEY"
+        self.ai_provider_state.setText(label)
+        self.ai_provider_state.setProperty("state", "active" if active else "inactive")
+        self.ai_provider_state.style().unpolish(self.ai_provider_state)
+        self.ai_provider_state.style().polish(self.ai_provider_state)
+        self.activate_ai_btn.setEnabled(configured and not active)
+        if active:
+            button_text = "Đang sử dụng"
+        elif configured:
+            button_text = "Dùng model đã chọn"
+        else:
+            button_text = "Nhập API key để dùng"
+        self.activate_ai_btn.setText(button_text)
+
+    def _update_model_remove_state(self) -> None:
+        code = self._selected_ai_code()
+        model_id = self.llm_model_box.currentData()
+        if code in BUILTIN_AI_IDS:
+            removable = model_id in self.config.ai_models.get(code, [])
+        else:
+            provider = self._custom_provider(code)
+            removable = bool(provider and len(provider["models"]) > 1)
+        self.remove_ai_model_btn.setEnabled(removable)
+
+    def _update_llm_controls(self, preferred_model: str | None = None) -> None:
+        code = self._selected_ai_code()
+        is_builtin = code in BUILTIN_AI_IDS
         self.llm_model_box.blockSignals(True)
         self.llm_model_box.clear()
         if is_builtin:
-            spec = BUILTIN_AI_BY_ID[translator]
-            for label, model_id in spec["models"]:
-                self.llm_model_box.addItem(label, model_id)
+            spec = BUILTIN_AI_BY_ID[code]
+            labels = {model_id: label for label, model_id in spec["models"]}
+            for model_id in self.config.provider_models(code):
+                self.llm_model_box.addItem(labels.get(model_id, model_id), model_id)
             self.llm_endpoint_edit.setText(spec["endpoint"])
             self.llm_key_edit.setReadOnly(False)
-            self.llm_key_edit.setText(self.config.provider_api_key(translator))
+            self.llm_key_edit.setText(self.config.provider_api_key(code))
             self.llm_registration_link.setText(
-                f'<a href="{spec["register"]}"><span style="color:#a5b4fc;">'
-                "Đăng ký tài khoản và lấy API key</span></a>"
+                f'<a href="{spec["register"]}" '
+                f'style="color:{TOKENS["ACCENT_HI"]};">'
+                "Đăng ký tài khoản và lấy API key →</a>"
             )
             self.llm_registration_link.setVisible(True)
             self.provider_manage_widget.setVisible(False)
         else:
-            provider = self.config.active_provider() or {
+            provider = self._custom_provider(code) or {
                 "endpoint": "",
                 "api_key": "",
                 "models": [],
@@ -719,16 +1123,23 @@ class SettingsWindow(QWidget):
             self.llm_key_edit.setText(provider["api_key"])
             self.llm_registration_link.setVisible(False)
             self.provider_manage_widget.setVisible(True)
-        model_index = self.llm_model_box.findData(self.config.llm_model)
+        selected = preferred_model or self.config.llm_model
+        model_index = self.llm_model_box.findData(selected)
         self.llm_model_box.setCurrentIndex(max(0, model_index))
         self.llm_model_box.blockSignals(False)
+        self._update_model_remove_state()
+        self._sync_ai_state()
 
     def sync_service_controls(self) -> None:
-        """Đồng bộ combo dịch vụ + khung LLM theo config (gọi từ bar)."""
-        self.service_box.blockSignals(True)
-        index = self.service_box.findData(self.config.translator)
-        self.service_box.setCurrentIndex(max(0, index))
-        self.service_box.blockSignals(False)
+        """Đồng bộ model đang dùng và trang quản lý AI theo config."""
+        self._populate_service_box()
+        if self.config.translator in BUILTIN_AI_IDS or self.config.translator.startswith(
+            "custom:"
+        ):
+            self.ai_provider_box.blockSignals(True)
+            index = self.ai_provider_box.findData(self.config.translator)
+            self.ai_provider_box.setCurrentIndex(max(0, index))
+            self.ai_provider_box.blockSignals(False)
         self._update_llm_controls()
 
     def _next_provider_id(self) -> str:
@@ -744,28 +1155,39 @@ class SettingsWindow(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.data()
             provider = {"id": self._next_provider_id(), **data}
+            code = f"custom:{provider['id']}"
             self.config.custom_providers = self.config.custom_providers + [provider]
-            self.config.translator = f"custom:{provider['id']}"
-            self.config.llm_model = data["models"][0]
+            if data["api_key"]:
+                self.config.translator = code
+                self.config.llm_model = data["models"][0]
             self.config.save()
-            self._refresh_providers(f"Đã thêm provider “{data['name']}”.")
+            self._refresh_providers(
+                f"Đã thêm provider “{data['name']}”.", selected=code
+            )
         else:
-            self.sync_service_controls()
+            self._update_llm_controls()
 
     def _edit_provider(self) -> None:
-        provider = self.config.active_provider()
+        code = self._selected_ai_code()
+        provider = self._custom_provider(code)
         if provider is None:
             return
         dialog = ProviderDialog(self, provider)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             provider.update(dialog.data())
-            if self.config.llm_model not in provider["models"]:
-                self.config.llm_model = provider["models"][0]
+            if code == self.config.translator:
+                if not provider["api_key"]:
+                    self.config.translator = "google"
+                elif self.config.llm_model not in provider["models"]:
+                    self.config.llm_model = provider["models"][0]
             self.config.save()
-            self._refresh_providers(f"Đã cập nhật “{provider['name']}”.")
+            self._refresh_providers(
+                f"Đã cập nhật “{provider['name']}”.", selected=code
+            )
 
     def _delete_provider(self) -> None:
-        provider = self.config.active_provider()
+        code = self._selected_ai_code()
+        provider = self._custom_provider(code)
         if provider is None:
             return
         confirm = QMessageBox.question(
@@ -778,19 +1200,21 @@ class SettingsWindow(QWidget):
             for item in self.config.custom_providers
             if item["id"] != provider["id"]
         ]
-        self.config.translator = "google"
+        if self.config.translator == code:
+            self.config.translator = "google"
         self.config.save()
-        self._refresh_providers(f"Đã xóa “{provider['name']}”.")
+        self._refresh_providers(
+            f"Đã xóa “{provider['name']}”.", selected=BUILTIN_AI_IDS[0]
+        )
 
-    def _refresh_providers(self, message: str) -> None:
+    def _refresh_providers(self, message: str, selected: str | None = None) -> None:
         self._populate_service_box()
+        self._populate_ai_provider_box(selected)
         self._update_llm_controls()
-        if hasattr(self.hud, "rebuild_service_combo"):
-            self.hud.rebuild_service_combo()
-        else:
-            self.hud.sync_translation_controls()
+        self._notify_service_entries_changed()
         self.hud.set_status(message, "ready")
 
+    # --------------------------------------------------------------------- OCR
     def _on_ocr_changed(self) -> None:
         self.config.ocr_engine = self.engine_box.currentData()
         self.config.ocr_model = self.model_box.currentData()
@@ -900,32 +1324,104 @@ class SettingsWindow(QWidget):
         else:
             self.hud.set_status(f"Đã cài {model_spec(model_id).label}.", "ok")
 
-    def _on_hud_style_changed(self) -> None:
-        self.config.hud_font_family = self.font_family_box.currentData()
-        self.config.hud_font_size = self.font_size_spin.value()
-        self.config.hud_text_color = self.text_color_btn.color_hex()
-        self.config.hud_border_width = self.border_width_spin.value()
-        self.config.hud_border_color = self.border_color_btn.color_hex()
-        self.config.hud_background_color = self.background_color_btn.color_value()
-        self.config.save()
-        self.hud.apply_hud_text_style()
-
-    def _preview_hud_style(self) -> None:
-        self.hud.preview_hud_text_style(
+    # ------------------------------------------------------------- khung dịch
+    def _hud_style_values(self) -> tuple[str, int, str, float, str, str, float, str]:
+        return (
             self.font_family_box.currentData(),
             self.font_size_spin.value(),
             self.text_color_btn.color_hex(),
             self.border_width_spin.value(),
             self.border_color_btn.color_hex(),
             self.background_color_btn.color_value(),
+            self.shadow_radius_spin.value(),
+            self.shadow_color_btn.color_value(),
         )
 
+    def _sync_preview(self) -> None:
+        if hasattr(self, "preview_view"):
+            self.preview_view.apply_style(*self._hud_style_values())
+
+    def _on_hud_style_changed(self) -> None:
+        (
+            self.config.hud_font_family,
+            self.config.hud_font_size,
+            self.config.hud_text_color,
+            self.config.hud_border_width,
+            self.config.hud_border_color,
+            self.config.hud_background_color,
+            self.config.hud_shadow_radius,
+            self.config.hud_shadow_color,
+        ) = self._hud_style_values()
+        self.config.save()
+        self.hud.apply_hud_text_style()
+        self._sync_preview()
+
+    def _preview_hud_style(self) -> None:
+        self.hud.preview_hud_text_style(*self._hud_style_values())
+        self._sync_preview()
+
+    def _reset_hud_style(self) -> None:
+        """Trả kiểu chữ khung dịch về bộ mặc định dễ đọc trên mọi nền."""
+        defaults = HUD_STYLE_DEFAULTS
+        controls = (
+            self.font_family_box,
+            self.font_size_spin,
+            self.border_width_spin,
+            self.shadow_radius_spin,
+        )
+        for control in controls:
+            control.blockSignals(True)
+        family_index = self.font_family_box.findData(defaults["hud_font_family"])
+        if family_index >= 0:
+            self.font_family_box.setCurrentIndex(family_index)
+        self.font_size_spin.setValue(defaults["hud_font_size"])
+        self.border_width_spin.setValue(defaults["hud_border_width"])
+        self.shadow_radius_spin.setValue(defaults["hud_shadow_radius"])
+        for control in controls:
+            control.blockSignals(False)
+        self.text_color_btn.set_color(defaults["hud_text_color"])
+        self.border_color_btn.set_color(defaults["hud_border_color"])
+        self.shadow_color_btn.set_color(defaults["hud_shadow_color"])
+        self.background_color_btn.set_color(defaults["hud_background_color"])
+        self._on_hud_style_changed()
+        self.hud.set_status("Đã đặt lại kiểu chữ khung dịch về mặc định.", "ok")
+
+    # ---------------------------------------------------------------- phím tắt
+    def _duplicate_combos(self) -> set[str]:
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for edit in self.hotkey_edits.values():
+            combo = edit.combo()
+            if not combo:
+                continue
+            if combo in seen:
+                duplicates.add(combo)
+            seen.add(combo)
+        return duplicates
+
+    def _mark_hotkey_conflicts(self) -> bool:
+        """Tô đỏ các ô trùng nhau ngay khi ghi phím, trước lúc bấm Lưu."""
+        duplicates = self._duplicate_combos()
+        for edit in self.hotkey_edits.values():
+            edit.set_conflict(bool(edit.combo()) and edit.combo() in duplicates)
+        if hasattr(self, "hotkey_warning"):
+            self.hotkey_warning.setVisible(bool(duplicates))
+            if duplicates:
+                pretty = " · ".join(sorted(_fmt_hotkey(c) for c in duplicates))
+                self.hotkey_warning.setText(f"TRÙNG PHÍM: {pretty}")
+        return bool(duplicates)
+
+    def _reset_hotkeys(self) -> None:
+        for action, edit in self.hotkey_edits.items():
+            edit.set_combo(DEFAULT_HOTKEYS.get(action, ""))
+        self._mark_hotkey_conflicts()
+        self.hud.set_status("Đã nạp phím tắt mặc định — bấm Lưu để áp dụng.", "ready")
+
     def _apply_hotkeys(self) -> None:
-        mapping = {action: edit.combo() for action, edit in self.hotkey_edits.items()}
-        enabled = [combo for combo in mapping.values() if combo]
-        if len(enabled) != len(set(enabled)):
+        if self._mark_hotkey_conflicts():
             self.hud.set_status("Phím tắt bị trùng.", "error")
             return
+        mapping = {action: edit.combo() for action, edit in self.hotkey_edits.items()}
         error = self.hud.hotkeys.apply(mapping)
         if error:
             self.hud.set_status(error, "error")
@@ -934,6 +1430,13 @@ class SettingsWindow(QWidget):
         self.config.save()
         self.hud.refresh_bar_tooltips()
         self.hud.set_status("Đã lưu phím tắt.", "ok")
+
+    # ------------------------------------------------------------------ vòng đời
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:
         if self._quitting:

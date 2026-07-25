@@ -36,13 +36,13 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TranslatorBox-installer
-          path: dist/TranslatorBox-Setup-*.exe
+          name: TranslatorBox-Windows-x64
+          path: dist/TranslatorBox-Windows-x64-*.exe
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/TranslatorBox-Setup-*.exe
+          files: dist/TranslatorBox-Windows-x64-*.exe
           generate_release_notes: true
           draft: false
           prerelease: false

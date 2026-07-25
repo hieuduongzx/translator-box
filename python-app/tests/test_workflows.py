@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
+
+from PySide6.QtGui import QColor, QImage  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from translation_workflows import TranslationWorkflowController  # noqa: E402
 
@@ -67,6 +74,10 @@ class FakeHud:
 
 
 class TranslationWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
     def test_unknown_action_is_ignored(self) -> None:
         hud = FakeHud()
         controller = TranslationWorkflowController(hud)
@@ -125,6 +136,181 @@ class TranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(hud.output_history, ["Xin chào"])
         self.assertEqual(hud.busy_values, [True, False])
         self.assertGreaterEqual(hud.ensure_visible_calls, 2)
+
+    def test_clipboard_image_is_saved_as_png(self) -> None:
+        controller = TranslationWorkflowController(FakeHud())
+        image = QImage(8, 5, QImage.Format.Format_RGB32)
+        image.fill(QColor("#2f81f7"))
+        self.app.clipboard().setImage(image)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clipboard.png"
+            controller._save_clipboard_image(str(path))
+            saved = QImage(str(path))
+
+        self.assertFalse(saved.isNull())
+        self.assertEqual(saved.size(), image.size())
+        self.assertEqual(saved.pixelColor(0, 0), QColor("#2f81f7"))
+        self.app.clipboard().clear()
+
+    def test_clipboard_image_replaces_text_and_opens_image_result(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        regions = [
+            SimpleNamespace(text="Source", bbox=(4, 4, 100, 28)),
+        ]
+        visual = SimpleNamespace(
+            bg=(20, 24, 30),
+            fg=(240, 240, 240),
+            rect=(2, 2, 104, 30),
+            patch_rgb=None,
+            patch_size=None,
+            ink_rect=(4, 4, 100, 28),
+            stroke_thickness=1.0,
+        )
+        source_image = mock.Mock()
+        source_image.isNull.return_value = False
+
+        with (
+            mock.patch.object(controller, "_save_clipboard_image"),
+            mock.patch.object(
+                controller, "_new_temp_image", return_value="clipboard.png"
+            ),
+            mock.patch.object(controller, "_remove_temp_image") as remove_temp_image,
+            mock.patch(
+                "translation_workflows.services.ocr_layout", return_value=regions
+            ),
+            mock.patch(
+                "translation_workflows.services.translate_regions",
+                return_value=["Bản dịch"],
+            ),
+            mock.patch(
+                "translation_workflows.services.reconstruct_layout",
+                return_value=((120, 40), [visual]),
+            ),
+            mock.patch(
+                "translation_workflows.QImage", return_value=source_image
+            ),
+            mock.patch(
+                "translation_workflows.overlay.show_translated_image"
+            ) as show_image,
+            mock.patch("translation_workflows.threading.Thread") as thread_type,
+        ):
+            thread_type.return_value.start.side_effect = lambda: (
+                thread_type.call_args.kwargs["target"]()
+            )
+            controller.handle_action("clipboard_image_replace")
+
+        shown_source, shown_regions, shown_size = show_image.call_args.args
+        self.assertIs(shown_source, source_image)
+        self.assertEqual(shown_regions[0].text, "Bản dịch")
+        self.assertEqual(shown_size, (120, 40))
+        self.assertEqual(hud.output_history, [])
+        self.assertEqual(hud.busy_values, [True, False])
+        self.assertEqual(
+            hud.statuses[-1],
+            ("Đã tạo ảnh dịch và copy kết quả vào clipboard.", "ok"),
+        )
+        remove_temp_image.assert_called_once_with("clipboard.png")
+
+    def test_clipboard_image_ocr_translates_lines_into_hud(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        regions = [
+            SimpleNamespace(text="First line", bbox=(0, 0, 120, 20)),
+            SimpleNamespace(text="Second line", bbox=(0, 24, 120, 44)),
+        ]
+
+        with (
+            mock.patch.object(
+                controller, "_save_clipboard_image"
+            ) as save_clipboard_image,
+            mock.patch.object(
+                controller, "_new_temp_image", return_value="clipboard.png"
+            ),
+            mock.patch.object(controller, "_remove_temp_image") as remove_temp_image,
+            mock.patch(
+                "translation_workflows.services.ocr_layout", return_value=regions
+            ),
+            mock.patch(
+                "translation_workflows.services.translate_regions",
+                return_value=["Dòng một", "Dòng hai"],
+            ) as translate_regions,
+            mock.patch("translation_workflows.threading.Thread") as thread_type,
+        ):
+            thread_type.return_value.start.side_effect = lambda: (
+                thread_type.call_args.kwargs["target"]()
+            )
+            controller.handle_action("clipboard_image_to_text")
+
+        save_clipboard_image.assert_called_once_with("clipboard.png")
+        translated_regions = translate_regions.call_args.args[0]
+        self.assertEqual(
+            [region.text for region in translated_regions],
+            ["First line", "Second line"],
+        )
+        self.assertEqual(hud.output, "Dòng một\nDòng hai")
+        self.assertEqual(hud.busy_values, [True, False])
+        self.assertGreaterEqual(hud.ensure_visible_calls, 2)
+        remove_temp_image.assert_called_once_with("clipboard.png")
+
+    def test_clipboard_image_action_reports_missing_image(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+
+        with (
+            mock.patch.object(
+                controller, "_save_clipboard_image",
+                side_effect=RuntimeError("Clipboard không có ảnh."),
+            ),
+            mock.patch.object(
+                controller, "_new_temp_image", return_value="clipboard.png"
+            ),
+            mock.patch.object(controller, "_remove_temp_image") as remove_temp_image,
+            mock.patch("translation_workflows.threading.Thread") as thread_type,
+        ):
+            controller.handle_action("clipboard_image_replace")
+
+        thread_type.assert_not_called()
+        remove_temp_image.assert_called_once_with("clipboard.png")
+        self.assertEqual(hud.output, "⚠ Clipboard không có ảnh.")
+        self.assertEqual(hud.busy_values, [True, False])
+
+    def test_region_capture_preserves_detected_lines_in_hud(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        regions = [
+            SimpleNamespace(text="First line", bbox=(0, 0, 120, 20)),
+            SimpleNamespace(text="Second line", bbox=(0, 24, 120, 44)),
+        ]
+
+        with (
+            mock.patch("translation_workflows.services.capture"),
+            mock.patch(
+                "translation_workflows.services.ocr_layout", return_value=regions
+            ),
+            mock.patch(
+                "translation_workflows.services.translate_regions",
+                return_value=["Dòng một", "Dòng hai"],
+            ) as translate_regions,
+            mock.patch("translation_workflows.time.sleep"),
+            mock.patch.object(
+                controller, "_new_temp_image", return_value="capture.png"
+            ),
+            mock.patch.object(controller, "_remove_temp_image"),
+            mock.patch("translation_workflows.threading.Thread") as thread_type,
+        ):
+            thread_type.return_value.start.side_effect = lambda: (
+                thread_type.call_args.kwargs["target"]()
+            )
+            controller._capture_to_frame((0, 0, 120, 48), [])
+
+        translated_regions = translate_regions.call_args.args[0]
+        self.assertEqual(
+            [region.text for region in translated_regions],
+            ["First line", "Second line"],
+        )
+        self.assertEqual(hud.output, "Dòng một\nDòng hai")
 
     def test_selected_text_replace_pastes_translation_and_keeps_focus(self) -> None:
         hud = FakeHud()

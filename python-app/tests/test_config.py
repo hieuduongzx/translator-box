@@ -40,12 +40,16 @@ class AppConfigTests(unittest.TestCase):
         self.assertFalse(settings.ocr_acceleration)
         self.assertEqual(settings.translator, "google")
         self.assertEqual(settings.live_interval_ms, 900)
-        self.assertEqual(settings.hud_font_size, 16)
-        self.assertEqual(settings.hud_border_width, 8)
-        self.assertEqual(settings.hud_text_color, "#000000")
-        self.assertEqual(settings.hud_border_color, "#ffffff")
-        self.assertEqual(settings.hud_font_family, "Yu Gothic")
+        defaults = config.HUD_STYLE_DEFAULTS
+        self.assertEqual(settings.hud_font_size, defaults["hud_font_size"])
+        self.assertEqual(settings.hud_border_width, 8)  # 99 bị kẹp về trần 8px
+        self.assertEqual(settings.hud_text_color, defaults["hud_text_color"])
+        self.assertEqual(settings.hud_border_color, defaults["hud_border_color"])
+        self.assertEqual(settings.hud_font_family, defaults["hud_font_family"])
         self.assertEqual(settings.hud_background_color, "#00000000")
+        # Config này đã có kiểu chữ riêng → không tự bật bóng chữ.
+        self.assertEqual(settings.hud_shadow_radius, 0.0)
+        self.assertEqual(settings.hud_shadow_color, defaults["hud_shadow_color"])
         self.assertEqual(settings.llm_endpoint, "http://103.38.236.38:20128/v1")
         self.assertEqual(settings.llm_api_key, "")
         self.assertEqual(settings.llm_model, "mistral/mistral-small-latest")
@@ -54,6 +58,54 @@ class AppConfigTests(unittest.TestCase):
             settings.hotkeys["selected_text"],
             config.DEFAULT_HOTKEYS["selected_text"],
         )
+        self.assertEqual(settings.hotkeys["clipboard_image_replace"], "ctrl+alt+v")
+        self.assertEqual(settings.hotkeys["clipboard_image_to_text"], "ctrl+alt+t")
+
+    def test_previous_clipboard_image_hotkey_migrates_to_split_actions(self) -> None:
+        settings = config.AppConfig(
+            {"hotkeys": {"clipboard_image_to_text": "ctrl+alt+v"}}
+        )
+
+        self.assertEqual(settings.hotkeys["clipboard_image_replace"], "ctrl+alt+v")
+        self.assertEqual(settings.hotkeys["clipboard_image_to_text"], "ctrl+alt+t")
+
+    def test_fresh_config_uses_legible_hud_preset(self) -> None:
+        settings = config.AppConfig({})
+
+        for key, value in config.HUD_STYLE_DEFAULTS.items():
+            self.assertEqual(getattr(settings, key), value, key)
+
+    def test_previous_default_preset_upgrades_to_new_glow_preset(self) -> None:
+        legacy = {
+            "hud_font_family": "Segoe UI",
+            "hud_font_size": 18,
+            "hud_text_color": "#ffffff",
+            "hud_border_width": 0.5,
+            "hud_border_color": "#101114",
+            "hud_background_color": "#00000000",
+            "hud_shadow_radius": 6.0,
+            "hud_shadow_color": "#cc000000",
+        }
+
+        settings = config.AppConfig(legacy)
+
+        for key, value in config.HUD_STYLE_DEFAULTS.items():
+            self.assertEqual(getattr(settings, key), value, key)
+
+    def test_config_from_older_version_keeps_text_shadow_off(self) -> None:
+        """Người dùng cũ mở bản mới không bị đổi giao diện khung dịch."""
+        settings = config.AppConfig(
+            {
+                "hud_font_family": "Segoe UI",
+                "hud_font_size": 20,
+                "hud_text_color": "#ff0004",
+                "hud_border_width": 0.0,
+            }
+        )
+
+        self.assertEqual(settings.hud_shadow_radius, 0.0)
+        self.assertEqual(settings.hud_text_color, "#ff0004")
+        self.assertEqual(settings.hud_font_size, 20)
 
     def test_save_uses_replace_and_leaves_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -66,12 +118,8 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(payload["target_language"], "en")
             self.assertFalse(payload["ocr_acceleration"])
             self.assertTrue(payload["hud_pinned"])
-            self.assertEqual(payload["hud_font_family"], "Yu Gothic")
-            self.assertEqual(payload["hud_font_size"], 16)
-            self.assertEqual(payload["hud_text_color"], "#000000")
-            self.assertEqual(payload["hud_border_width"], 1)
-            self.assertEqual(payload["hud_border_color"], "#ffffff")
-            self.assertEqual(payload["hud_background_color"], "#00000000")
+            for key, value in config.HUD_STYLE_DEFAULTS.items():
+                self.assertEqual(payload[key], value)
             self.assertEqual(payload["llm_endpoint"], "http://103.38.236.38:20128/v1")
             self.assertEqual(payload["llm_api_key"], "")
             self.assertEqual(payload["llm_model"], "mistral/mistral-small-latest")
@@ -114,6 +162,24 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(key, "sk-gm")
         # Model mặc định rơi về model đầu tiên của provider khi chưa hợp lệ.
         self.assertEqual(gemini.provider_api_key("gemini"), "sk-gm")
+
+    def test_ai_models_are_normalized_and_unconfigured_provider_cannot_run(self) -> None:
+        settings = config.AppConfig(
+            {
+                "ai_models": {
+                    "openai": [" gpt-custom ", "gpt-custom", "", 12],
+                    "unknown": ["ignored"],
+                }
+            }
+        )
+
+        self.assertEqual(settings.ai_models, {"openai": ["gpt-custom"]})
+        self.assertIn("gpt-custom", settings.provider_models("openai"))
+        self.assertEqual(settings.configured_ai_provider_ids(), set())
+        settings.translator = "openai"
+        settings.llm_model = "gpt-custom"
+        self.assertEqual(settings.resolve_llm(), ("google", "", "", ""))
+        self.assertEqual(settings.to_dict()["ai_models"], {"openai": ["gpt-custom"]})
 
     def test_google_resolves_without_llm_params(self) -> None:
         settings = config.AppConfig({"translator": "google"})
@@ -158,7 +224,10 @@ class AppConfigTests(unittest.TestCase):
         unsupported = config.AppConfig({"hud_font_family": "Comic Sans MS"})
         normalized = config.AppConfig({"hud_font_family": "yu gothic"})
 
-        self.assertEqual(unsupported.hud_font_family, "Yu Gothic")
+        self.assertEqual(
+            unsupported.hud_font_family,
+            config.HUD_STYLE_DEFAULTS["hud_font_family"],
+        )
         self.assertEqual(normalized.hud_font_family, "Yu Gothic")
 
 

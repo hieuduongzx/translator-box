@@ -84,5 +84,5 @@ if (-not $iscc) {
 Write-Host "==> Inno Setup ($iscc)..." -ForegroundColor Cyan
 & $iscc "/DAppVersion=$version" "$root\packaging\installer.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup thất bại (exit $LASTEXITCODE)" }
-$setup = "$root\dist\TranslatorBox-Setup-$version.exe"
+$setup = "$root\dist\TranslatorBox-Windows-x64-$version.exe"
 Write-Host "==> Installer: $setup" -ForegroundColor Green

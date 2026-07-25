@@ -27,6 +27,8 @@ OCR_LANGUAGES = [
 HOTKEY_ACTIONS = [
     ("Dịch văn bản chọn", "selected_text"),
     ("Dịch & thay thế tại chỗ", "selected_text_replace"),
+    ("Dịch ảnh clipboard", "clipboard_image_replace"),
+    ("Ảnh clipboard → Khung dịch", "clipboard_image_to_text"),
     ("Vùng → Khung dịch", "region_to_text"),
     ("Vùng → Live vào khung", "region_to_live_frame"),
     ("Vùng → Overlay", "region_to_overlay"),
@@ -93,12 +95,6 @@ BUILTIN_AI_MODEL_IDS = {
 # Model của provider "Translator Box" — giữ tên cũ cho tương thích.
 LLM_MODELS = BUILTIN_AI_BY_ID["llm"]["models"]
 
-TRANSLATORS = [("Google", "google"), ("Bing", "bing")] + [
-    (provider["name"], provider["id"]) for provider in BUILTIN_AI_PROVIDERS
-]
-
-# Sentinel cho mục "Thêm provider tùy chỉnh…" ở cuối combo dịch vụ (Cài đặt).
-ADD_PROVIDER_KEY = "__add_provider__"
 
 _CUSTOM_BAR_PREFIX = "custom::"
 
@@ -124,13 +120,31 @@ def parse_bar_service_key(key: str) -> tuple[str, str | None]:
     return head, rest or None  # provider AI tích hợp
 
 
-def bar_translator_entries(custom_providers: list | None = None) -> list[tuple[str, str]]:
-    """(nhãn, key) cho combo bar — mỗi model của mỗi provider AI là một mục riêng."""
+def bar_translator_entries(
+    custom_providers: list | None = None,
+    *,
+    builtin_models: dict[str, list[str]] | None = None,
+    enabled_providers: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Các lựa chọn dịch: Google/Bing + model của provider đã cấu hình key."""
     entries: list[tuple[str, str]] = [("Google", "google"), ("Bing", "bing")]
     for provider in BUILTIN_AI_PROVIDERS:
-        for label, model_id in provider["models"]:
-            entries.append((f"{provider['name']} · {label}", f"{provider['id']}::{model_id}"))
+        provider_id = provider["id"]
+        if enabled_providers is not None and provider_id not in enabled_providers:
+            continue
+        labels = {model_id: label for label, model_id in provider["models"]}
+        models = (
+            builtin_models.get(provider_id, [])
+            if builtin_models is not None
+            else list(labels)
+        )
+        for model_id in models:
+            label = labels.get(model_id, model_id)
+            entries.append((f"{provider['name']} · {label}", f"{provider_id}::{model_id}"))
     for provider in custom_providers or []:
+        code = f"custom:{provider['id']}"
+        if enabled_providers is not None and code not in enabled_providers:
+            continue
         for model_id in provider.get("models", []):
             label = f"{provider['name']} · {model_id}"
             entries.append((label, f"{_CUSTOM_BAR_PREFIX}{provider['id']}::{model_id}"))
@@ -165,7 +179,23 @@ BAR_GROUP_OVERLAY = [
         "Dịch overlay liên tục một vùng (bấm lại để dừng)",
     ),
 ]
-# Nhóm 2 — dịch đưa vào KHUNG (vùng trong suốt của HUD).
+# Nhóm 2 — xử lý ảnh đang có trong clipboard.
+BAR_GROUP_CLIPBOARD = [
+    (
+        "image",
+        "Dịch ảnh clipboard",
+        "clipboard_image_replace",
+        "OCR, xoá chữ gốc và tạo ảnh đã dịch",
+    ),
+    (
+        "image-text",
+        "Ảnh clipboard → khung",
+        "clipboard_image_to_text",
+        "OCR ảnh clipboard rồi đưa bản dịch dạng text vào khung",
+    ),
+]
+
+# Nhóm 3 — dịch đưa vào KHUNG (vùng trong suốt của HUD).
 BAR_GROUP_FRAME = [
     (
         "scan",
@@ -192,6 +222,6 @@ BAR_GROUP_FRAME = [
         "Bôi đen văn bản rồi thay bằng bản dịch (dán đè tại chỗ)",
     ),
 ]
-BAR_ACTIONS = BAR_GROUP_OVERLAY + BAR_GROUP_FRAME
+BAR_ACTIONS = BAR_GROUP_OVERLAY + BAR_GROUP_CLIPBOARD + BAR_GROUP_FRAME
 
 SERVER_NAME = "ScreenTranslator2K.Python.Instance"

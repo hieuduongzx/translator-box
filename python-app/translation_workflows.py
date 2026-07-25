@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 import overlay
@@ -85,6 +86,16 @@ class TranslationWorkflowController:
     def _emit(self, callback) -> None:
         self.hud.bridge.run.emit(callback)
 
+    def _capture_settle_delay(self) -> float:
+        """Thời gian chờ trước khi chụp, sau khi overlay chọn vùng vừa đóng.
+
+        Khi Windows hỗ trợ `WDA_EXCLUDEFROMCAPTURE` (Win10 2004+) thì cửa sổ của
+        app không bao giờ xuất hiện trong ảnh chụp, nên chỉ cần một nhịp frame để
+        desktop bên dưới vẽ lại. Máy không hỗ trợ mới cần chờ lâu để cửa sổ thật
+        sự biến mất khỏi màn hình.
+        """
+        return 0.03 if getattr(self.hud, "_capture_excluded", False) else 0.15
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.hud.set_busy(busy)
@@ -111,6 +122,19 @@ class TranslationWorkflowController:
             llm_model=options.llm_model,
         )
 
+    @staticmethod
+    def _ocr_lines(image_path: str, options: TranslationOptions):
+        """OCR và giữ đúng từng dòng hình học trong vùng người dùng chọn."""
+        return services.merge_regions_into_lines(
+            services.ocr_layout(
+                image_path,
+                options.language,
+                options.engine,
+                options.model,
+                options.backend,
+            )
+        )
+
     def handle_action(self, action: str) -> None:
         if action == "quit":
             self.hud.quit_app()
@@ -128,6 +152,8 @@ class TranslationWorkflowController:
             return
         actions = {
             "selected_text": self._translate_selected_text,
+            "clipboard_image_replace": self._translate_clipboard_image_replace,
+            "clipboard_image_to_text": self._translate_clipboard_image_to_text,
             "selected_text_replace": self._translate_selected_text_replace,
             "region_to_text": self.start_region_capture,
             "region_to_overlay": self.start_region_overlay,
@@ -145,6 +171,76 @@ class TranslationWorkflowController:
             source = services.copy_selected_text()
             self._emit(lambda: self._show_source_pending())
             return source, self._translate_text(source, options)
+
+        self._run_text_worker(job)
+
+    def _translate_clipboard_image_replace(self) -> None:
+        """OCR ảnh clipboard, xoá chữ gốc và hiện ảnh đã chèn bản dịch."""
+        self._set_busy(True)
+        self.hud.set_status("Đang đọc ảnh từ clipboard…", "busy")
+        options = self._options()
+        image_path = self._new_temp_image()
+        try:
+            self._save_clipboard_image(image_path)
+        except Exception as exc:  # noqa: BLE001
+            self._remove_temp_image(image_path)
+            self._apply_error(str(exc))
+            return
+
+        self.hud.set_status("Đang nhận dạng chữ trong ảnh…", "busy")
+
+        def runner() -> None:
+            try:
+                regions = self._ocr_lines(image_path, options)
+                if not regions:
+                    raise RuntimeError("Không nhận diện được chữ trong ảnh clipboard.")
+                translated_lines = self._translate_regions(regions, options)
+                image_size, visuals = services.reconstruct_layout(image_path, regions)
+                paint_regions = self._paint_regions(
+                    regions, translated_lines, visuals
+                )
+                source = QImage(image_path)
+                if source.isNull():
+                    raise RuntimeError("Không đọc được ảnh nguồn từ clipboard.")
+                self._emit(
+                    lambda: self._apply_clipboard_translated_image(
+                        source, paint_regions, image_size
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                self._emit(lambda: self._apply_error(message))
+            finally:
+                self._remove_temp_image(image_path)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _translate_clipboard_image_to_text(self) -> None:
+        """OCR ảnh clipboard, dịch từng dòng và đưa text vào khung HUD."""
+        self._set_busy(True)
+        self.hud.set_status("Đang đọc ảnh từ clipboard…", "busy")
+        options = self._options()
+        image_path = self._new_temp_image()
+        try:
+            self._save_clipboard_image(image_path)
+        except Exception as exc:  # noqa: BLE001
+            self._remove_temp_image(image_path)
+            self._apply_error(str(exc))
+            return
+
+        self.hud.set_status("Đang nhận dạng chữ trong ảnh…", "busy")
+
+        def job() -> tuple[str, str]:
+            try:
+                regions = self._ocr_lines(image_path, options)
+                if not regions:
+                    raise RuntimeError("Không nhận diện được chữ trong ảnh clipboard.")
+                self._emit(self._show_source_pending)
+                translated_lines = self._translate_regions(regions, options)
+                source = "\n".join(region.text for region in regions)
+                return source, "\n".join(translated_lines)
+            finally:
+                self._remove_temp_image(image_path)
 
         self._run_text_worker(job)
 
@@ -188,9 +284,10 @@ class TranslationWorkflowController:
 
     def _capture_to_frame(self, bbox, hidden_overlays: list) -> None:
         options = self._options()
+        settle = self._capture_settle_delay()
 
         def job() -> tuple[str, str]:
-            time.sleep(0.15)
+            time.sleep(settle)
             image_path = self._new_temp_image()
             restored = False
             try:
@@ -199,18 +296,13 @@ class TranslationWorkflowController:
                     lambda: self._restore_after_capture(hidden_overlays, show_hud=True)
                 )
                 restored = True
-                source = services.ocr_text_reflow(
-                    image_path,
-                    options.language,
-                    options.engine,
-                    options.model,
-                    options.backend,
-                )
-                if not source:
+                regions = self._ocr_lines(image_path, options)
+                if not regions:
                     raise RuntimeError("Không nhận diện được chữ.")
                 self._emit(lambda: self._show_source_pending())
-                translated = self._translate_text(source, options)
-                return source, translated
+                translated_lines = self._translate_regions(regions, options)
+                source = "\n".join(region.text for region in regions)
+                return source, "\n".join(translated_lines)
             finally:
                 if not restored:
                     self._emit(
@@ -234,26 +326,19 @@ class TranslationWorkflowController:
             self.hud.set_status("Đã huỷ.", "ready")
             return
         options = self._options()
+        settle = self._capture_settle_delay()
 
         def runner() -> None:
             image_path = self._new_temp_image()
             restored = False
             try:
-                time.sleep(0.15)
+                time.sleep(settle)
                 services.capture(bbox, image_path)
                 self._emit(
                     lambda: self._restore_after_capture(hidden_overlays, show_hud=False)
                 )
                 restored = True
-                regions = services.merge_regions_into_lines(
-                    services.ocr_layout(
-                        image_path,
-                        options.language,
-                        options.engine,
-                        options.model,
-                        options.backend,
-                    )
-                )
+                regions = self._ocr_lines(image_path, options)
                 if not regions:
                     raise RuntimeError("Không nhận diện được chữ.")
                 translated_lines = self._translate_regions(regions, options)
@@ -290,6 +375,8 @@ class TranslationWorkflowController:
                 visual.rect,
                 visual.patch_rgb,
                 visual.patch_size,
+                visual.ink_rect,
+                visual.stroke_thickness,
             )
             for region, translated_text, visual in zip(
                 regions, translated_lines, visuals
@@ -373,26 +460,12 @@ class TranslationWorkflowController:
     def _live_process(self, session: LiveSession, image_path: str) -> None:
         options = session.options
         if session.mode == "frame":
-            source = services.ocr_text_reflow(
-                image_path,
-                options.language,
-                options.engine,
-                options.model,
-                options.backend,
-            )
-            if source:
-                translated = self._translate_text(source, options)
+            regions = self._ocr_lines(image_path, options)
+            if regions:
+                translated = "\n".join(self._translate_regions(regions, options))
                 self._emit(lambda: self._live_apply_frame(session.token, translated))
             return
-        regions = services.merge_regions_into_lines(
-            services.ocr_layout(
-                image_path,
-                options.language,
-                options.engine,
-                options.model,
-                options.backend,
-            )
-        )
+        regions = self._ocr_lines(image_path, options)
         if not regions:
             return
         translated_lines = self._translate_regions(regions, options)
@@ -481,11 +554,37 @@ class TranslationWorkflowController:
         self._set_busy(False)
         self.hud.set_status("Đã thay thế bằng bản dịch tại chỗ.", "ok")
 
+    def _apply_clipboard_translated_image(
+        self, source: QImage, paint_regions, image_size: tuple[int, int]
+    ) -> None:
+        try:
+            overlay.show_translated_image(source, paint_regions, image_size)
+        except Exception as exc:  # noqa: BLE001
+            self._apply_error(str(exc))
+            return
+        self._set_busy(False)
+        self.hud.set_status(
+            "Đã tạo ảnh dịch và copy kết quả vào clipboard.", "ok"
+        )
+
     def _apply_error(self, message: str) -> None:
         self._set_busy(False)
         self.hud.set_output(f"⚠ {message}")
         self.hud.ensure_visible()
         self.hud.set_status(message, "error")
+
+    @staticmethod
+    def _save_clipboard_image(path: str) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            raise RuntimeError("Không truy cập được clipboard.")
+        image = clipboard.image()
+        if image.isNull():
+            raise RuntimeError(
+                "Clipboard không có ảnh. Hãy copy ảnh hoặc chụp bằng Win+Shift+S."
+            )
+        if not image.save(path, "PNG"):
+            raise RuntimeError("Không đọc được ảnh từ clipboard.")
 
     @staticmethod
     def _new_temp_image() -> str:

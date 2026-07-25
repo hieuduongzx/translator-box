@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -139,6 +141,78 @@ class LayoutOcrTests(unittest.TestCase):
             llm_api_key="",
             llm_model="",
         )
+
+    def test_reconstructed_line_keeps_original_text_colour(self) -> None:
+        """Màu chữ dịch phải sát màu gốc, không bị pixel khử răng làm nhạt."""
+        from PIL import ImageFont
+
+        text_rgb = (220, 30, 30)
+        image = Image.new("RGB", (320, 60), (255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(r"C:\Windows\Fonts\segoeui.ttf", 22)
+        draw.text((16, 16), "Sample gy", font=font, fill=text_rgb)
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "line.png")
+            image.save(path)
+            box = draw.textbbox((16, 16), "Sample gy", font=font)
+            region = services.TextRegion("Sample gy", box)
+            _size, visuals = services.reconstruct_layout(path, [region])
+
+        visual = visuals[0]
+        for channel, expected in zip(visual.fg, text_rgb):
+            self.assertLess(
+                abs(channel - expected),
+                40,
+                f"màu chữ lệch quá xa: {visual.fg} vs {text_rgb}",
+            )
+        # Hộp ink phải nằm gọn trong hộp OCR và đúng chiều cao nét chữ.
+        self.assertIsNotNone(visual.ink_rect)
+        self.assertGreaterEqual(visual.ink_rect[1], box[1] - 2)
+        self.assertLessEqual(visual.ink_rect[3], box[3] + 2)
+        self.assertGreater(visual.stroke_thickness, 0)
+
+    def test_per_line_fallback_runs_in_parallel_and_keeps_order(self) -> None:
+        """Dịch vụ gộp dòng → dịch lại từng dòng, song song nhưng đúng thứ tự."""
+        regions = [
+            services.TextRegion(f"line{index}", (0, index * 12, 20, index * 12 + 10))
+            for index in range(4)
+        ]
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def fake_translate(text: str, *_args, **_kwargs) -> str:
+            nonlocal active, peak
+            if "\n" in text:  # lần gộp: trả về ít dòng hơn để kích fallback
+                return "mọi thứ dồn một dòng"
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return "dịch:" + text
+
+        with mock.patch.object(services, "translate", side_effect=fake_translate):
+            translated = services.translate_regions(regions, "vi")
+
+        self.assertEqual(
+            translated, ["dịch:line0", "dịch:line1", "dịch:line2", "dịch:line3"]
+        )
+        self.assertGreater(peak, 1)
+
+    def test_clipboard_wait_returns_as_soon_as_text_appears(self) -> None:
+        values = ["", "", "Xin chào"]
+
+        with mock.patch.dict(
+            sys.modules, {"pyperclip": mock.MagicMock(paste=lambda: values.pop(0))}
+        ):
+            started = time.perf_counter()
+            text = services._wait_clipboard_text(timeout=2.0)
+            elapsed = time.perf_counter() - started
+
+        self.assertEqual(text, "Xin chào")
+        self.assertLess(elapsed, 0.5)
 
     def test_llm_translation_uses_openai_compatible_chat_endpoint(self) -> None:
         response = mock.MagicMock()

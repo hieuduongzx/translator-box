@@ -7,12 +7,38 @@ import os
 import sys
 import tempfile
 
-from PySide6.QtCore import QEvent, QLineF, QObject, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import (
+    QEvent,
+    QLineF,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import QApplication, QWidget
+
+from theme import TOKENS
 
 # Một accent phẳng duy nhất — không gradient. Glyph trắng trên nền accent.
 BRAND = QColor("#5b62f0")
+
+# Bảng màu icon dùng chung cho HUD bar và sidebar cài đặt.
+ICON_IDLE = QColor("#b7bfcd")
+ICON_ACTIVE = QColor("#ffffff")
+ICON_ON = QColor(TOKENS["ACCENT_HI"])
+ICON_OFF = QColor(TOKENS["TEXT_OFF"])
 
 
 class TranslatorApplication(QApplication):
@@ -33,6 +59,21 @@ class Bridge(QObject):
     """Chuyển lệnh từ thread nền về main thread (Qt queued signal)."""
 
     run = Signal(object)
+
+
+def alpha_text_layer(size: QSize) -> QImage | None:
+    """Lớp ARGB trong suốt để vẽ chữ rồi dán lên — buộc Qt dùng AA xám.
+
+    Trên Windows, chữ vẽ TRỰC TIẾP lên vùng đục luôn bị bật ClearType (subpixel
+    AA) và `QFont.NoSubpixelAntialias` bị bỏ qua; riềm đỏ/xanh của ClearType lộ ra
+    thành đốm nâu/tím, làm bản dịch trông sai màu so với chữ gốc. Vẽ vào lớp trong
+    suốt rồi dán lại thì Qt buộc dùng AA xám, giữ đúng màu chữ mà nét vẫn nguyên.
+    """
+    if size.width() <= 0 or size.height() <= 0:
+        return None
+    layer = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    layer.fill(Qt.transparent)
+    return layer
 
 
 def _render_icon_pixmap(size: int) -> QPixmap:
@@ -82,6 +123,22 @@ def _create_app_icon() -> QIcon:
     return icon
 
 
+def _brand_pixmap(size: int, ratio: float = 2.0) -> QPixmap:
+    """Mark thương hiệu ở kích thước bất kỳ — ưu tiên icon đóng gói cho sắc nét."""
+    physical = max(1, round(size * ratio))
+    path = asset_path("icon.png") or asset_path("icon.ico")
+    if path:
+        icon = QIcon(path)
+        if not icon.isNull():
+            pixmap = icon.pixmap(physical, physical)
+            if not pixmap.isNull():
+                pixmap.setDevicePixelRatio(ratio)
+                return pixmap
+    pixmap = _render_icon_pixmap(physical)
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
 def _enable_dark_titlebar(window: QWidget) -> None:
     """Title bar Windows tối theo theme (DWMWA_USE_IMMERSIVE_DARK_MODE)."""
     if os.name != "nt":
@@ -102,12 +159,8 @@ def _enable_dark_titlebar(window: QWidget) -> None:
         pass
 
 
-def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
-    """Vẽ icon nét mảnh kiểu Lucide — không cần file asset ngoài."""
-    pixmap = QPixmap(px, px)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
+def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None:  # noqa: C901
+    """Vẽ glyph nét mảnh kiểu Lucide trên lưới thiết kế 40×40, không cần asset."""
     pen = QPen(color)
     pen.setWidthF(px * 0.062)
     pen.setCapStyle(Qt.RoundCap)
@@ -129,6 +182,21 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
         line(30, 25, 11, 25)
         line(11, 25, 15, 21)
         line(11, 25, 15, 29)
+    elif kind == "image":  # ảnh + hai mũi tên: thay chữ trực tiếp trong ảnh
+        painter.drawRoundedRect(QRectF(7 * s, 9 * s, 26 * s, 22 * s), 3 * s, 3 * s)
+        painter.drawEllipse(QPointF(14 * s, 16 * s), 2.3 * s, 2.3 * s)
+        line(11, 27, 17, 21)
+        line(17, 21, 22, 25)
+        line(25, 18, 31, 18)
+        line(31, 18, 28, 15)
+        line(31, 18, 28, 21)
+    elif kind == "image-text":  # ảnh + dòng chữ: OCR ảnh vào khung
+        painter.drawRoundedRect(QRectF(7 * s, 9 * s, 26 * s, 22 * s), 3 * s, 3 * s)
+        painter.drawEllipse(QPointF(14 * s, 16 * s), 2.3 * s, 2.3 * s)
+        line(11, 26, 17, 21)
+        line(17, 21, 20, 24)
+        line(23, 21, 30, 21)
+        line(23, 25, 30, 25)
     elif kind == "scan":  # khung quét 4 góc + vạch ngang giữa
         line(9, 15, 9, 9)
         line(9, 9, 15, 9)
@@ -169,20 +237,17 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
         line(20, 18, 20, 32)
         line(17, 32, 20, 28)
         line(23, 32, 20, 28)
-    elif kind == "settings":  # bánh răng đơn giản: vòng + 8 răng
-        import math
-
-        # `line` tự scale từ lưới 40×40; giữ tâm ở đơn vị thiết kế để tránh
-        # scale hai lần khi icon được render ở kích thước khác 40 px.
-        cx, cy = 20, 20
-        for i in range(8):
-            ang = math.radians(i * 45)
-            dx, dy = math.cos(ang), math.sin(ang)
-            line(cx + dx * 9, cy + dy * 9, cx + dx * 13.5, cy + dy * 13.5)
-        painter.drawEllipse(QPointF(cx * s, cy * s), 6.5 * s, 6.5 * s)
-    elif kind == "copy":  # hai tờ giấy chồng
-        painter.drawRoundedRect(QRectF(14 * s, 14 * s, 18 * s, 18 * s), 3 * s, 3 * s)
-        painter.drawRoundedRect(QRectF(8 * s, 8 * s, 18 * s, 18 * s), 3 * s, 3 * s)
+    elif kind == "settings":  # 3 thanh trượt — rõ nghĩa "cài đặt" hơn bánh răng
+        for x, knob_y in ((12, 16), (20, 24), (28, 14)):
+            line(x, 9, x, 31)
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(x * s, knob_y * s), 3.1 * s, 3.1 * s)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(pen)
+    elif kind == "copy":  # bảng kẹp (clipboard) — không lẫn với icon overlay
+        painter.drawRoundedRect(QRectF(11 * s, 10 * s, 18 * s, 22 * s), 3 * s, 3 * s)
+        painter.drawRoundedRect(QRectF(16 * s, 6.5 * s, 8 * s, 6 * s), 2 * s, 2 * s)
     elif kind == "clear":  # thùng rác
         line(9, 12, 31, 12)
         line(16, 12, 16, 9)
@@ -197,30 +262,207 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:  # noqa: C901
         line(14, 18, 20, 24)
         line(26, 18, 20, 24)
         line(11, 31, 29, 31)
+    elif kind == "globe":  # quả cầu — nhóm cài đặt "Dịch"
+        painter.drawEllipse(QPointF(20 * s, 20 * s), 12 * s, 12 * s)
+        line(8, 20, 32, 20)
+        # Kinh tuyến: ellipse hẹp lồng trong quả cầu.
+        painter.drawEllipse(QPointF(20 * s, 20 * s), 6.5 * s, 12 * s)
+    elif kind == "ai":  # chip xử lý — nhóm cấu hình provider AI
+        painter.drawRoundedRect(
+            QRectF(11 * s, 11 * s, 18 * s, 18 * s), 4 * s, 4 * s
+        )
+        for offset in (15, 20, 25):
+            line(offset, 7, offset, 11)
+            line(offset, 29, offset, 33)
+            line(7, offset, 11, offset)
+            line(29, offset, 33, offset)
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(20 * s, 20 * s), 3.2 * s, 3.2 * s)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(pen)
+    elif kind == "keyboard":  # bàn phím — nhóm "Phím tắt"
+        painter.drawRoundedRect(
+            QRectF(7 * s, 12 * s, 26 * s, 17 * s), 3.5 * s, 3.5 * s
+        )
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        for x in (12, 17, 22, 27):
+            painter.drawEllipse(QPointF(x * s, 18.5 * s), 1.1 * s, 1.1 * s)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(pen)
+        line(14, 24.5, 26, 24.5)
+    elif kind == "info":  # thông tin — nhóm "Giới thiệu"
+        painter.drawEllipse(QPointF(20 * s, 20 * s), 12 * s, 12 * s)
+        line(20, 18.5, 20, 26)
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(20 * s, 14.5 * s), 1.3 * s, 1.3 * s)
+    elif kind == "type":  # chữ "A" + gạch chân — nhóm "Khung dịch"
+        line(11, 28, 19, 12)
+        line(19, 12, 27, 28)
+        line(14, 23, 24, 23)
+        line(9, 32, 31, 32)
+
+
+def _glyph_pixmap(
+    kind: str, color: QColor, logical: int, ratio: float = 2.0
+) -> QPixmap:
+    """Pixmap glyph theo devicePixelRatio → nét sắc ở mọi mức DPI."""
+    physical = max(1, round(logical * ratio))
+    pixmap = QPixmap(physical, physical)
+    pixmap.fill(Qt.transparent)
+    pixmap.setDevicePixelRatio(ratio)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    # QPainter làm việc theo toạ độ LOGIC khi pixmap có devicePixelRatio, nên vẽ
+    # trên lưới `physical / ratio`; backing store 2x lo phần sắc nét.
+    _paint_glyph(painter, kind, physical / ratio, color)
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
+
+
+def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:
+    """Icon một màu (dùng khi chỉ cần một trạng thái)."""
+    return QIcon(_glyph_pixmap(kind, color, px, 1.0))
+
+
+def _state_icon(kind: str, logical: int = 18) -> QIcon:
+    """Icon đa trạng thái: thường / hover (Active) / bật (On) / mờ (Disabled).
+
+    Qt tự chọn pixmap theo mode+state nên nút không cần tự đổi icon khi hover
+    hay khi được check.
+    """
+    icon = QIcon()
+    variants = (
+        (ICON_IDLE, QIcon.Mode.Normal, QIcon.State.Off),
+        (ICON_ACTIVE, QIcon.Mode.Active, QIcon.State.Off),
+        (ICON_ACTIVE, QIcon.Mode.Selected, QIcon.State.Off),
+        (ICON_OFF, QIcon.Mode.Disabled, QIcon.State.Off),
+        (ICON_ON, QIcon.Mode.Normal, QIcon.State.On),
+        (ICON_ON, QIcon.Mode.Active, QIcon.State.On),
+        (ICON_ON, QIcon.Mode.Selected, QIcon.State.On),
+        (ICON_OFF, QIcon.Mode.Disabled, QIcon.State.On),
+    )
+    for glyph_color, mode, state in variants:
+        icon.addPixmap(_glyph_pixmap(kind, glyph_color, logical), mode, state)
+    return icon
+
+
+def _nav_icon(kind: str, logical: int = 17) -> QIcon:
+    """Icon sidebar: xám khi thường, chuyển accent khi mục được chọn."""
+    icon = QIcon()
+    icon.addPixmap(
+        _glyph_pixmap(kind, ICON_IDLE, logical), QIcon.Mode.Normal, QIcon.State.Off
+    )
+    icon.addPixmap(
+        _glyph_pixmap(kind, ICON_ON, logical), QIcon.Mode.Selected, QIcon.State.Off
+    )
+    icon.addPixmap(
+        _glyph_pixmap(kind, ICON_ACTIVE, logical), QIcon.Mode.Active, QIcon.State.Off
+    )
+    return icon
+
+
+def _stroke_pixmap(draw, color: QColor, size: int = 24, width: float = 2.2) -> QPixmap:
+    """Khung vẽ chung cho các glyph nhỏ dùng làm asset của QSS."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(color)
+    pen.setWidthF(width)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    draw(painter)
+    painter.end()
+    return pixmap
+
+
+def _chevron(down: bool):
+    def draw(painter: QPainter) -> None:
+        if down:
+            painter.drawLine(QLineF(6.5, 9.5, 12.0, 15.0))
+            painter.drawLine(QLineF(12.0, 15.0, 17.5, 9.5))
+        else:
+            painter.drawLine(QLineF(6.5, 14.5, 12.0, 9.0))
+            painter.drawLine(QLineF(12.0, 9.0, 17.5, 14.5))
+
+    return draw
+
+
+def _checkmark(painter: QPainter) -> None:
+    painter.drawLine(QLineF(6.0, 12.5, 10.0, 16.5))
+    painter.drawLine(QLineF(10.0, 16.5, 18.0, 7.5))
+
+
+# Đổi số này khi sửa hình dạng asset để bỏ qua file PNG cache của bản cũ.
+_ASSET_REVISION = 2
 
 
 def _ui_assets() -> dict[str, str]:
-    """Sinh PNG nhỏ cho QSS (mũi tên combo) trong thư mục temp, trả về url()."""
+    """Sinh PNG nhỏ cho QSS (mũi tên, dấu tích) vào temp, trả về url() từng cái."""
     cache = os.path.join(tempfile.gettempdir(), "screen-translator-2k-assets")
     os.makedirs(cache, exist_ok=True)
-    path = os.path.join(cache, "chevron-down.png")
-    if not os.path.exists(path):
-        px = QPixmap(24, 24)
-        px.fill(Qt.transparent)
-        painter = QPainter(px)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        pen = QPen(QColor("#8b8b93"))
-        pen.setWidthF(2.2)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(6.0, 9.5, 12.0, 15.5))
-        painter.drawLine(QLineF(12.0, 15.5, 18.0, 9.5))
-        painter.end()
-        px.save(path, "PNG")
-    return {"chevron": "file:///" + path.replace(os.sep, "/")}
+    arrow = QColor(TOKENS["TEXT_DIM"])
+    arrow_off = QColor(TOKENS["TEXT_OFF"])
+    recipes = {
+        "chevron": (_chevron(True), arrow, 2.2),
+        "chevron_up": (_chevron(False), arrow, 2.2),
+        "chevron_off": (_chevron(True), arrow_off, 2.2),
+        "chevron_up_off": (_chevron(False), arrow_off, 2.2),
+        "check": (_checkmark, QColor("#ffffff"), 2.6),
+    }
+    assets: dict[str, str] = {}
+    for name, (draw, glyph_color, width) in recipes.items():
+        path = os.path.join(cache, f"{name}-r{_ASSET_REVISION}.png")
+        if not os.path.exists(path):
+            _stroke_pixmap(draw, glyph_color, 24, width).save(path, "PNG")
+        # QSS url() cần đường dẫn thuần; dạng "file:///…" Qt KHÔNG nạp được.
+        assets[name] = path.replace(os.sep, "/")
+    return assets
+
+
+def apply_dark_palette(app: QApplication) -> None:
+    """Palette tối cho các hộp thoại Qt dựng sẵn (chọn màu, thông báo, tooltip).
+
+    Stylesheet không chạm tới mọi widget con của QColorDialog/QMessageBox nên nếu
+    thiếu bước này, chúng hiện ra theo palette sáng mặc định của Windows và chữ
+    trắng sẽ mất hút.
+    """
+    palette = QPalette()
+    bg = QColor(TOKENS["BG"])
+    surface = QColor(TOKENS["SURFACE"])
+    sunken = QColor(TOKENS["SUNKEN"])
+    text = QColor(TOKENS["TEXT"])
+    muted = QColor(TOKENS["TEXT_OFF"])
+    accent = QColor(TOKENS["ACCENT"])
+    for group in (QPalette.Active, QPalette.Inactive):
+        palette.setColor(group, QPalette.Window, bg)
+        palette.setColor(group, QPalette.WindowText, text)
+        palette.setColor(group, QPalette.Base, sunken)
+        palette.setColor(group, QPalette.AlternateBase, surface)
+        palette.setColor(group, QPalette.Text, text)
+        palette.setColor(group, QPalette.Button, surface)
+        palette.setColor(group, QPalette.ButtonText, text)
+        palette.setColor(group, QPalette.ToolTipBase, surface)
+        palette.setColor(group, QPalette.ToolTipText, text)
+        palette.setColor(group, QPalette.Highlight, accent)
+        palette.setColor(group, QPalette.HighlightedText, QColor("#ffffff"))
+        palette.setColor(group, QPalette.Link, QColor(TOKENS["ACCENT_HI"]))
+        palette.setColor(group, QPalette.PlaceholderText, QColor(TOKENS["TEXT_MUTED"]))
+    for role in (
+        QPalette.WindowText,
+        QPalette.Text,
+        QPalette.ButtonText,
+        QPalette.PlaceholderText,
+    ):
+        palette.setColor(QPalette.Disabled, role, muted)
+    palette.setColor(QPalette.Disabled, QPalette.Window, bg)
+    palette.setColor(QPalette.Disabled, QPalette.Base, bg)
+    palette.setColor(QPalette.Disabled, QPalette.Button, QColor(TOKENS["PRESSED"]))
+    app.setPalette(palette)
 
 
 def _fmt_hotkey(raw: str) -> str:

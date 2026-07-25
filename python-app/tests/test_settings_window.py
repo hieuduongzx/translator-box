@@ -14,9 +14,9 @@ sys.path.insert(0, str(APP_DIR))
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QIcon  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLineEdit  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit  # noqa: E402
 
-from config import AppConfig  # noqa: E402
+from config import HUD_STYLE_DEFAULTS, AppConfig  # noqa: E402
 from settings_window import SettingsWindow, available_hud_font_options  # noqa: E402
 
 
@@ -88,38 +88,176 @@ class SettingsWindowTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            labels, ["Dịch", "OCR", "Khung dịch", "Phím tắt", "Giới thiệu"]
+            labels,
+            ["Dịch", "Dịch vụ AI", "OCR", "Khung dịch", "Phím tắt", "Giới thiệu"],
         )
-        self.assertEqual(self.window.pages.count(), 5)
+        self.assertEqual(self.window.pages.count(), 6)
         self.assertEqual(
             self.window.navigation.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
+        self.window.resize(self.window.minimumSize())
+        self.window.show()
+        self.app.processEvents()
+        last_item = self.window.navigation.item(self.window.navigation.count() - 1)
+        last_rect = self.window.navigation.visualItemRect(last_item)
+        self.assertLessEqual(
+            last_rect.bottom(), self.window.navigation.viewport().rect().bottom()
+        )
+        self.assertEqual(self.window.navigation.verticalScrollBar().maximum(), 0)
 
     def test_left_navigation_switches_current_page(self) -> None:
-        self.window.navigation.setCurrentRow(2)
+        self.window.navigation.setCurrentRow(1)
 
-        self.assertEqual(self.window.pages.currentIndex(), 2)
+        self.assertEqual(self.window.pages.currentIndex(), 1)
+        self.assertEqual(self.window.navigation.currentItem().text(), "Dịch vụ AI")
+
+    def test_ai_services_has_explicit_provider_management(self) -> None:
+        service_entries = [
+            self.window.service_box.itemText(index)
+            for index in range(self.window.service_box.count())
+        ]
+
+        self.assertNotIn("＋ Thêm provider tùy chỉnh…", service_entries)
+        self.assertEqual(self.window.add_provider_btn.text(), "Thêm provider")
+        self.assertGreaterEqual(self.window.ai_provider_box.count(), 3)
+        self.assertFalse(self.window.llm_frame.isHidden())
+
+    def test_ai_provider_requires_key_before_activation(self) -> None:
+        openai_index = self.window.ai_provider_box.findData("openai")
+        self.window.ai_provider_box.setCurrentIndex(openai_index)
+
+        self.assertEqual(self.window.llm_endpoint_edit.text(), "https://api.openai.com/v1")
+        self.assertFalse(self.window.activate_ai_btn.isEnabled())
+        self.assertEqual(self.window.ai_provider_state.text(), "CHƯA CÓ API KEY")
+        self.assertEqual(self.window.service_box.findData("openai::gpt-4o"), -1)
+
+        self.window.llm_key_edit.setText("sk-test")
+        self.window._on_key_changed()
+        self.assertTrue(self.window.activate_ai_btn.isEnabled())
+        self.assertGreaterEqual(self.window.service_box.findData("openai::gpt-4o"), 0)
+        self.window._activate_ai_provider()
+
+        self.assertEqual(self.window.config.translator, "openai")
+        self.assertEqual(self.window.service_box.currentData(), "openai::gpt-4o-mini")
+        self.assertFalse(self.window.activate_ai_btn.isEnabled())
+        self.assertEqual(self.window.ai_provider_state.text(), "ĐANG DÙNG")
+
+    def test_add_provider_registers_and_selects_custom_ai_service(self) -> None:
+        payload = {
+            "name": "Local AI",
+            "endpoint": "http://127.0.0.1:11434/v1",
+            "api_key": "local-key",
+            "models": ["qwen2.5"],
+        }
+        with mock.patch("settings_window.ProviderDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            dialog_type.return_value.data.return_value = payload
+
+            self.window._add_provider()
+
+        code = "custom:cp1"
+        self.assertEqual(self.window.config.translator, code)
+        self.assertEqual(self.window.ai_provider_box.currentData(), code)
+        self.assertGreaterEqual(
+            self.window.service_box.findData("custom::cp1::qwen2.5"), 0
+        )
+        self.assertEqual(self.window.llm_endpoint_edit.text(), payload["endpoint"])
+
+    def test_builtin_provider_supports_inline_model_add_and_remove(self) -> None:
+        openai_index = self.window.ai_provider_box.findData("openai")
+        self.window.ai_provider_box.setCurrentIndex(openai_index)
+        self.window.llm_key_edit.setText("sk-test")
+        self.window._on_key_changed()
+        self.window.model_id_input.setText("gpt-5-mini-preview")
+
+        self.window._add_ai_model()
+
+        self.assertIn("gpt-5-mini-preview", self.window.config.ai_models["openai"])
+        self.assertGreaterEqual(
+            self.window.service_box.findData("openai::gpt-5-mini-preview"), 0
+        )
+        model_index = self.window.llm_model_box.findData("gpt-5-mini-preview")
+        self.window.llm_model_box.setCurrentIndex(model_index)
+        self.assertTrue(self.window.remove_ai_model_btn.isEnabled())
+
+        self.window._remove_ai_model()
+
+        self.assertEqual(self.window.llm_model_box.findData("gpt-5-mini-preview"), -1)
+        self.assertEqual(
+            self.window.service_box.findData("openai::gpt-5-mini-preview"), -1
+        )
 
     def test_hud_controls_use_requested_defaults(self) -> None:
         font_families = [
             self.window.font_family_box.itemData(index)
             for index in range(self.window.font_family_box.count())
         ]
+        defaults = HUD_STYLE_DEFAULTS
 
         self.assertEqual(font_families, ["Yu Gothic", "Arial"])
         self.assertEqual(self.window.font_family_box.currentData(), "Yu Gothic")
-        self.assertEqual(self.window.font_size_spin.value(), 16)
-        self.assertEqual(self.window.text_color_btn.color_hex(), "#000000")
-        self.assertEqual(self.window.border_width_spin.value(), 1)
-        self.assertEqual(self.window.border_color_btn.color_hex(), "#ffffff")
+        self.assertEqual(self.window.font_size_spin.value(), defaults["hud_font_size"])
+        self.assertEqual(
+            self.window.text_color_btn.color_hex(), defaults["hud_text_color"]
+        )
+        self.assertEqual(
+            self.window.border_width_spin.value(), defaults["hud_border_width"]
+        )
+        self.assertEqual(
+            self.window.border_color_btn.color_hex(), defaults["hud_border_color"]
+        )
         self.assertEqual(self.window.background_color_btn.color_value(), "#00000000")
+        self.assertEqual(
+            self.window.shadow_radius_spin.value(), defaults["hud_shadow_radius"]
+        )
+        self.assertEqual(
+            self.window.shadow_color_btn.color_value(), defaults["hud_shadow_color"]
+        )
+
+    def test_hud_style_reset_restores_legible_defaults(self) -> None:
+        self.window.font_size_spin.setValue(40)
+        self.window.shadow_radius_spin.setValue(0.0)
+        self.window.text_color_btn.set_color("#123456")
+        self.window.border_width_spin.setValue(0.0)
+
+        self.window._reset_hud_style()
+
+        defaults = HUD_STYLE_DEFAULTS
+        self.assertEqual(self.window.font_size_spin.value(), defaults["hud_font_size"])
+        self.assertEqual(
+            self.window.shadow_radius_spin.value(), defaults["hud_shadow_radius"]
+        )
+        self.assertEqual(
+            self.window.text_color_btn.color_hex(), defaults["hud_text_color"]
+        )
+        self.assertEqual(self.window.config.hud_border_width, defaults["hud_border_width"])
+        self.assertEqual(self.window.config.hud_shadow_color, defaults["hud_shadow_color"])
+
+    def test_hud_style_values_include_shadow_for_preview(self) -> None:
+        self.window.shadow_radius_spin.setValue(4.5)
+
+        values = self.window._hud_style_values()
+
+        self.assertEqual(len(values), 8)
+        self.assertEqual(values[6], 4.5)
+        self.assertEqual(values[7], HUD_STYLE_DEFAULTS["hud_shadow_color"])
 
     def test_border_width_accepts_subpixel_values(self) -> None:
         self.window.border_width_spin.setValue(0.5)
 
         self.assertEqual(self.window.border_width_spin.value(), 0.5)
         self.assertEqual(self.window.config.hud_border_width, 0.5)
+
+    def test_clipboard_image_hotkeys_are_configurable(self) -> None:
+        self.assertEqual(
+            self.window.hotkey_edits["clipboard_image_replace"].combo(),
+            "ctrl+alt+v",
+        )
+        self.assertEqual(
+            self.window.hotkey_edits["clipboard_image_to_text"].combo(),
+            "ctrl+alt+t",
+        )
 
     def test_llm_fields_use_public_endpoint_and_require_user_key(self) -> None:
         self.window.service_box.setCurrentIndex(self.window.service_box.findData("llm"))

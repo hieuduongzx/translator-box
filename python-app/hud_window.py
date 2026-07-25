@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
-from PySide6.QtGui import QAction, QGuiApplication
+from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -20,8 +21,10 @@ import overlay
 from config import AppConfig
 from constants import (
     BAR_ACTIONS,
+    BAR_GROUP_CLIPBOARD,
     BAR_GROUP_FRAME,
     BAR_GROUP_OVERLAY,
+    BUILTIN_AI_IDS,
     LANGUAGES,
     bar_service_key,
     bar_translator_entries,
@@ -33,13 +36,16 @@ from translation_workflows import TranslationWorkflowController
 from update_controller import UpdateController
 from version import APP_NAME
 from ui_utils import (
+    ICON_IDLE,
     Bridge,
     TranslatorApplication,
     _bring_to_front,
+    _brand_pixmap,
     _create_app_icon,
     _fmt_hotkey,
+    _make_icon,
 )
-from widgets import BarButton, DragBar, HudTextView
+from widgets import BarButton, BusyBar, DragBar, HudBar, HudTextView, StatusPill
 
 
 class HUDWindow(QWidget):
@@ -71,7 +77,8 @@ class HUDWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
-        self.setMinimumSize(320, 160)
+        # Đủ rộng để thanh công cụ không bị bóp méo, vẫn nhỏ gọn trên màn hình.
+        self.setMinimumSize(600, 150)
         self.setMouseTracking(True)
 
         self._build_ui()
@@ -97,19 +104,33 @@ class HUDWindow(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        # Chừa lề quanh bar để bóng đổ không bị cắt ở mép cửa sổ.
+        root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
         self._bar = self._build_bar()
         self._display = self._build_display()
         root.addWidget(self._bar)
         root.addWidget(self._display, 1)
+        self._sync_placeholder()
+        self._sync_output_actions()
 
     def _build_bar(self) -> QWidget:
-        bar = DragBar(self)
+        bar = HudBar(self)
         bar.setObjectName("hudBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(7, 3, 7, 3)
+        shell = QVBoxLayout(bar)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 5, 8, 3)
         layout.setSpacing(2)
+
+        logo = QLabel()
+        logo.setPixmap(_brand_pixmap(19))
+        logo.setFixedSize(19, 19)
+        logo.setToolTip("Kéo để di chuyển · Nhấp đúp để ẩn/hiện thanh công cụ.")
+        layout.addWidget(logo)
+        layout.addSpacing(6)
 
         self.pin_button = BarButton("pin")
         self.pin_button.setAccessibleName("Ghim khung dịch")
@@ -117,36 +138,54 @@ class HUDWindow(QWidget):
         self.pin_button.setChecked(self.config.hud_pinned)
         self.pin_button.toggled.connect(self._set_pinned)
         layout.addWidget(self.pin_button)
-        layout.addSpacing(3)
-
-        logo = QLabel("T")
-        logo.setObjectName("hudLogo")
-        logo.setFixedSize(20, 20)
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setToolTip("Kéo để di chuyển · Nhấp đúp để ẩn/hiện thanh bar.")
-        layout.addWidget(logo)
-        layout.addSpacing(3)
+        layout.addWidget(self._bar_separator())
 
         self._action_btns: dict[str, BarButton] = {}
         self._add_action_group(layout, BAR_GROUP_OVERLAY)
         layout.addWidget(self._bar_separator())
+        self._add_action_group(layout, BAR_GROUP_CLIPBOARD)
+        layout.addWidget(self._bar_separator())
         self._add_action_group(layout, BAR_GROUP_FRAME)
+        layout.addWidget(self._bar_separator())
+
+        self.copy_button = BarButton("copy")
+        self.copy_button.setAccessibleName("Copy bản dịch")
+        self.copy_button.setToolTip("Copy bản dịch trong khung vào clipboard")
+        self.copy_button.clicked.connect(self._copy_output)
+        layout.addWidget(self.copy_button)
+        self.clear_button = BarButton("clear")
+        self.clear_button.setAccessibleName("Xoá khung dịch")
+        self.clear_button.setToolTip("Xoá nội dung đang hiện trong khung dịch")
+        self.clear_button.clicked.connect(self._clear_output)
+        layout.addWidget(self.clear_button)
         layout.addStretch(1)
+
+        self.status_pill = StatusPill()
+        self.status_pill.setAccessibleName("Trạng thái")
+        layout.addWidget(self.status_pill)
+        layout.addSpacing(4)
+        layout.addWidget(self._bar_separator())
 
         self.service_combo = QComboBox()
         self.service_combo.setObjectName("barCombo")
         self.service_combo.setAccessibleName("Dịch vụ dịch")
         self.service_combo.setToolTip("Chọn dịch vụ dịch")
-        for label, key in bar_translator_entries(self.config.custom_providers):
+        self.service_combo.setMinimumWidth(104)
+        self.service_combo.setMaximumWidth(196)
+        for label, key in self._service_entries():
             self.service_combo.addItem(label, key)
 
         self.target_combo = QComboBox()
         self.target_combo.setObjectName("barCombo")
         self.target_combo.setAccessibleName("Ngôn ngữ đích")
-        self.target_combo.setToolTip("Chọn ngôn ngữ đích")
+        self.target_combo.setToolTip("Chọn ngôn ngữ đích của bản dịch")
+        self.target_combo.setMinimumWidth(88)
+        self.target_combo.setMaximumWidth(132)
         for label, code in LANGUAGES:
             self.target_combo.addItem(label, code)
         self.sync_translation_controls()
+        self._fit_popup(self.service_combo)
+        self._fit_popup(self.target_combo)
         self.service_combo.currentIndexChanged.connect(self._service_changed)
         self.target_combo.currentIndexChanged.connect(self._target_changed)
         layout.addWidget(self.service_combo)
@@ -154,16 +193,62 @@ class HUDWindow(QWidget):
         layout.addWidget(self._bar_separator())
 
         settings_button = BarButton("settings")
+        settings_button.setAccessibleName("Cài đặt")
         settings_button.setToolTip("Mở cài đặt")
         settings_button.clicked.connect(self._open_settings)
         layout.addWidget(settings_button)
         hide_button = BarButton("hide")
-        hide_button.setToolTip("Ẩn vào khay hệ thống")
+        hide_button.setAccessibleName("Ẩn vào khay")
+        hide_button.setToolTip("Ẩn vào khay hệ thống (nhấp icon khay để mở lại)")
         hide_button.clicked.connect(self._hide_to_tray)
         layout.addWidget(hide_button)
+        shell.addLayout(layout)
+
+        # Vạch tiến trình mảnh sát mép dưới bar, chỉ chạy khi đang xử lý.
+        busy_row = QHBoxLayout()
+        busy_row.setContentsMargins(10, 0, 10, 4)
+        self.busy_bar = BusyBar()
+        busy_row.addWidget(self.busy_bar)
+        shell.addLayout(busy_row)
+
+        shadow = QGraphicsDropShadowEffect(bar)
+        shadow.setBlurRadius(22)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 150))
+        bar.setGraphicsEffect(shadow)
+
         self.refresh_bar_tooltips()
         self._sync_pin_tooltip()
+        self._sync_output_actions()
         return bar
+
+    def _service_entries(self) -> list[tuple[str, str]]:
+        models = {
+            provider_id: self.config.provider_models(provider_id)
+            for provider_id in BUILTIN_AI_IDS
+        }
+        return bar_translator_entries(
+            self.config.custom_providers,
+            builtin_models=models,
+            enabled_providers=self.config.configured_ai_provider_ids(),
+        )
+
+    @staticmethod
+    def _fit_popup(combo: QComboBox) -> None:
+        """Danh sách bật lên rộng theo nội dung dù combo trên bar bị giới hạn.
+
+        Nhãn kiểu “Translator Box · Mistral Small” dài hơn combo; nếu không nới
+        popup thì cả danh sách cũng bị cắt và không phân biệt được model nào.
+        """
+        metrics = combo.fontMetrics()
+        widest = max(
+            (
+                metrics.horizontalAdvance(combo.itemText(index))
+                for index in range(combo.count())
+            ),
+            default=0,
+        )
+        combo.view().setMinimumWidth(widest + 46)
 
     def _add_action_group(self, layout: QHBoxLayout, group: list) -> None:
         for kind, label, action, _tooltip in group:
@@ -178,16 +263,23 @@ class HUDWindow(QWidget):
             self._action_btns[action] = button
             layout.addWidget(button)
 
-    @staticmethod
-    def _bar_separator() -> QFrame:
+    def _bar_separator(self) -> QFrame:
         separator = QFrame()
         separator.setObjectName("barSep")
-        separator.setFixedSize(1, 16)
-        return separator
+        separator.setFixedSize(1, 18)
+        wrapper = QWidget(self)
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(5, 0, 5, 0)
+        wrapper_layout.addWidget(separator)
+        wrapper.setFixedWidth(11)
+        return wrapper
 
     def _build_display(self) -> QWidget:
         display = DragBar(self)
         display.setObjectName("hudDisplay")
+        display.setToolTip(
+            "Khung nhận bản dịch · Kéo để di chuyển · Nhấp đúp để ẩn/hiện thanh công cụ"
+        )
         layout = QVBoxLayout(display)
         layout.setContentsMargins(14, 8, 14, 10)
         layout.setSpacing(0)
@@ -197,6 +289,38 @@ class HUDWindow(QWidget):
         layout.addWidget(self.output, 1)
         return display
 
+    def _copy_output(self) -> None:
+        text = self.output.text().strip()
+        if not text:
+            self.set_status("Khung dịch đang trống.", "error")
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            self.set_status("Không truy cập được clipboard.", "error")
+            return
+        clipboard.setText(text)
+        self.set_status("Đã copy bản dịch vào clipboard.", "ok")
+
+    def _clear_output(self) -> None:
+        if not self.output.text():
+            return
+        self.set_output("")
+        self.set_status("Đã xoá khung dịch.", "ready")
+
+    def _sync_output_actions(self) -> None:
+        """Copy/Xoá chỉ bấm được khi trong khung đang có bản dịch."""
+        has_text = bool(self.output.text().strip()) if hasattr(self, "output") else False
+        for button in (self.copy_button, self.clear_button):
+            button.setEnabled(has_text)
+
+    def _sync_placeholder(self) -> None:
+        """Gợi ý trong khung trống: nói rõ vùng này để làm gì + phím tắt."""
+        if not hasattr(self, "output"):
+            return
+        hotkey = _fmt_hotkey(self.config.hotkeys.get("region_to_text", ""))
+        suffix = f" · {hotkey}" if hotkey != "Tắt" else ""
+        self.output.set_placeholder(f"Bản dịch hiện ở đây{suffix}")
+
     def apply_hud_text_style(self) -> None:
         self.preview_hud_text_style(
             self.config.hud_font_family,
@@ -205,6 +329,8 @@ class HUDWindow(QWidget):
             self.config.hud_border_width,
             self.config.hud_border_color,
             self.config.hud_background_color,
+            self.config.hud_shadow_radius,
+            self.config.hud_shadow_color,
         )
 
     def preview_hud_text_style(
@@ -215,6 +341,8 @@ class HUDWindow(QWidget):
         border_width: float,
         border_color: str,
         background_color: str,
+        shadow_radius: float = 0.0,
+        shadow_color: str = "#00000000",
     ) -> None:
         self.output.apply_style(
             font_family,
@@ -223,6 +351,8 @@ class HUDWindow(QWidget):
             border_width,
             border_color,
             background_color,
+            shadow_radius,
+            shadow_color,
         )
 
     def _sync_pin_tooltip(self) -> None:
@@ -333,6 +463,7 @@ class HUDWindow(QWidget):
             if button is not None:
                 hotkey = _fmt_hotkey(self.config.hotkeys.get(action, ""))
                 button.setToolTip(f"{label} · {tooltip}\nPhím tắt: {hotkey}")
+        self._sync_placeholder()
 
     def _restore_geometry(self) -> None:
         geometry = self.config.hud_geometry
@@ -415,9 +546,10 @@ class HUDWindow(QWidget):
         """Dựng lại danh sách dịch vụ trên bar sau khi provider tùy chỉnh đổi."""
         self.service_combo.blockSignals(True)
         self.service_combo.clear()
-        for label, key in bar_translator_entries(self.config.custom_providers):
+        for label, key in self._service_entries():
             self.service_combo.addItem(label, key)
         self.service_combo.blockSignals(False)
+        self._fit_popup(self.service_combo)
         self.sync_translation_controls()
 
     def _target_changed(self) -> None:
@@ -436,8 +568,17 @@ class HUDWindow(QWidget):
         self.tray = QSystemTrayIcon(self.app_icon, QApplication.instance())
         self.tray.setToolTip(f"{APP_NAME} — {self._status_text}")
         menu = QMenu()
+        icons = {
+            "Mở HUD": "overlay",
+            "Hiện thanh công cụ": "text",
+            "Cài đặt…": "settings",
+            "Ẩn": "hide",
+        }
         for label, callback in self._tray_commands():
             action = QAction(label, menu)
+            kind = icons.get(label)
+            if kind is not None:
+                action.setIcon(_make_icon(kind, ICON_IDLE, 20))
             action.triggered.connect(callback)
             menu.addAction(action)
         menu.addSeparator()
@@ -515,11 +656,15 @@ class HUDWindow(QWidget):
     def set_status(self, text: str, state: str = "ready") -> None:
         self._status_text = text
         self._status_state = state
-        self._bar.setToolTip(text)
+        if hasattr(self, "status_pill"):
+            self.status_pill.set_state(text, state)
+            self.status_pill.setToolTip(text)
         if hasattr(self, "tray"):
             self.tray.setToolTip(f"{APP_NAME} — {text}")
 
     def set_busy(self, busy: bool) -> None:
+        if hasattr(self, "busy_bar"):
+            self.busy_bar.set_active(busy)
         for action, button in self._action_btns.items():
             if action not in ("region_to_live", "region_to_live_frame"):
                 button.setEnabled(not busy)
@@ -544,6 +689,7 @@ class HUDWindow(QWidget):
 
     def set_output(self, text: str) -> None:
         self.output.setText(text)
+        self._sync_output_actions()
 
     def ensure_visible(self) -> None:
         if not self.isVisible() or self.isMinimized():

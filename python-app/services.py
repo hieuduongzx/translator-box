@@ -9,16 +9,28 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import ocr_runtime
 
 _UA = "ScreenTranslator2K-Py/0.1"
+
+# Số request dịch chạy song song khi phải dịch từng dòng riêng.
+_TRANSLATE_WORKERS = 6
+
+
+@lru_cache(maxsize=None)
+def _package_available(name: str) -> bool:
+    """`find_spec` quét sys.path nên không gọi lại mỗi lần OCR (gói không tự mọc)."""
+    return importlib.util.find_spec(name) is not None
 
 
 @dataclass(frozen=True)
@@ -202,49 +214,6 @@ def merge_regions_into_lines(regions: list[TextRegion]) -> list[TextRegion]:
     return merged
 
 
-def reflow_regions(regions: list[TextRegion]) -> str:
-    """Ghép các dòng OCR bị wrap thành đoạn văn để dịch cho liền mạch.
-
-    Gom ô thành dòng, rồi gộp các dòng sát nhau thành đoạn — chỉ giữ ngắt dòng
-    khi khoảng trống dọc lớn (đoạn mới). Trong một đoạn, các dòng được nối lại
-    (dấu cách cho Latinh, liền cho CJK) — nhờ vậy trình dịch nhận trọn câu thay
-    vì từng mẩu bị cắt.
-    """
-    lines, median_h = _group_into_lines(regions)
-    if not lines:
-        return ""
-    paragraphs: list[str] = []
-    current = ""
-    prev_bottom: int | None = None
-    for line in lines:
-        text = _line_text(line)
-        if not text:
-            continue
-        top, bottom = line["top"], line["bottom"]
-        if prev_bottom is not None and (top - prev_bottom) > median_h * 0.8:
-            if current:
-                paragraphs.append(current)
-            current = text
-        else:
-            current = _join_wrapped(current, text) if current else text
-        prev_bottom = bottom
-    if current:
-        paragraphs.append(current)
-    return "\n".join(paragraphs)
-
-
-def ocr_text_reflow(
-    image_path: str | Path,
-    language: str,
-    engine: str = "rapidocr",
-    model: str = "ppocrv5_mobile",
-    backend: str = "auto",
-) -> str:
-    """OCR rồi ghép dòng wrap thành đoạn — dùng cho khung dịch (Ctrl+B/vùng)."""
-    regions = ocr_layout(image_path, language, engine, model, backend)
-    return reflow_regions(regions)
-
-
 _OCR_ENGINE_LABELS = {
     "windows": "Windows OCR",
     "rapidocr": "OCR ngoại tuyến",
@@ -278,14 +247,14 @@ def ocr_engine_status(
     if engine == "windows":
         if os.name != "nt":
             return False, "Windows OCR chỉ hoạt động trên Windows."
-        if importlib.util.find_spec("winsdk") is None:
+        if not _package_available("winsdk"):
             return False, "Thiếu winsdk · chạy: pip install winsdk"
         return True, "Offline · dùng gói ngôn ngữ đã cài trong Windows."
     if engine == "rapidocr":
         missing = [
             package
             for package in ("rapidocr", "onnxruntime")
-            if importlib.util.find_spec(package) is None
+            if not _package_available(package)
         ]
         if missing:
             return False, "Thiếu " + ", ".join(missing) + " · cài requirements.txt"
@@ -629,6 +598,12 @@ class RegionVisual:
     - rect: hình chữ nhật (toạ độ ảnh nguồn) mà miếng nền phủ lên.
     - patch_rgb / patch_size: ảnh nền đã dựng lại (RGB888) hoặc None nếu không
       dựng được → khi đó dùng `bg` tô đặc như fallback.
+    - ink_rect: hộp bao SÁT nét chữ gốc (toạ độ ảnh nguồn), đo từ mặt nạ nét chữ.
+      Hộp OCR luôn lỏng hơn nét chữ nên overlay phải bám ink_rect mới ra cỡ chữ
+      đúng bằng bản gốc.
+    - stroke_thickness: độ dày nét chữ gốc (pixel ảnh nguồn). Overlay so nó với
+      cỡ chữ của cả khối để quyết định vẽ đậm — không tự quyết ở đây vì một dòng
+      toàn chữ thấp có ink nhỏ sẽ bị coi là đậm oan.
     """
 
     rect: tuple[int, int, int, int]
@@ -636,13 +611,12 @@ class RegionVisual:
     patch_size: tuple[int, int] | None
     bg: tuple[int, int, int]
     fg: tuple[int, int, int]
+    ink_rect: tuple[int, int, int, int] | None = None
+    stroke_thickness: float = 0.0
 
 
 def _cv2_available() -> bool:
-    return (
-        importlib.util.find_spec("cv2") is not None
-        and importlib.util.find_spec("numpy") is not None
-    )
+    return _package_available("cv2") and _package_available("numpy")
 
 
 def reconstruct_layout(
@@ -712,20 +686,75 @@ def reconstruct_layout(
             visuals.append(RegionVisual(rect, None, None, bg, fg))
             continue
 
-        # Màu chữ dịch = màu chữ gốc (trung bình pixel nét chữ) để trông giống
-        # bản gốc; chỉ thay bằng đen/trắng khi màu gốc quá sát nền (mất tương phản).
-        text_mean = patch[stroke].mean(axis=0)
-        text_color = tuple(int(round(v)) for v in text_mean)
+        # Màu chữ dịch = màu chữ gốc (median pixel lõi nét) để trông giống bản
+        # gốc; chỉ thay bằng đen/trắng khi màu gốc quá sát nền (mất tương phản).
+        text_color = _core_text_color(np, patch, stroke, diff) or fg
         lum_bg = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
         lum_text = 0.299 * text_color[0] + 0.587 * text_color[1] + 0.114 * text_color[2]
         chosen_fg = text_color if abs(lum_text - lum_bg) >= 70 else fg
 
+        # Hộp ink + độ đậm đo TRƯỚC khi dilate (dilate làm nét phình ra).
+        outline = np.zeros((ph, pw), dtype=bool)
+        if inner_right > inner_left and inner_bottom > inner_top:
+            outline[inner_top:inner_bottom, inner_left:inner_right] = (
+                diff[inner_top:inner_bottom, inner_left:inner_right] > 26
+            )
+        ink_box, thickness = _ink_metrics(np, stroke, outline)
+        ink_rect = None
+        if ink_box is not None:
+            ink_rect = (
+                outer_left + ink_box[0],
+                outer_top + ink_box[1],
+                outer_left + ink_box[2],
+                outer_top + ink_box[3],
+            )
+
         mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
         clean = cv2.inpaint(np.ascontiguousarray(patch), mask, 3, cv2.INPAINT_TELEA)
         rgb = np.ascontiguousarray(clean, dtype=np.uint8).tobytes()
-        visuals.append(RegionVisual(rect, rgb, (pw, ph), bg, chosen_fg))
+        visuals.append(
+            RegionVisual(rect, rgb, (pw, ph), bg, chosen_fg, ink_rect, thickness)
+        )
 
     return (width, height), visuals
+
+
+def _core_text_color(np, patch, stroke, diff):
+    """Màu chữ gốc lấy từ pixel LÕI nét chữ, dùng median cho ổn định.
+
+    Trung bình cả mặt nạ bị pixel viền khử răng (một nửa là nền) kéo về phía nền
+    → chữ đỏ ra hồng, chữ đen ra xám. Chỉ giữ 40% pixel lệch xa nền nhất rồi lấy
+    median từng kênh nên màu sát đúng những gì mắt thấy.
+    """
+    values = diff[stroke]
+    if values.size == 0:
+        return None
+    threshold = float(np.quantile(values, 0.6))
+    core = stroke & (diff >= threshold)
+    if int(core.sum()) < 3:
+        core = stroke
+    median = np.median(patch[core], axis=0)
+    return tuple(int(round(float(channel))) for channel in median)
+
+
+def _ink_metrics(np, stroke, outline):
+    """(hộp ink sát nét chữ trong patch, độ dày nét) từ mặt nạ nét chữ.
+
+    Hộp ink đo trên mặt nạ NHẠY (`outline`) để lấy trọn cả biên khử răng rất mờ ở
+    đỉnh/đáy glyph — mặt nạ dùng cho inpaint đặt ngưỡng cao nên cắt mất ~10% chiều
+    cao, khiến chữ dịch bị nhỏ hơn chữ gốc. Độ dày nét đo trên mặt nạ lõi
+    (`stroke`): số pixel ink chia số đoạn ink mỗi hàng ngang — bền hơn mật độ ink
+    vì chữ CJK vốn dày đặc nhưng nét vẫn mảnh.
+    """
+    rows = np.flatnonzero(outline.any(axis=1))
+    columns = np.flatnonzero(outline.any(axis=0))
+    if rows.size == 0 or columns.size == 0:
+        return None, 0.0
+    top, bottom = int(rows[0]), int(rows[-1]) + 1
+    left, right = int(columns[0]), int(columns[-1]) + 1
+    starts = int(stroke[:, 0].sum()) + int((stroke[:, 1:] & ~stroke[:, :-1]).sum())
+    thickness = int(stroke.sum()) / max(1, starts)
+    return (left, top, right, bottom), thickness
 
 
 def _bg_from_patch(np, patch, inner_left, inner_top, inner_right, inner_bottom):
@@ -801,43 +830,33 @@ def translate_regions(
     """Dịch các dòng và cố giữ ánh xạ 1:1 với bounding box OCR."""
     if not regions:
         return []
-    if len(regions) == 1:
-        return [
-            translate(
-                regions[0].text,
-                target,
-                service,
-                llm_endpoint=llm_endpoint,
-                llm_api_key=llm_api_key,
-                llm_model=llm_model,
-            )
-        ]
 
-    joined = "\n".join(region.text for region in regions)
-    combined = translate(
-        joined,
-        target,
-        service,
-        llm_endpoint=llm_endpoint,
-        llm_api_key=llm_api_key,
-        llm_model=llm_model,
-    )
-    lines = [line.strip() for line in combined.splitlines() if line.strip()]
-    if len(lines) == len(regions):
-        return lines
-
-    # Một số dịch vụ gộp dòng; khi đó ưu tiên đúng layout hơn một request duy nhất.
-    return [
-        translate(
-            region.text,
+    def translate_one(text: str) -> str:
+        return translate(
+            text,
             target,
             service,
             llm_endpoint=llm_endpoint,
             llm_api_key=llm_api_key,
             llm_model=llm_model,
         )
-        for region in regions
-    ]
+
+    if len(regions) == 1:
+        return [translate_one(regions[0].text)]
+
+    combined = translate_one("\n".join(region.text for region in regions))
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    if len(lines) == len(regions):
+        return lines
+
+    # Một số dịch vụ gộp dòng; khi đó ưu tiên đúng layout hơn một request duy nhất.
+    # Các request còn lại chạy SONG SONG — trước đây nối tiếp nên overlay nhiều
+    # dòng phải chờ cộng dồn độ trễ mạng của từng dòng.
+    texts = [region.text for region in regions]
+    with ThreadPoolExecutor(
+        max_workers=min(_TRANSLATE_WORKERS, len(texts))
+    ) as pool:
+        return list(pool.map(translate_one, texts))
 
 
 def translate(
@@ -1036,11 +1055,21 @@ def _translate_google(text: str, target: str) -> str:
 _BING_TARGET = {"zh-CN": "zh-Hans"}
 # Token JWT của Edge translate (hết hạn ~10 phút) — cache để đỡ gọi lại.
 _bing_token: dict = {"value": None, "ts": 0.0}
+# Nhiều dòng dịch song song → khoá để chỉ một thread đi lấy token.
+_bing_token_lock = threading.Lock()
 
 
 def _bing_get_token(force: bool = False) -> str:
-    now = time.time()
-    if force or not _bing_token["value"] or now - _bing_token["ts"] > 480:
+    def fresh(now: float) -> bool:
+        return bool(_bing_token["value"]) and now - _bing_token["ts"] <= 480
+
+    if not force and fresh(time.time()):
+        return _bing_token["value"]
+    with _bing_token_lock:
+        now = time.time()
+        # Thread khác có thể đã làm mới trong lúc mình chờ khoá.
+        if not force and fresh(now):
+            return _bing_token["value"]
         req = urllib.request.Request(
             "https://edge.microsoft.com/translate/auth",
             headers={"User-Agent": _UA},
@@ -1048,7 +1077,7 @@ def _bing_get_token(force: bool = False) -> str:
         with urllib.request.urlopen(req, timeout=15) as resp:
             _bing_token["value"] = resp.read().decode("utf-8").strip()
             _bing_token["ts"] = now
-    return _bing_token["value"]
+        return _bing_token["value"]
 
 
 def _translate_bing(text: str, target: str) -> str:
@@ -1114,13 +1143,31 @@ def _wait_modifiers_released(timeout: float = 1.0) -> None:
         time.sleep(0.03)
 
 
+def _wait_clipboard_text(timeout: float = 0.6) -> str:
+    """Chờ clipboard (đã xoá trắng trước đó) có nội dung, trả về ngay khi thấy.
+
+    Trước đây code ngủ cứng 0,22 s cho mọi trường hợp — vừa chậm ở app phản hồi
+    nhanh, vừa thiếu với app chậm. Poll ngắn nhanh hơn và bền hơn.
+    """
+    import pyperclip
+
+    deadline = time.time() + timeout
+    while True:
+        try:
+            text = (pyperclip.paste() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text or time.time() >= deadline:
+            return text
+        time.sleep(0.012)
+
+
 def copy_selected_text() -> str:
     """Mô phỏng Ctrl+C rồi đọc clipboard để lấy văn bản đang bôi đen."""
     import keyboard
     import pyperclip
 
     _wait_modifiers_released()
-    time.sleep(0.05)
     previous = ""
     try:
         previous = pyperclip.paste()
@@ -1130,13 +1177,9 @@ def copy_selected_text() -> str:
         pyperclip.copy("")
     except Exception:  # noqa: BLE001
         pass
+    time.sleep(0.03)
     keyboard.send("ctrl+c")
-    time.sleep(0.22)
-    text = ""
-    try:
-        text = (pyperclip.paste() or "").strip()
-    except Exception:  # noqa: BLE001
-        pass
+    text = _wait_clipboard_text()
     if not text:
         try:
             pyperclip.copy(previous)

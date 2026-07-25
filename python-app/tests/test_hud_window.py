@@ -15,6 +15,7 @@ from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config import AppConfig  # noqa: E402
+from constants import HOTKEY_ACTIONS  # noqa: E402
 from hud_window import HUDWindow  # noqa: E402
 
 
@@ -59,7 +60,15 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(self.config.translator, "bing")
         self.config.save.assert_called()
 
-    def test_bar_service_dropdown_lists_llm_models_individually(self) -> None:
+    def test_bar_service_dropdown_hides_ai_until_key_is_configured(self) -> None:
+        keys = [
+            self.window.service_combo.itemData(i)
+            for i in range(self.window.service_combo.count())
+        ]
+        self.assertEqual(keys, ["google", "bing"])
+
+        self.config.llm_api_key = "key"
+        self.window.rebuild_service_combo()
         keys = [
             self.window.service_combo.itemData(i)
             for i in range(self.window.service_combo.count())
@@ -69,12 +78,30 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertNotIn("llm", keys)
 
     def test_bar_service_dropdown_selects_llm_model(self) -> None:
+        self.config.llm_api_key = "key"
+        self.window.rebuild_service_combo()
         self.window.service_combo.setCurrentIndex(
             self.window.service_combo.findData("llm::groq/openai/gpt-oss-120b")
         )
 
         self.assertEqual(self.config.translator, "llm")
         self.assertEqual(self.config.llm_model, "groq/openai/gpt-oss-120b")
+
+    def test_bar_exposes_every_translation_action_with_hotkey_tooltip(self) -> None:
+        expected = {
+            action for _label, action in HOTKEY_ACTIONS if action != "quit"
+        }
+
+        self.window.show()
+        self.app.processEvents()
+        self.assertEqual(set(self.window._action_btns), expected)
+        for action in expected:
+            tooltip = self.window._action_btns[action].toolTip()
+            self.assertIn("Phím tắt:", tooltip)
+            self.assertNotIn("Chưa đặt", tooltip)
+            button = self.window._action_btns[action]
+            right = button.mapTo(self.window._bar, button.rect().topLeft()).x()
+            self.assertLessEqual(right + button.width(), self.window._bar.width())
 
     def test_unpinned_hud_hides_after_window_deactivation(self) -> None:
         self.window.show()
@@ -139,6 +166,32 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(self.window.output._font_size, 24)
         self.assertEqual(self.window.output._background_color.alpha(), 128)
         self.assertEqual(self.window.output._background_color.red(), 68)
+
+    def test_hud_style_preview_applies_centered_glow(self) -> None:
+        self.window.preview_hud_text_style(
+            "Arial",
+            18,
+            "#ffffff",
+            2.0,
+            "#101114",
+            "#00000000",
+            6.0,
+            "#804bcbff",
+        )
+
+        self.assertEqual(self.window.output._shadow_radius, 6.0)
+        self.assertEqual(self.window.output._shadow_color.alpha(), 128)
+        offsets = self.window.output._shadow_offsets()
+        self.assertEqual(len(offsets), 9)
+        self.assertAlmostEqual(sum(x for x, _y in offsets), 0.0)
+        self.assertAlmostEqual(sum(y for _x, y in offsets), 0.0)
+
+    def test_hud_style_preview_without_shadow_arguments_disables_shadow(self) -> None:
+        self.window.preview_hud_text_style(
+            "Arial", 18, "#ffffff", 2.0, "#101114", "#00000000"
+        )
+
+        self.assertEqual(self.window.output._shadow_radius, 0.0)
 
     def test_hud_style_preview_keeps_fractional_border_width(self) -> None:
         self.window.preview_hud_text_style(

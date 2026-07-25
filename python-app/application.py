@@ -10,12 +10,13 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from constants import SERVER_NAME
 from hud_window import HUDWindow
-from theme import STYLE
+from theme import build_style
 from ui_utils import (
     TranslatorApplication,
     _bring_to_front,
     _create_app_icon,
     _ui_assets,
+    apply_dark_palette,
 )
 
 
@@ -66,8 +67,8 @@ class ApplicationRuntime:
         if single_instance.notify_existing_instance():
             return 0
 
-        assets = _ui_assets()
-        app.setStyleSheet(STYLE.replace("@CHEVRON@", assets["chevron"]))
+        apply_dark_palette(app)
+        app.setStyleSheet(build_style(_ui_assets()))
         window = HUDWindow()
         if not single_instance.listen(lambda: _bring_to_front(window)):
             window.set_status(
