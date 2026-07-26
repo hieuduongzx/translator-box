@@ -51,6 +51,7 @@ class FakeHud:
         self.busy_values = []
         self.output = ""
         self.output_history = []
+        self.output_image = None
         self.ensure_visible_calls = 0
 
     def set_status(self, text, state="ready"):
@@ -62,6 +63,9 @@ class FakeHud:
     def set_output(self, text):
         self.output = text
         self.output_history.append(text)
+
+    def set_output_image(self, image):
+        self.output_image = image.copy()
 
     def ensure_visible(self):
         self.ensure_visible_calls += 1
@@ -153,7 +157,7 @@ class TranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(saved.pixelColor(0, 0), QColor("#2f81f7"))
         self.app.clipboard().clear()
 
-    def test_clipboard_image_replaces_text_and_opens_image_result(self) -> None:
+    def test_clipboard_image_replaces_text_inside_hud(self) -> None:
         hud = FakeHud()
         controller = TranslationWorkflowController(hud)
         regions = [
@@ -170,6 +174,8 @@ class TranslationWorkflowTests(unittest.TestCase):
         )
         source_image = mock.Mock()
         source_image.isNull.return_value = False
+        translated_image = QImage(120, 40, QImage.Format.Format_RGB32)
+        translated_image.fill(QColor("#e2e8f0"))
 
         with (
             mock.patch.object(controller, "_save_clipboard_image"),
@@ -192,8 +198,9 @@ class TranslationWorkflowTests(unittest.TestCase):
                 "translation_workflows.QImage", return_value=source_image
             ),
             mock.patch(
-                "translation_workflows.overlay.show_translated_image"
-            ) as show_image,
+                "translation_workflows.overlay.render_translated_image",
+                return_value=translated_image,
+            ) as render_image,
             mock.patch("translation_workflows.threading.Thread") as thread_type,
         ):
             thread_type.return_value.start.side_effect = lambda: (
@@ -201,15 +208,17 @@ class TranslationWorkflowTests(unittest.TestCase):
             )
             controller.handle_action("clipboard_image_replace")
 
-        shown_source, shown_regions, shown_size = show_image.call_args.args
+        shown_source, shown_regions, shown_size = render_image.call_args.args
         self.assertIs(shown_source, source_image)
         self.assertEqual(shown_regions[0].text, "Bản dịch")
         self.assertEqual(shown_size, (120, 40))
+        self.assertIsNotNone(hud.output_image)
+        self.assertEqual(hud.output_image.size(), translated_image.size())
         self.assertEqual(hud.output_history, [])
         self.assertEqual(hud.busy_values, [True, False])
         self.assertEqual(
             hud.statuses[-1],
-            ("Đã tạo ảnh dịch và copy kết quả vào clipboard.", "ok"),
+            ("Ảnh dịch đang hiện trong khung và đã copy vào clipboard.", "ok"),
         )
         remove_temp_image.assert_called_once_with("clipboard.png")
 
@@ -234,7 +243,7 @@ class TranslationWorkflowTests(unittest.TestCase):
             ),
             mock.patch(
                 "translation_workflows.services.translate_regions",
-                return_value=["Dòng một", "Dòng hai"],
+                return_value=["Dòng một và dòng hai"],
             ) as translate_regions,
             mock.patch("translation_workflows.threading.Thread") as thread_type,
         ):
@@ -247,9 +256,9 @@ class TranslationWorkflowTests(unittest.TestCase):
         translated_regions = translate_regions.call_args.args[0]
         self.assertEqual(
             [region.text for region in translated_regions],
-            ["First line", "Second line"],
+            ["First line Second line"],
         )
-        self.assertEqual(hud.output, "Dòng một\nDòng hai")
+        self.assertEqual(hud.output, "Dòng một và dòng hai")
         self.assertEqual(hud.busy_values, [True, False])
         self.assertGreaterEqual(hud.ensure_visible_calls, 2)
         remove_temp_image.assert_called_once_with("clipboard.png")
@@ -291,7 +300,7 @@ class TranslationWorkflowTests(unittest.TestCase):
             ),
             mock.patch(
                 "translation_workflows.services.translate_regions",
-                return_value=["Dòng một", "Dòng hai"],
+                return_value=["Dòng một và dòng hai"],
             ) as translate_regions,
             mock.patch("translation_workflows.time.sleep"),
             mock.patch.object(
@@ -308,9 +317,9 @@ class TranslationWorkflowTests(unittest.TestCase):
         translated_regions = translate_regions.call_args.args[0]
         self.assertEqual(
             [region.text for region in translated_regions],
-            ["First line", "Second line"],
+            ["First line Second line"],
         )
-        self.assertEqual(hud.output, "Dòng một\nDòng hai")
+        self.assertEqual(hud.output, "Dòng một và dòng hai")
 
     def test_selected_text_replace_pastes_translation_and_keeps_focus(self) -> None:
         hud = FakeHud()

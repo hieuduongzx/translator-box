@@ -14,7 +14,12 @@ sys.path.insert(0, str(APP_DIR))
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QIcon  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QLineEdit,
+    QPushButton,
+)
 
 from config import HUD_STYLE_DEFAULTS, AppConfig  # noqa: E402
 from settings_window import SettingsWindow, available_hud_font_options  # noqa: E402
@@ -29,6 +34,12 @@ class FakeHud:
             run=SimpleNamespace(emit=lambda callback: callback())
         )
         self.hotkeys = SimpleNamespace(apply=lambda _mapping: None)
+        self.background_toggle_button = QPushButton()
+        self.background_toggle_button.setCheckable(True)
+        self.background_toggle_button.setChecked(self.config.hud_background_enabled)
+
+    def _sync_background_toggle_tooltip(self) -> None:
+        pass
 
     def sync_target_combo(self) -> None:
         pass
@@ -89,7 +100,14 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(
             labels,
-            ["Dịch", "Dịch vụ AI", "OCR", "Khung dịch", "Phím tắt", "Giới thiệu"],
+            [
+                "[01]  DỊCH",
+                "[02]  DỊCH VỤ AI",
+                "[03]  OCR",
+                "[04]  KHUNG DỊCH",
+                "[05]  PHÍM TẮT",
+                "[06]  GIỚI THIỆU",
+            ],
         )
         self.assertEqual(self.window.pages.count(), 6)
         self.assertEqual(
@@ -110,7 +128,9 @@ class SettingsWindowTests(unittest.TestCase):
         self.window.navigation.setCurrentRow(1)
 
         self.assertEqual(self.window.pages.currentIndex(), 1)
-        self.assertEqual(self.window.navigation.currentItem().text(), "Dịch vụ AI")
+        self.assertEqual(
+            self.window.navigation.currentItem().text(), "[02]  DỊCH VỤ AI"
+        )
 
     def test_ai_services_has_explicit_provider_management(self) -> None:
         service_entries = [
@@ -207,7 +227,14 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(
             self.window.border_color_btn.color_hex(), defaults["hud_border_color"]
         )
-        self.assertEqual(self.window.background_color_btn.color_value(), "#00000000")
+        self.assertEqual(
+            self.window.background_color_btn.color_value(),
+            defaults["hud_background_color"],
+        )
+        self.assertEqual(
+            self.window.background_enabled_check.isChecked(),
+            defaults["hud_background_enabled"],
+        )
         self.assertEqual(
             self.window.shadow_radius_spin.value(), defaults["hud_shadow_radius"]
         )
@@ -220,6 +247,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.window.shadow_radius_spin.setValue(0.0)
         self.window.text_color_btn.set_color("#123456")
         self.window.border_width_spin.setValue(0.0)
+        self.window.background_enabled_check.setChecked(False)
 
         self.window._reset_hud_style()
 
@@ -233,15 +261,24 @@ class SettingsWindowTests(unittest.TestCase):
         )
         self.assertEqual(self.window.config.hud_border_width, defaults["hud_border_width"])
         self.assertEqual(self.window.config.hud_shadow_color, defaults["hud_shadow_color"])
+        self.assertEqual(
+            self.window.background_enabled_check.isChecked(),
+            defaults["hud_background_enabled"],
+        )
+        self.assertEqual(
+            self.window.background_color_btn.isEnabled(),
+            defaults["hud_background_enabled"],
+        )
 
     def test_hud_style_values_include_shadow_for_preview(self) -> None:
         self.window.shadow_radius_spin.setValue(4.5)
 
         values = self.window._hud_style_values()
 
-        self.assertEqual(len(values), 8)
+        self.assertEqual(len(values), 9)
         self.assertEqual(values[6], 4.5)
         self.assertEqual(values[7], HUD_STYLE_DEFAULTS["hud_shadow_color"])
+        self.assertEqual(values[8], HUD_STYLE_DEFAULTS["hud_background_enabled"])
 
     def test_border_width_accepts_subpixel_values(self) -> None:
         self.window.border_width_spin.setValue(0.5)
@@ -258,6 +295,37 @@ class SettingsWindowTests(unittest.TestCase):
             self.window.hotkey_edits["clipboard_image_to_text"].combo(),
             "ctrl+alt+t",
         )
+
+    def test_ocr_model_dropdown_marks_download_state(self) -> None:
+        with mock.patch(
+            "settings_window.model_installed",
+            side_effect=lambda model_id: model_id
+            in {"ppocrv5_mobile", "ppocrv6_tiny"},
+        ):
+            self.window._refresh_ocr_model_options("ppocrv6_tiny")
+
+        labels = {
+            self.window.model_box.itemData(index): self.window.model_box.itemText(index)
+            for index in range(self.window.model_box.count())
+        }
+        self.assertEqual(len(labels), 4)
+        self.assertEqual(
+            labels["ppocrv5_mobile"], "✓ PP-OCRv5 mobile · Tích hợp"
+        )
+        self.assertEqual(labels["ppocrv6_tiny"], "✓ PP-OCRv6 tiny · Đã tải")
+        self.assertIn("Chưa tải", labels["ppocrv6_small"])
+        self.assertIn("25.2 MB", labels["ppocrv6_small"])
+
+    def test_ocr_download_error_replaces_unsupported_jargon(self) -> None:
+        self.window._finish_model_download(
+            "ppocrv6_tiny",
+            "Unsupported det.lang_type='multi' for PP-OCRv6 tiny model.",
+        )
+
+        message = self.window.model_download_status.text()
+        self.assertFalse(self.window.model_download_status.isHidden())
+        self.assertIn("không tương thích", message)
+        self.assertNotIn("Unsupported", message)
 
     def test_llm_fields_use_public_endpoint_and_require_user_key(self) -> None:
         self.window.service_box.setCurrentIndex(self.window.service_box.findData("llm"))

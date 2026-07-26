@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import tempfile
 import threading
 import time
 import urllib.error
@@ -35,10 +36,15 @@ def _package_available(name: str) -> bool:
 
 @dataclass(frozen=True)
 class TextRegion:
-    """Một dòng OCR cùng hộp giới hạn theo tọa độ pixel của ảnh nguồn."""
+    """Một vùng chữ OCR cùng hộp giới hạn theo tọa độ pixel của ảnh nguồn.
+
+    ``line_count`` lớn hơn 1 nghĩa là vùng đã được gom thành một khối thoại.
+    Renderer dùng thông tin này để xuống dòng thay vì ép cả bản dịch vào một hàng.
+    """
 
     text: str
     bbox: tuple[int, int, int, int]
+    line_count: int = 1
 
 
 def ocr(
@@ -145,6 +151,11 @@ def _join_wrapped(prev: str, nxt: str) -> str:
     return prev + " " + nxt
 
 
+def _horizontal_gap(a: TextRegion, b: TextRegion) -> int:
+    """Khoảng trống ngang giữa hai hộp; 0 nếu chúng chồng nhau."""
+    return max(0, max(a.bbox[0], b.bbox[0]) - min(a.bbox[2], b.bbox[2]))
+
+
 def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:
     """Gom các ô OCR có cùng tâm dọc thành từng *dòng*, sắp trái→phải.
 
@@ -161,12 +172,23 @@ def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:
     def y_center(region: TextRegion) -> float:
         return (region.bbox[1] + region.bbox[3]) / 2
 
-    items.sort(key=y_center)
+    items.sort(key=lambda region: (y_center(region), region.bbox[0]))
     lines: list[dict] = []
     for region in items:
         center = y_center(region)
-        if lines and abs(center - lines[-1]["center"]) <= median_h * 0.6:
-            line = lines[-1]
+        candidates = []
+        for line in lines:
+            center_delta = abs(center - line["center"])
+            gap = min(_horizontal_gap(region, item) for item in line["regions"])
+            center_limit = median_h * (0.78 if gap > 0 else 0.55)
+            if center_delta > center_limit:
+                continue
+            # Chữ trong cùng một dòng chỉ cách nhau vài lần chiều cao glyph.
+            # Giới hạn này ngăn hai speech bubble/panel ngang hàng bị ghép chung.
+            if gap <= max(12.0, median_h * 1.8):
+                candidates.append((gap, center_delta, line))
+        if candidates:
+            line = min(candidates, key=lambda value: (value[0], value[1]))[2]
             line["regions"].append(region)
             line["top"] = min(line["top"], region.bbox[1])
             line["bottom"] = max(line["bottom"], region.bbox[3])
@@ -212,6 +234,119 @@ def merge_regions_into_lines(regions: list[TextRegion]) -> list[TextRegion]:
         bottom = max(r.bbox[3] for r in boxes)
         merged.append(TextRegion(text, (left, top, right, bottom)))
     return merged
+
+
+def _line_bbox(line: dict) -> tuple[int, int, int, int]:
+    boxes = line["regions"]
+    return (
+        min(region.bbox[0] for region in boxes),
+        min(region.bbox[1] for region in boxes),
+        max(region.bbox[2] for region in boxes),
+        max(region.bbox[3] for region in boxes),
+    )
+
+
+def _axis_overlap(a0: int, a1: int, b0: int, b1: int) -> int:
+    return max(0, min(a1, b1) - max(a0, b0))
+
+
+def _same_text_block(a: TextRegion, b: TextRegion) -> bool:
+    """Hai dòng có đủ gần và đủ thẳng hàng để thuộc cùng một khối thoại."""
+    al, at, ar, ab = a.bbox
+    bl, bt, br, bb = b.bbox
+    aw, ah = max(1, ar - al), max(1, ab - at)
+    bw, bh = max(1, br - bl), max(1, bb - bt)
+    vertical_gap = max(0, max(at, bt) - min(ab, bb))
+    horizontal_gap = max(0, max(al, bl) - min(ar, br))
+    x_overlap = _axis_overlap(al, ar, bl, br)
+    y_overlap = _axis_overlap(at, ab, bt, bb)
+
+    # Dòng ngang xếp trên/dưới trong cùng speech bubble. Cho phép dòng ngắn
+    # được căn giữa so với dòng dài, nhưng không bắc cầu sang panel bên cạnh.
+    centers_close = abs((al + ar) - (bl + br)) / 2 <= max(aw, bw) * 0.58
+    stacked = (
+        vertical_gap <= max(8.0, min(ah, bh) * 0.35)
+        and (x_overlap >= min(aw, bw) * 0.18 or centers_close)
+    )
+
+    # Manga Nhật có thể trả mỗi cột dọc thành một box. Ghép các cột sát nhau
+    # nếu chúng chồng phần lớn theo trục dọc; thứ tự đọc sẽ được xử lý bên dưới.
+    a_vertical = ah > aw * 1.35 and any(_is_cjk(ch) for ch in a.text)
+    b_vertical = bh > bw * 1.35 and any(_is_cjk(ch) for ch in b.text)
+    adjacent_columns = (
+        a_vertical
+        and b_vertical
+        and horizontal_gap <= max(8.0, min(aw, bw) * 1.5)
+        and y_overlap >= min(ah, bh) * 0.3
+    )
+    return stacked or adjacent_columns
+
+
+def _connected_text_groups(
+    line_regions: list[TextRegion],
+) -> list[list[TextRegion]]:
+    """Các thành phần liên thông của những dòng có quan hệ cùng khối."""
+    parents = list(range(len(line_regions)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        root_a, root_b = find(first), find(second)
+        if root_a != root_b:
+            parents[root_b] = root_a
+
+    for first in range(len(line_regions)):
+        for second in range(first + 1, len(line_regions)):
+            if _same_text_block(line_regions[first], line_regions[second]):
+                union(first, second)
+
+    groups: dict[int, list[TextRegion]] = {}
+    for index, region in enumerate(line_regions):
+        groups.setdefault(find(index), []).append(region)
+    return list(groups.values())
+
+
+def _merge_text_block(items: list[TextRegion]) -> TextRegion:
+    vertical = all(
+        region.bbox[3] - region.bbox[1]
+        > (region.bbox[2] - region.bbox[0]) * 1.35
+        and any(_is_cjk(ch) for ch in region.text)
+        for region in items
+    )
+    if vertical:
+        items.sort(key=lambda region: (-region.bbox[0], region.bbox[1]))
+    else:
+        items.sort(key=lambda region: (region.bbox[1], region.bbox[0]))
+    text = ""
+    for item in items:
+        text = _join_wrapped(text, item.text) if text else item.text.strip()
+    left = min(item.bbox[0] for item in items)
+    top = min(item.bbox[1] for item in items)
+    right = max(item.bbox[2] for item in items)
+    bottom = max(item.bbox[3] for item in items)
+    return TextRegion(text, (left, top, right, bottom), line_count=len(items))
+
+
+def merge_regions_into_blocks(regions: list[TextRegion]) -> list[TextRegion]:
+    """Gom OCR thành speech bubble/khối chữ để dịch theo ngữ cảnh manga.
+
+    Khác với cách gom thuần theo trục Y trước đây, bước này tôn trọng khoảng
+    cách ngang nên hai bong bóng hoặc hai panel ngang hàng không bị nối chung.
+    """
+    lines, _median_h = _group_into_lines(regions)
+    line_regions = [
+        TextRegion(text, _line_bbox(line))
+        for line in lines
+        if (text := _line_text(line))
+    ]
+    merged = [
+        _merge_text_block(items) for items in _connected_text_groups(line_regions)
+    ]
+    return sorted(merged, key=lambda region: (region.bbox[1], region.bbox[0]))
 
 
 _OCR_ENGINE_LABELS = {
@@ -314,9 +449,19 @@ def _ocr_rapid_data(
     backend: str = "auto",
 ) -> tuple[str, list[TextRegion]]:
     """OCR bằng model PaddleOCR tối ưu ONNX, trả text và hộp từng dòng."""
-    result = ocr_runtime.get_rapid_engine(model, backend)(
-        str(image_path), use_cls=False
+    prepared_path, coordinate_scale, temporary_path = _prepare_rapidocr_input(
+        image_path
     )
+    try:
+        result = ocr_runtime.get_rapid_engine(model, backend)(
+            prepared_path, use_cls=False
+        )
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
     txts = tuple(getattr(result, "txts", None) or ())
     boxes = getattr(result, "boxes", None)
     regions: list[TextRegion] = []
@@ -330,12 +475,68 @@ def _ocr_rapid_data(
                 continue
             xs = [float(point[0]) for point in points]
             ys = [float(point[1]) for point in points]
-            left, top = int(round(min(xs))), int(round(min(ys)))
-            right, bottom = int(round(max(xs))), int(round(max(ys)))
+            left = int(round(min(xs) / coordinate_scale))
+            top = int(round(min(ys) / coordinate_scale))
+            right = int(round(max(xs) / coordinate_scale))
+            bottom = int(round(max(ys) / coordinate_scale))
             if right > left and bottom > top:
                 regions.append(TextRegion(clean, (left, top, right, bottom)))
     text = "\n".join(str(value).strip() for value in txts if str(value).strip())
     return text, regions
+
+
+def _prepare_rapidocr_input(
+    image_path: str | Path,
+) -> tuple[str, float, str | None]:
+    """Tạo detail pass cho ảnh manga và trả (path, tỉ_lệ, file_tạm).
+
+    Halftone/ảnh xám thường có glyph nhỏ hơn UI thông thường. RapidOCR nhận dạng
+    ổn định hơn khi ảnh loại này được nội suy trước, nhưng overlay vẫn cần tọa độ
+    ảnh gốc nên caller phải chia box cho ``tỉ_lệ``.
+    """
+    from PIL import Image
+
+    source_path = str(image_path)
+    try:
+        with Image.open(image_path) as source:
+            rgb = source.convert("RGB")
+            width, height = rgb.size
+            if width < 24 or height < 24:
+                return source_path, 1.0, None
+
+            sample = rgb.copy()
+            sample.thumbnail((128, 128))
+            saturation = sample.convert("HSV").getchannel("S").histogram()
+            pixel_count = max(1, sample.width * sample.height)
+            grayscale_fraction = sum(saturation[:28]) / pixel_count
+            # Chỉ bật detail pass cho ảnh gần đơn sắc (manga, scan tài liệu).
+            if grayscale_fraction < 0.82:
+                return source_path, 1.0, None
+
+            longest = max(width, height)
+            scale = min(1.6, 2400.0 / longest)
+            if scale < 1.15:
+                return source_path, 1.0, None
+
+            resized = rgb.resize(
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            temporary_path = handle.name
+            handle.close()
+            try:
+                resized.save(temporary_path, "PNG")
+            except Exception:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+                raise
+            return temporary_path, scale, temporary_path
+    except (OSError, ValueError):
+        # Đường dẫn giả trong test hoặc định dạng lạ: để engine tự báo lỗi gốc.
+        return source_path, 1.0, None
 
 
 def _ocr_windows(image_path: str | Path, language: str) -> str:

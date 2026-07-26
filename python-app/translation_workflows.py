@@ -124,8 +124,8 @@ class TranslationWorkflowController:
 
     @staticmethod
     def _ocr_lines(image_path: str, options: TranslationOptions):
-        """OCR và giữ đúng từng dòng hình học trong vùng người dùng chọn."""
-        return services.merge_regions_into_lines(
+        """OCR và gom các dòng gần nhau thành speech bubble/khối ngữ cảnh."""
+        return services.merge_regions_into_blocks(
             services.ocr_layout(
                 image_path,
                 options.language,
@@ -377,6 +377,7 @@ class TranslationWorkflowController:
                 visual.patch_size,
                 visual.ink_rect,
                 visual.stroke_thickness,
+                getattr(region, "line_count", 1),
             )
             for region, translated_text, visual in zip(
                 regions, translated_lines, visuals
@@ -558,13 +559,18 @@ class TranslationWorkflowController:
         self, source: QImage, paint_regions, image_size: tuple[int, int]
     ) -> None:
         try:
-            overlay.show_translated_image(source, paint_regions, image_size)
+            image = overlay.render_translated_image(source, paint_regions, image_size)
         except Exception as exc:  # noqa: BLE001
             self._apply_error(str(exc))
             return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setImage(image)
+        self.hud.set_output_image(image)
         self._set_busy(False)
+        self.hud.ensure_visible()
         self.hud.set_status(
-            "Đã tạo ảnh dịch và copy kết quả vào clipboard.", "ok"
+            "Ảnh dịch đang hiện trong khung và đã copy vào clipboard.", "ok"
         )
 
     def _apply_error(self, message: str) -> None:

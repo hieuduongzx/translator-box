@@ -12,6 +12,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config import AppConfig  # noqa: E402
@@ -52,6 +53,26 @@ class HUDWindowBehaviorTests(unittest.TestCase):
             bool(self.window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         )
 
+    def test_background_toggle_button_reflects_config_and_updates_it(self) -> None:
+        self.assertTrue(self.window.background_toggle_button.isChecked())
+        self.assertTrue(self.config.hud_background_enabled)
+
+        self.window.background_toggle_button.setChecked(False)
+
+        self.assertFalse(self.config.hud_background_enabled)
+        self.assertFalse(self.window.output._background_enabled)
+        self.config.save.assert_called()
+
+    def test_background_toggle_syncs_open_settings_window(self) -> None:
+        self.window._open_settings()
+
+        self.window.background_toggle_button.setChecked(False)
+
+        self.assertFalse(
+            self.window._settings_win.background_enabled_check.isChecked()
+        )
+        self.assertFalse(self.window._settings_win.background_color_btn.isEnabled())
+
     def test_bar_service_dropdown_updates_translator(self) -> None:
         self.window.service_combo.setCurrentIndex(
             self.window.service_combo.findData("bing")
@@ -73,19 +94,19 @@ class HUDWindowBehaviorTests(unittest.TestCase):
             self.window.service_combo.itemData(i)
             for i in range(self.window.service_combo.count())
         ]
-        self.assertIn("llm::mistral/mistral-small-latest", keys)
-        self.assertIn("llm::groq/openai/gpt-oss-120b", keys)
+        self.assertIn("llm::deepseek-v4-flash", keys)
+        self.assertIn("llm::deepseek-v4-pro", keys)
         self.assertNotIn("llm", keys)
 
     def test_bar_service_dropdown_selects_llm_model(self) -> None:
         self.config.llm_api_key = "key"
         self.window.rebuild_service_combo()
         self.window.service_combo.setCurrentIndex(
-            self.window.service_combo.findData("llm::groq/openai/gpt-oss-120b")
+            self.window.service_combo.findData("llm::deepseek-v4-pro")
         )
 
         self.assertEqual(self.config.translator, "llm")
-        self.assertEqual(self.config.llm_model, "groq/openai/gpt-oss-120b")
+        self.assertEqual(self.config.llm_model, "deepseek-v4-pro")
 
     def test_bar_exposes_every_translation_action_with_hotkey_tooltip(self) -> None:
         expected = {
@@ -166,6 +187,20 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(self.window.output._font_size, 24)
         self.assertEqual(self.window.output._background_color.alpha(), 128)
         self.assertEqual(self.window.output._background_color.red(), 68)
+        self.assertTrue(self.window.output._background_enabled)
+
+    def test_hud_style_preview_can_disable_background(self) -> None:
+        self.window.preview_hud_text_style(
+            "Arial",
+            24,
+            "#ffffff",
+            2,
+            "#000000",
+            "#80445566",
+            background_enabled=False,
+        )
+
+        self.assertFalse(self.window.output._background_enabled)
 
     def test_hud_style_preview_applies_centered_glow(self) -> None:
         self.window.preview_hud_text_style(
@@ -211,6 +246,28 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.window.set_output(content)
 
         self.assertEqual(self.window.output._text, content)
+
+    def test_translated_image_uses_hud_output_and_copy_clear_actions(self) -> None:
+        image = QImage(160, 90, QImage.Format.Format_RGB32)
+        image.fill(QColor("#e2e8f0"))
+        self.window.set_output("Bản dịch cũ")
+
+        self.window.set_output_image(image)
+
+        self.assertEqual(self.window.output.text(), "")
+        self.assertEqual(self.window.output.image().size(), image.size())
+        self.assertTrue(self.window.copy_button.isEnabled())
+        self.assertTrue(self.window.clear_button.isEnabled())
+        self.assertEqual(self.window.copy_button.accessibleName(), "Copy ảnh dịch")
+
+        self.window._copy_output()
+        clipboard_image = self.app.clipboard().image()
+        self.assertEqual(clipboard_image.size(), image.size())
+
+        self.window._clear_output()
+        self.assertTrue(self.window.output.image().isNull())
+        self.assertFalse(self.window.copy_button.isEnabled())
+        self.app.clipboard().clear()
 
 
 if __name__ == "__main__":

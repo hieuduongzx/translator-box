@@ -56,8 +56,8 @@ BUILTIN_AI_PROVIDERS = [
         "name": "Translator Box",
         "endpoint": DEFAULT_LLM_ENDPOINT,
         "models": [
-            ("Mistral Small", "mistral/mistral-small-latest"),
-            ("GPT-OSS 120B", "groq/openai/gpt-oss-120b"),
+            ("Deepseek V4 Flash", "deepseek-v4-flash"),
+            ("Deepseek V4 Pro", "deepseek-v4-pro"),
         ],
         "register": LLM_REGISTRATION_URL,
     },
@@ -185,7 +185,7 @@ BAR_GROUP_CLIPBOARD = [
         "image",
         "Dịch ảnh clipboard",
         "clipboard_image_replace",
-        "OCR, xoá chữ gốc và tạo ảnh đã dịch",
+        "OCR, xoá chữ gốc rồi hiện ảnh dịch trong khung trong suốt",
     ),
     (
         "image-text",

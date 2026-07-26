@@ -14,13 +14,13 @@ import ocr_runtime  # noqa: E402
 class OCRRuntimeTests(unittest.TestCase):
     def test_registry_contains_requested_ppocrv6_variants(self) -> None:
         self.assertEqual(
+            set(ocr_runtime.OCR_MODEL_BY_ID),
             {
+                "ppocrv5_mobile",
                 "ppocrv6_tiny",
                 "ppocrv6_small",
                 "ppocrv6_medium",
-            }
-            - set(ocr_runtime.OCR_MODEL_BY_ID),
-            set(),
+            },
         )
 
     def test_builtin_model_uses_package_directory(self) -> None:
@@ -63,6 +63,14 @@ class OCRRuntimeTests(unittest.TestCase):
         self.assertEqual(params["Det.engine_type"].value, "onnxruntime")
         self.assertEqual(params["Rec.engine_type"].value, "onnxruntime")
         self.assertEqual(params["Cls.engine_type"].value, "onnxruntime")
+
+    def test_ppocrv6_uses_supported_detector_language_route(self) -> None:
+        params = ocr_runtime._engine_params(
+            ocr_runtime.model_spec("ppocrv6_tiny"), "cpu"
+        )
+
+        self.assertEqual(params["Det.lang_type"].value, "ch")
+        self.assertNotEqual(params["Det.lang_type"].value, "multi")
 
 
 if __name__ == "__main__":

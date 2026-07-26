@@ -46,13 +46,13 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(settings.hud_text_color, defaults["hud_text_color"])
         self.assertEqual(settings.hud_border_color, defaults["hud_border_color"])
         self.assertEqual(settings.hud_font_family, defaults["hud_font_family"])
-        self.assertEqual(settings.hud_background_color, "#00000000")
+        self.assertEqual(settings.hud_background_color, defaults["hud_background_color"])
         # Config này đã có kiểu chữ riêng → không tự bật bóng chữ.
         self.assertEqual(settings.hud_shadow_radius, 0.0)
         self.assertEqual(settings.hud_shadow_color, defaults["hud_shadow_color"])
         self.assertEqual(settings.llm_endpoint, "http://103.38.236.38:20128/v1")
         self.assertEqual(settings.llm_api_key, "")
-        self.assertEqual(settings.llm_model, "mistral/mistral-small-latest")
+        self.assertEqual(settings.llm_model, "deepseek-v4-flash")
         self.assertTrue(settings.hud_pinned)
         self.assertEqual(
             settings.hotkeys["selected_text"],
@@ -68,6 +68,11 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.hotkeys["clipboard_image_replace"], "ctrl+alt+v")
         self.assertEqual(settings.hotkeys["clipboard_image_to_text"], "ctrl+alt+t")
+
+    def test_removed_ocr_model_falls_back_to_v5_mobile(self) -> None:
+        settings = config.AppConfig({"ocr_model": "ppocrv5_server"})
+
+        self.assertEqual(settings.ocr_model, "ppocrv5_mobile")
 
     def test_fresh_config_uses_legible_hud_preset(self) -> None:
         settings = config.AppConfig({})
@@ -122,7 +127,7 @@ class AppConfigTests(unittest.TestCase):
                 self.assertEqual(payload[key], value)
             self.assertEqual(payload["llm_endpoint"], "http://103.38.236.38:20128/v1")
             self.assertEqual(payload["llm_api_key"], "")
-            self.assertEqual(payload["llm_model"], "mistral/mistral-small-latest")
+            self.assertEqual(payload["llm_model"], "deepseek-v4-flash")
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
     def test_builtin_llm_endpoint_is_fixed_regardless_of_stored_value(self) -> None:
@@ -131,13 +136,13 @@ class AppConfigTests(unittest.TestCase):
                 "translator": "llm",
                 "llm_endpoint": "http://other.test/v1",
                 "llm_api_key": "k",
-                "llm_model": "groq/openai/gpt-oss-120b",
+                "llm_model": "deepseek-v4-pro",
             }
         )
         service, endpoint, key, model = settings.resolve_llm()
         self.assertEqual(service, "llm")
         self.assertEqual(endpoint, "http://103.38.236.38:20128/v1")
-        self.assertEqual((key, model), ("k", "groq/openai/gpt-oss-120b"))
+        self.assertEqual((key, model), ("k", "deepseek-v4-pro"))
 
     def test_builtin_openai_and_gemini_providers(self) -> None:
         openai = config.AppConfig(

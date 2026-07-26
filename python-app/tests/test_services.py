@@ -142,6 +142,48 @@ class LayoutOcrTests(unittest.TestCase):
             llm_model="",
         )
 
+    def test_manga_blocks_do_not_merge_parallel_speech_bubbles(self) -> None:
+        regions = [
+            services.TextRegion("THIS IS", (100, 100, 160, 118)),
+            services.TextRegion("SO...", (166, 100, 205, 118)),
+            services.TextRegion("THE NEXT", (105, 122, 185, 140)),
+            services.TextRegion("MISSION?", (108, 144, 182, 162)),
+            services.TextRegion("YOU", (320, 103, 360, 121)),
+            services.TextRegion("SEEM", (314, 125, 368, 143)),
+            services.TextRegion("MAD...", (316, 147, 367, 165)),
+        ]
+
+        blocks = services.merge_regions_into_blocks(regions)
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0].text, "THIS IS SO... THE NEXT MISSION?")
+        self.assertEqual(blocks[0].line_count, 3)
+        self.assertEqual(blocks[1].text, "YOU SEEM MAD...")
+        self.assertEqual(blocks[1].line_count, 3)
+
+    def test_manga_detail_pass_maps_boxes_back_to_source_image(self) -> None:
+        result = mock.Mock(
+            txts=("SMALL TEXT",),
+            boxes=[
+                [[16.0, 12.8], [160.0, 12.8], [160.0, 48.0], [16.0, 48.0]]
+            ],
+        )
+        engine = mock.Mock(return_value=result)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "manga.png"
+            Image.new("RGB", (200, 100), (245, 245, 245)).save(source)
+            with mock.patch.object(
+                services.ocr_runtime, "get_rapid_engine", return_value=engine
+            ):
+                _text, regions = services._ocr_rapid_data(
+                    source, "ppocrv5_mobile", "cpu"
+                )
+
+        prepared_path = Path(engine.call_args.args[0])
+        self.assertNotEqual(prepared_path, source)
+        self.assertFalse(prepared_path.exists())
+        self.assertEqual(regions[0].bbox, (10, 8, 100, 30))
+
     def test_reconstructed_line_keeps_original_text_colour(self) -> None:
         """Màu chữ dịch phải sát màu gốc, không bị pixel khử răng làm nhạt."""
         from PIL import ImageFont

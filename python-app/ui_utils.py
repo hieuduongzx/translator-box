@@ -20,6 +20,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QIcon,
     QImage,
     QPainter,
@@ -27,18 +28,30 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from theme import TOKENS
 
-# Một accent phẳng duy nhất — không gradient. Glyph trắng trên nền accent.
-BRAND = QColor("#5b62f0")
+# Accent duy nhất của shell. Nền lime dùng mực gần đen để giữ tương phản.
+BRAND = QColor(TOKENS["FOCUS"])
 
-# Bảng màu icon dùng chung cho HUD bar và sidebar cài đặt.
-ICON_IDLE = QColor("#b7bfcd")
-ICON_ACTIVE = QColor("#ffffff")
-ICON_ON = QColor(TOKENS["ACCENT_HI"])
+# Icon near-monochrome; hover/active dùng accent, selected dùng mực trên nền lime.
+ICON_IDLE = QColor(TOKENS["TEXT_MUTED"])
+ICON_ACTIVE = QColor(TOKENS["FOCUS"])
+ICON_ON = QColor(TOKENS["FOCUS_INK"])
 ICON_OFF = QColor(TOKENS["TEXT_OFF"])
+
+
+def _tracked(label: QLabel, percent: float = 120.0) -> QLabel:
+    """Letter-spacing rộng cho nhãn hoa kiểu Swiss — QSS không có thuộc tính này.
+
+    Chỉ set một lần lúc tạo label: Qt lưu spacing trong QFont của chính label
+    nên setText() sau đó (đổi nội dung badge…) vẫn giữ nguyên tracking.
+    """
+    font = label.font()
+    font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, percent)
+    label.setFont(font)
+    return label
 
 
 class TranslatorApplication(QApplication):
@@ -77,20 +90,19 @@ def alpha_text_layer(size: QSize) -> QImage | None:
 
 
 def _render_icon_pixmap(size: int) -> QPixmap:
-    """Mark: tile bo góc accent phẳng, chữ 'T' trắng — không gradient."""
+    """Mark vuông phẳng, lime + mực đen, cùng lưới kỹ thuật của giao diện."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
     margin = max(1, round(size * 0.07))
-    radius = max(2, round(size * 0.28))
     tile = QRectF(margin, margin, size - margin * 2, size - margin * 2)
     painter.setBrush(BRAND)
     painter.setPen(Qt.NoPen)
-    painter.drawRoundedRect(tile, radius, radius)
-    font = QFont("Segoe UI", max(8, int(size * 0.52)), QFont.Bold)
+    painter.drawRect(tile)
+    font = QFont("IBM Plex Mono", max(8, int(size * 0.49)), QFont.DemiBold)
     painter.setFont(font)
-    painter.setPen(QColor("#ffffff"))
+    painter.setPen(QColor(TOKENS["FOCUS_INK"]))
     painter.drawText(pixmap.rect(), Qt.AlignCenter, "T")
     painter.end()
     return pixmap
@@ -108,6 +120,23 @@ def asset_path(name: str) -> str | None:
         if os.path.exists(candidate):
             return candidate
     return None
+
+def _load_ui_fonts() -> list[str]:
+    """Nạp IBM Plex Mono đóng gói trước khi QSS và widget tạo QFont."""
+    loaded: list[str] = []
+    for filename in (
+        "IBMPlexMono-Regular.ttf",
+        "IBMPlexMono-Medium.ttf",
+        "IBMPlexMono-SemiBold.ttf",
+    ):
+        path = asset_path(filename)
+        if path is None:
+            continue
+        font_id = QFontDatabase.addApplicationFont(path)
+        if font_id < 0:
+            continue
+        loaded.extend(QFontDatabase.applicationFontFamilies(font_id))
+    return loaded
 
 
 def _create_app_icon() -> QIcon:
@@ -303,6 +332,11 @@ def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None
         line(19, 12, 27, 28)
         line(14, 23, 24, 23)
         line(9, 32, 31, 32)
+    elif kind == "bgtoggle":  # ô màu đặc — bật/tắt nền khung dịch ngay trên bar
+        painter.drawRoundedRect(QRectF(6.5 * s, 6.5 * s, 27 * s, 27 * s), 5 * s, 5 * s)
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(11 * s, 11 * s, 18 * s, 18 * s), 3 * s, 3 * s)
 
 
 def _glyph_pixmap(
@@ -397,8 +431,8 @@ def _checkmark(painter: QPainter) -> None:
     painter.drawLine(QLineF(10.0, 16.5, 18.0, 7.5))
 
 
-# Đổi số này khi sửa hình dạng asset để bỏ qua file PNG cache của bản cũ.
-_ASSET_REVISION = 2
+# Đổi số này khi sửa hình dạng hoặc màu asset để bỏ qua file PNG cache cũ.
+_ASSET_REVISION = 5
 
 
 def _ui_assets() -> dict[str, str]:
@@ -412,7 +446,7 @@ def _ui_assets() -> dict[str, str]:
         "chevron_up": (_chevron(False), arrow, 2.2),
         "chevron_off": (_chevron(True), arrow_off, 2.2),
         "chevron_up_off": (_chevron(False), arrow_off, 2.2),
-        "check": (_checkmark, QColor("#ffffff"), 2.6),
+        "check": (_checkmark, QColor(TOKENS["FOCUS_INK"]), 2.6),
     }
     assets: dict[str, str] = {}
     for name, (draw, glyph_color, width) in recipes.items():
@@ -425,11 +459,13 @@ def _ui_assets() -> dict[str, str]:
 
 
 def apply_dark_palette(app: QApplication) -> None:
-    """Palette tối cho các hộp thoại Qt dựng sẵn (chọn màu, thông báo, tooltip).
+    """Palette theo theme hiện tại cho các hộp thoại Qt dựng sẵn (chọn màu,
+    thông báo, tooltip) — tên hàm giữ nguyên từ bản dark cũ, nay đọc TOKENS nên
+    tự khớp theo theme đang áp dụng (sáng/tối).
 
     Stylesheet không chạm tới mọi widget con của QColorDialog/QMessageBox nên nếu
-    thiếu bước này, chúng hiện ra theo palette sáng mặc định của Windows và chữ
-    trắng sẽ mất hút.
+    thiếu bước này, chúng hiện ra theo palette mặc định của Windows và lệch màu
+    với phần còn lại của app.
     """
     palette = QPalette()
     bg = QColor(TOKENS["BG"])
@@ -437,7 +473,7 @@ def apply_dark_palette(app: QApplication) -> None:
     sunken = QColor(TOKENS["SUNKEN"])
     text = QColor(TOKENS["TEXT"])
     muted = QColor(TOKENS["TEXT_OFF"])
-    accent = QColor(TOKENS["ACCENT"])
+    accent = QColor(TOKENS["FOCUS"])
     for group in (QPalette.Active, QPalette.Inactive):
         palette.setColor(group, QPalette.Window, bg)
         palette.setColor(group, QPalette.WindowText, text)
@@ -449,8 +485,8 @@ def apply_dark_palette(app: QApplication) -> None:
         palette.setColor(group, QPalette.ToolTipBase, surface)
         palette.setColor(group, QPalette.ToolTipText, text)
         palette.setColor(group, QPalette.Highlight, accent)
-        palette.setColor(group, QPalette.HighlightedText, QColor("#ffffff"))
-        palette.setColor(group, QPalette.Link, QColor(TOKENS["ACCENT_HI"]))
+        palette.setColor(group, QPalette.HighlightedText, QColor(TOKENS["FOCUS_INK"]))
+        palette.setColor(group, QPalette.Link, text)
         palette.setColor(group, QPalette.PlaceholderText, QColor(TOKENS["TEXT_MUTED"]))
     for role in (
         QPalette.WindowText,

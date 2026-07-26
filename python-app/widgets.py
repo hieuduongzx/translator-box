@@ -11,7 +11,8 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
-    QLinearGradient,
+    QGuiApplication,
+    QImage,
     QPainter,
     QPainterPath,
     QPen,
@@ -38,6 +39,7 @@ from ui_utils import (
     _combo_from_event,
     _fmt_hotkey,
     _state_icon,
+    _tracked,
     alpha_text_layer,
 )
 
@@ -225,28 +227,58 @@ class DragBar(QFrame):
         event.accept()
 
 
+def draw_crop_marks(
+    painter: QPainter,
+    rect: QRectF,
+    length: float = 9.0,
+    color: QColor | None = None,
+    alpha: int = 210,
+) -> None:
+    """Ngoặc góc kiểu dấu cắt in ấn/bản vẽ kỹ thuật (blueprint crop-mark).
+
+    Panel giờ góc vuông (không bo tròn) nên ngoặc chạm đúng mép — cùng ngôn
+    ngữ với khung chọn vùng (overlay.py), dành riêng cho panel nổi bật. `color`
+    mặc định lấy từ TOKENS["FOCUS"] (mực chính của theme đang áp dụng) để tự
+    khớp nền sáng/tối của panel gọi hàm; truyền riêng khi panel có nền cố định
+    khác theme trang (vd. bàn cờ preview luôn tối).
+    """
+    mark = QColor(color) if color is not None else QColor(TOKENS["FOCUS"])
+    mark.setAlpha(alpha)
+    pen = QPen(mark)
+    pen.setWidthF(1.0)
+    pen.setCapStyle(Qt.SquareCap)
+    painter.save()
+    painter.setPen(pen)
+    left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+    painter.drawLine(QPointF(left, top), QPointF(left + length, top))
+    painter.drawLine(QPointF(left, top), QPointF(left, top + length))
+    painter.drawLine(QPointF(right, top), QPointF(right - length, top))
+    painter.drawLine(QPointF(right, top), QPointF(right, top + length))
+    painter.drawLine(QPointF(left, bottom), QPointF(left + length, bottom))
+    painter.drawLine(QPointF(left, bottom), QPointF(left, bottom - length))
+    painter.drawLine(QPointF(right, bottom), QPointF(right - length, bottom))
+    painter.drawLine(QPointF(right, bottom), QPointF(right, bottom - length))
+    painter.restore()
+
+
 class HudBar(DragBar):
-    """Thanh bar glass: thêm vệt sáng 1px ở mép trên cho cảm giác vật liệu thật."""
+    """Thanh bar phẳng, góc vuông: vẽ thêm ngoặc góc (crop-mark) — cùng ngôn
+    ngữ với khung chọn vùng (overlay.py) — để nhận ra ngay đây là dụng cụ
+    chụp/dịch, không phải khung chat bo tròn chung chung."""
+
+    CORNER = 8.0
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        gradient = QLinearGradient(
-            rect.topLeft(), QPointF(rect.left(), rect.bottom())
-        )
-        gradient.setColorAt(0.0, QColor(255, 255, 255, 30))
-        gradient.setColorAt(0.55, QColor(255, 255, 255, 0))
-        gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QBrush(gradient), 1.0))
-        painter.drawRoundedRect(rect, 13.0, 13.0)
+        draw_crop_marks(painter, rect, length=self.CORNER)
         painter.end()
 
 
 class BusyBar(QWidget):
-    """Vạch tiến trình vô định 2px: chỉ chạy khi app đang xử lý."""
+    """Vạch tiến trình vô định 2px: beam lime đặc, không gradient."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -255,8 +287,6 @@ class BusyBar(QWidget):
         self._phase = 0.0
         self._active = False
         self._timer = QTimer(self)
-        # 25 fps là đủ mượt cho một vạch chạy, và bar có drop shadow nên mỗi lần
-        # vẽ lại tốn hơn bình thường — không cần 60 fps.
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
 
@@ -279,21 +309,10 @@ class BusyBar(QWidget):
         if not self._active or self.width() <= 0:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
         width = self.width()
-        span = max(48.0, width * 0.28)
-        # Đi hết chiều rộng rồi lặp lại, luôn dính hai mép để không "nhảy".
+        span = max(48.0, width * 0.22)
         left = -span + (width + span) * self._phase
-        gradient = QLinearGradient(left, 0.0, left + span, 0.0)
-        accent = QColor(TOKENS["ACCENT"])
-        edge = QColor(accent)
-        edge.setAlpha(0)
-        gradient.setColorAt(0.0, edge)
-        gradient.setColorAt(0.5, accent)
-        gradient.setColorAt(1.0, edge)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(gradient))
-        painter.drawRoundedRect(QRectF(left, 0.0, span, self.height()), 1.0, 1.0)
+        painter.fillRect(QRectF(left, 0.0, span, self.height()), QColor(TOKENS["FOCUS"]))
         painter.end()
 
 
@@ -308,8 +327,8 @@ class StatusPill(QWidget):
         self._text = ""
         self._state = "ready"
         self._pulse = 0.0
-        self._font = QFont()
-        self._font.setPointSizeF(9.0)
+        self._font = QFont("IBM Plex Mono", 9)
+        self._font.setWeight(QFont.Medium)
         self._timer = QTimer(self)
         self._timer.setInterval(90)
         self._timer.timeout.connect(self._tick)
@@ -349,21 +368,22 @@ class StatusPill(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        rect = QRectF(self.rect())
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 12))
-        painter.drawRoundedRect(rect, 8.0, 8.0)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(QColor(TOKENS["LINE"]), 1.0))
+        painter.setBrush(QColor(TOKENS["RAISED"]))
+        painter.drawRoundedRect(rect, 2.0, 2.0)
 
         dot = QColor(_STATE_COLORS[self._state])
         if self._state == "busy":
             dot.setAlphaF(0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._pulse)))
         center_y = rect.center().y()
+        painter.setPen(Qt.NoPen)
         painter.setBrush(dot)
-        painter.drawEllipse(QRectF(9.0, center_y - 3.5, 7.0, 7.0))
+        painter.drawEllipse(QRectF(9.0, center_y - 3.0, 6.0, 6.0))
 
         painter.setFont(self._font)
         painter.setPen(QColor(TOKENS["TEXT_DIM"]))
-        text_rect = rect.adjusted(23.0, 0.0, -10.0, 0.0)
+        text_rect = rect.adjusted(22.0, 0.0, -9.0, 0.0)
         metrics = QFontMetrics(self._font)
         painter.drawText(
             text_rect,
@@ -381,6 +401,7 @@ class HudTextView(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._text = ""
+        self._image: QImage | None = None
         self._placeholder = ""
         self._font_family = HUD_STYLE_DEFAULTS["hud_font_family"]
         self._font_size = HUD_STYLE_DEFAULTS["hud_font_size"]
@@ -388,15 +409,35 @@ class HudTextView(QWidget):
         self._border_width = HUD_STYLE_DEFAULTS["hud_border_width"]
         self._border_color = QColor(HUD_STYLE_DEFAULTS["hud_border_color"])
         self._background_color = QColor(HUD_STYLE_DEFAULTS["hud_background_color"])
+        self._background_enabled = HUD_STYLE_DEFAULTS["hud_background_enabled"]
         self._shadow_radius = HUD_STYLE_DEFAULTS["hud_shadow_radius"]
         self._shadow_color = QColor(HUD_STYLE_DEFAULTS["hud_shadow_color"])
 
     def setText(self, text: str) -> None:
         self._text = text or ""
+        self._image = None
+        self.setAccessibleDescription(
+            "Nội dung bản dịch dạng văn bản" if self._text else "Khung dịch đang trống"
+        )
         self.update()
 
     def text(self) -> str:
         return self._text
+
+    def setImage(self, image: QImage) -> None:
+        """Hiện ảnh đã dịch trong chính vùng trong suốt của HUD."""
+        self._image = None if image.isNull() else image.copy()
+        self._text = ""
+        self.setAccessibleDescription(
+            "Ảnh đã dịch" if self._image is not None else "Khung dịch đang trống"
+        )
+        self.update()
+
+    def image(self) -> QImage:
+        return self._image.copy() if self._image is not None else QImage()
+
+    def has_content(self) -> bool:
+        return bool(self._text.strip()) or self._image is not None
 
     def set_placeholder(self, text: str) -> None:
         """Gợi ý hiện khi chưa có bản dịch — cho biết vùng này dùng để làm gì."""
@@ -413,6 +454,7 @@ class HudTextView(QWidget):
         background_color: str,
         shadow_radius: float = 0.0,
         shadow_color: str = "#00000000",
+        background_enabled: bool = True,
     ) -> None:
         self._font_family = font_family or "Yu Gothic"
         self._font_size = max(8, int(font_size))
@@ -420,28 +462,36 @@ class HudTextView(QWidget):
         self._border_width = max(0.0, float(border_width))
         self._border_color = QColor(border_color)
         self._background_color = QColor(background_color)
+        self._background_enabled = bool(background_enabled)
         self._shadow_radius = max(0.0, float(shadow_radius))
         self._shadow_color = QColor(shadow_color)
         self.update()
 
     def _paint_placeholder(self, painter: QPainter) -> None:
-        """Viên gợi ý tối, mờ — đọc được trên mọi nền desktop mà không ồn ào."""
-        font = QFont()
+        """Nhãn gợi ý phẳng, vuông, monochrome — đồng bộ với ngôn ngữ dụng cụ quang học."""
+        font = QFont(TOKENS["FONT_MONO"].split(",")[0].strip("'"))
         font.setPointSizeF(9.5)
+        font.setWeight(QFont.Medium)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         text = metrics.elidedText(
             self._placeholder, Qt.ElideRight, max(80, self.width() - 40)
         )
-        width = metrics.horizontalAdvance(text) + 26
-        height = metrics.height() + 12
+        pad_x, pad_y = 16, 10
+        width = metrics.horizontalAdvance(text) + pad_x * 2
+        height = metrics.height() + pad_y * 2
         rect = QRectF(2.0, 2.0, width, height)
-        path = QPainterPath()
-        path.addRoundedRect(rect, height / 2, height / 2)
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillPath(path, QColor(12, 14, 19, 168))
-        painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
-        painter.drawPath(path)
+        # Nền phẳng, tối, mờ — đọc được trên mọi desktop mà không ồn ào.
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(9, 9, 11, 120))
+        painter.drawRect(rect)
+        # Viền 1px rất nhạt — đủ để định hình box trên nền mờ.
+        painter.setPen(QPen(QColor(TOKENS["LINE_SOFT"]), 1.0))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
+        # Nhãn mono, màu TEXT_MUTED — đọc được trên nền tối mờ.
         painter.setPen(QColor(TOKENS["TEXT_MUTED"]))
         painter.drawText(rect, Qt.AlignCenter, text)
 
@@ -480,10 +530,24 @@ class HudTextView(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        if self._background_color.alpha() > 0:
+        if self._background_enabled and self._background_color.alpha() > 0:
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._background_color)
-            painter.drawRoundedRect(self.rect(), 8, 8)
+            painter.drawRect(self.rect())
+        if self._image is not None:
+            available = self.rect().adjusted(3, 2, -3, -2)
+            fitted = self._image.size()
+            fitted.scale(available.size(), Qt.KeepAspectRatio)
+            target = QRectF(
+                available.center().x() - fitted.width() / 2,
+                available.center().y() - fitted.height() / 2,
+                fitted.width(),
+                fitted.height(),
+            )
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(target, self._image)
+            painter.end()
+            return
         if not self._text:
             if self._placeholder:
                 self._paint_placeholder(painter)
@@ -533,9 +597,9 @@ def paint_checkerboard(
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
     painter.setClipPath(path)
-    painter.fillRect(rect, QColor("#232833"))
+    painter.fillRect(rect, QColor("#27272a"))
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#1a1e26"))
+    painter.setBrush(QColor("#18181b"))
     rows = int(rect.height() // cell) + 1
     columns = int(rect.width() // cell) + 1
     for row in range(rows):
@@ -633,9 +697,9 @@ class ColorButton(QPushButton):
 
         border = QColor(TOKENS["LINE_HI"])
         if self.isDown():
-            border = QColor(TOKENS["ACCENT"])
+            border = QColor(TOKENS["FOCUS"])
         elif self.underMouse() or self.hasFocus():
-            border = QColor(TOKENS["ACCENT_LINE"])
+            border = QColor(TOKENS["FOCUS_LINE"])
         painter.setPen(QPen(border, 1.0))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, radius, radius)
@@ -689,12 +753,15 @@ class Card(QFrame):
         parent: QWidget | None = None,
         *,
         sunken: bool = False,
+        featured: bool = False,
         trailing: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("cardSunken" if sunken else "card")
+        self._featured = featured
+        name = "cardFeatured" if featured else ("cardSunken" if sunken else "card")
+        self.setObjectName(name)
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(15, 13, 15, 13)
+        self._layout.setContentsMargins(17, 15, 17, 15)
         self._layout.setSpacing(0)
         self._has_content = False
         if title or trailing is not None:
@@ -705,8 +772,9 @@ class Card(QFrame):
             titles.setContentsMargins(0, 0, 0, 0)
             titles.setSpacing(2)
             if title:
-                label = QLabel(title)
+                label = QLabel(f"// {title.upper()}")
                 label.setObjectName("cardTitle")
+                _tracked(label, 108.0)
                 titles.addWidget(label)
             if hint:
                 subtitle = QLabel(hint)
@@ -778,6 +846,81 @@ class Card(QFrame):
         self._spaced()
         self._layout.addLayout(layout)
 
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._featured:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        draw_crop_marks(painter, rect, length=10.0, alpha=210)
+        painter.end()
+
+
+class CodeField(QFrame):
+    """Block `.cmd` có chrome terminal, prompt và nút copy thật."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("codeBlock")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("codeHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 0, 0, 0)
+        header_layout.setSpacing(8)
+        title = QLabel("SCREEN_TRANSLATOR.CMD")
+        title.setObjectName("codeTitle")
+        _tracked(title, 110.0)
+        self._copy_btn = QPushButton("COPY")
+        self._copy_btn.setObjectName("codeCopyBtn")
+        self._copy_btn.setCursor(Qt.PointingHandCursor)
+        self._copy_btn.setToolTip("Copy vào clipboard")
+        self._copy_btn.clicked.connect(self._copy)
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self._copy_btn)
+
+        command = QWidget()
+        command_layout = QHBoxLayout(command)
+        command_layout.setContentsMargins(10, 0, 6, 0)
+        command_layout.setSpacing(8)
+        prompt = QLabel("PS>")
+        prompt.setObjectName("codePrompt")
+        self._edit = QLineEdit(text)
+        self._edit.setObjectName("codeField")
+        self._edit.setReadOnly(True)
+        self._edit.setCursorPosition(0)
+        command_layout.addWidget(prompt)
+        command_layout.addWidget(self._edit, 1)
+
+        layout.addWidget(header)
+        layout.addWidget(command)
+
+        self._reset_timer = QTimer(self)
+        self._reset_timer.setSingleShot(True)
+        self._reset_timer.setInterval(1100)
+        self._reset_timer.timeout.connect(lambda: self._copy_btn.setText("COPY"))
+
+    def setText(self, text: str) -> None:
+        self._edit.setText(text)
+        self._edit.setCursorPosition(0)
+
+    def text(self) -> str:
+        return self._edit.text()
+
+    def _copy(self) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None or not self._edit.text():
+            return
+        clipboard.setText(self._edit.text())
+        self._copy_btn.setText("COPIED")
+        self._reset_timer.start()
+
 
 class CheckerFrame(QFrame):
     """Nền bàn cờ cho khung xem trước — thấy ngay phần nền trong suốt."""
@@ -789,8 +932,9 @@ class CheckerFrame(QFrame):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        paint_checkerboard(
-            painter, QRectF(self.rect()).adjusted(1, 1, -1, -1), cell=8, radius=11.0
-        )
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        paint_checkerboard(painter, rect, cell=8, radius=0.0)
+        # Preview là panel nổi bật nên dùng cùng crop-mark lime của blueprint shell.
+        draw_crop_marks(painter, rect, length=10.0, alpha=210)
         painter.end()
         super().paintEvent(event)

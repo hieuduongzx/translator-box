@@ -17,18 +17,22 @@ from constants import (
     LLM_MODELS,
 )
 
-# Bộ kiểu chữ mặc định cho khung dịch: thân trắng lạnh, viền xanh-đen và glow
-# cyan. Viền giữ nét trên nền sáng; thân chữ + glow bật trên nền tối. Đây cũng là
-# giá trị nút "Đặt lại mặc định" ở tab Khung dịch dùng.
+# Bộ kiểu chữ mặc định cho khung dịch: chữ trắng, viền đen mảnh, không glow.
+# Viền giữ nét trên nền sáng; thân chữ trắng đọc được trên nền tối. Phẳng tuyệt
+# đối — không bóng đổ, không màu accent thừa. Đây cũng là giá trị nút "Đặt lại
+# mặc định" ở tab Khung dịch dùng.
 HUD_STYLE_DEFAULTS: dict[str, Any] = {
     "hud_font_family": "Segoe UI",
     "hud_font_size": 18,
-    "hud_text_color": "#f8fcff",
-    "hud_border_width": 0.9,
-    "hud_border_color": "#06131f",
-    "hud_background_color": "#00000000",
-    "hud_shadow_radius": 8.0,
-    "hud_shadow_color": "#804bcbff",
+    "hud_text_color": "#fafafa",
+    "hud_border_width": 0.7,
+    "hud_border_color": "#09090b",
+    # Đen, alpha 50/255 — đủ để tách chữ khỏi desktop lộn xộn phía sau mà vẫn
+    # thấy được nội dung gốc; bật mặc định, tắt được bằng checkbox riêng.
+    "hud_background_color": "#32000000",
+    "hud_background_enabled": True,
+    "hud_shadow_radius": 0.0,
+    "hud_shadow_color": "#00000000",
 }
 
 # Chỉ dùng để nhận ra chính xác preset mặc định của bản trước. Kiểu do người dùng
@@ -62,10 +66,6 @@ _OCR_MODELS = {
     "ppocrv6_tiny",
     "ppocrv6_small",
     "ppocrv6_medium",
-    "ppocrv5_server",
-    "eslav_ppocrv5_mobile",
-    "korean_ppocrv5_mobile",
-    "latin_ppocrv5_mobile",
 }
 _OCR_BACKENDS = {"auto", "cpu", "directml", "cuda", "openvino"}
 _TRANSLATORS = {"google", "bing", *BUILTIN_AI_IDS}
@@ -313,6 +313,10 @@ class AppConfig:
             style_source.get("hud_background_color"),
             defaults["hud_background_color"],
         )
+        self.hud_background_enabled = _boolean(
+            style_source.get("hud_background_enabled"),
+            defaults["hud_background_enabled"],
+        )
         # Glow dùng lại khoá `shadow` trong file config để không làm mất tuỳ chỉnh
         # đã lưu. Config cũ có kiểu chữ riêng vẫn giữ glow tắt như trước.
         shadow_default = defaults["hud_shadow_radius"]
@@ -477,6 +481,7 @@ class AppConfig:
             "hud_border_width": self.hud_border_width,
             "hud_border_color": self.hud_border_color,
             "hud_background_color": self.hud_background_color,
+            "hud_background_enabled": self.hud_background_enabled,
             "hud_shadow_radius": self.hud_shadow_radius,
             "hud_shadow_color": self.hud_shadow_color,
             "hud_pinned": self.hud_pinned,

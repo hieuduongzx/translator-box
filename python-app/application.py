@@ -15,6 +15,7 @@ from ui_utils import (
     TranslatorApplication,
     _bring_to_front,
     _create_app_icon,
+    _load_ui_fonts,
     _ui_assets,
     apply_dark_palette,
 )
@@ -61,6 +62,12 @@ class ApplicationRuntime:
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
         app = TranslatorApplication([])
+        # Style "windowsvista" mặc định vẽ focus/checked bằng theme engine của
+        # Windows (uxtheme.dll) ĐÈ LÊN border QSS — ra viền chấm chấm/răng cưa
+        # không cách nào tắt bằng QSS. Fusion vẽ 100% bằng QPainter nên border,
+        # bo góc, focus đều mượt và đúng màu mình định nghĩa.
+        app.setStyle("Fusion")
+        _load_ui_fonts()
         app.setWindowIcon(_create_app_icon())
 
         single_instance = SingleInstanceServer(SERVER_NAME)

@@ -60,9 +60,10 @@ from ui_utils import (
     _enable_dark_titlebar,
     _fmt_hotkey,
     _nav_icon,
+    _tracked,
 )
 from version import APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO
-from widgets import Card, CheckerFrame, ColorButton, HotkeyEdit, HudTextView
+from widgets import Card, CheckerFrame, CodeField, ColorButton, HotkeyEdit, HudTextView
 
 if TYPE_CHECKING:
     from hud_window import HUDWindow
@@ -96,7 +97,11 @@ def available_hud_font_options(
 
 def _link_label(url: str, text: str) -> QLabel:
     """Nhãn dạng link mở bằng trình duyệt hệ thống."""
-    label = QLabel(f'<a href="{url}" style="color:{TOKENS["ACCENT_HI"]};">{text}</a>')
+    label = QLabel(
+        f'<a href="{url}" style="color:{TOKENS["TEXT"]};'
+        'text-decoration:underline;">'
+        f"{text}</a>"
+    )
     label.setObjectName("link")
     label.setOpenExternalLinks(True)
     label.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -135,11 +140,12 @@ class ProviderDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(14)
-        heading = QLabel("Provider OpenAI-compatible")
+        heading = QLabel("// PROVIDER OPENAI-COMPATIBLE")
         heading.setObjectName("pageTitle")
+        _tracked(heading, 102.0)
         subtitle = QLabel(
-            "Bất kỳ endpoint theo chuẩn OpenAI đều dùng được — OpenRouter, "
-            "LM Studio, Ollama, proxy nội bộ…"
+            "Bất kỳ endpoint chuẩn OpenAI nào cũng dùng được: OpenRouter, "
+            "LM Studio, Ollama hoặc proxy nội bộ."
         )
         subtitle.setObjectName("pageSubtitle")
         subtitle.setWordWrap(True)
@@ -246,7 +252,7 @@ class SettingsWindow(QWidget):
         self._quitting = False
         self._model_download_running = False
         self.setObjectName("settingsRoot")
-        self.setWindowTitle(f"Cài đặt — {APP_NAME}")
+        self.setWindowTitle(f"Cài đặt // {APP_NAME}")
         self.setWindowIcon(hud.app_icon)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -292,8 +298,9 @@ class SettingsWindow(QWidget):
         sidebar_layout.setSpacing(0)
         sidebar_layout.addWidget(self._build_header())
         sidebar_layout.addSpacing(26)
-        section_label = QLabel("CẤU HÌNH")
+        section_label = QLabel("// CẤU HÌNH")
         section_label.setObjectName("sidebarLabel")
+        _tracked(section_label, 130.0)
         sidebar_layout.addWidget(section_label)
         sidebar_layout.addSpacing(8)
 
@@ -303,8 +310,8 @@ class SettingsWindow(QWidget):
         self.navigation.setIconSize(QSize(17, 17))
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label, icon_kind, description in NAV_SECTIONS:
-            item = QListWidgetItem(_nav_icon(icon_kind), label)
+        for index, (label, icon_kind, description) in enumerate(NAV_SECTIONS, start=1):
+            item = QListWidgetItem(_nav_icon(icon_kind), f"[{index:02d}]  {label.upper()}")
             item.setToolTip(description)
             self.navigation.addItem(item)
         navigation_height = sum(
@@ -351,8 +358,9 @@ class SettingsWindow(QWidget):
         mark = QLabel()
         mark.setPixmap(_brand_pixmap(28))
         mark.setFixedSize(28, 28)
-        wordmark = QLabel(APP_NAME)
+        wordmark = QLabel(APP_NAME.upper())
         wordmark.setObjectName("brandWordmark")
+        _tracked(wordmark, 108.0)
         brand_layout.addWidget(mark)
         brand_layout.addWidget(wordmark)
         brand_layout.addStretch(1)
@@ -368,12 +376,12 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(footer)
         layout.setContentsMargins(2, 0, 0, 0)
         layout.setSpacing(10)
-        hint = QLabel("Tự động lưu · Phím tắt cần bấm Lưu")
+        hint = QLabel("Tự động lưu\nPhím tắt: bấm Lưu")
         hint.setObjectName("sidebarHint")
         hint.setWordWrap(True)
         close_button = QPushButton("Đóng cửa sổ")
-        close_button.setObjectName("ghost")
         close_button.clicked.connect(self.hide)
+        close_button.setCursor(Qt.PointingHandCursor)
         layout.addWidget(hint)
         layout.addWidget(close_button)
         return footer
@@ -389,8 +397,9 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 10, 18)
         layout.setSpacing(12)
-        heading = QLabel(title)
+        heading = QLabel(f"// {title.upper()}")
         heading.setObjectName("pageTitle")
+        _tracked(heading, 102.0)
         summary = QLabel(description)
         summary.setObjectName("pageSubtitle")
         summary.setWordWrap(True)
@@ -407,6 +416,7 @@ class SettingsWindow(QWidget):
         service_card = Card(
             "Model & ngôn ngữ",
             "Chọn trực tiếp model đã sẵn sàng; provider chưa có API key sẽ bị ẩn.",
+            featured=True,
         )
         self.service_box = QComboBox()
         self.service_box.setAccessibleName("Model hoặc dịch vụ dịch")
@@ -453,10 +463,12 @@ class SettingsWindow(QWidget):
 
         self.ai_provider_state = QLabel()
         self.ai_provider_state.setObjectName("aiProviderStatus")
+        _tracked(self.ai_provider_state, 106.0)
         provider_card = Card(
             "Provider & API key",
             "Chỉ provider đã có API key mới hiện model trong tab Dịch.",
             trailing=self.ai_provider_state,
+            featured=True,
         )
         self.ai_provider_box = QComboBox()
         self.ai_provider_box.setAccessibleName("Provider AI cần cấu hình")
@@ -482,8 +494,7 @@ class SettingsWindow(QWidget):
             "Kết nối & model",
             "Xem kết nối, chọn model hoặc thêm model ID riêng cho provider.",
         )
-        self.llm_endpoint_edit = QLineEdit()
-        self.llm_endpoint_edit.setReadOnly(True)
+        self.llm_endpoint_edit = CodeField()
         self.llm_key_edit = QLineEdit()
         self.llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_key_edit.setPlaceholderText(
@@ -579,20 +590,18 @@ class SettingsWindow(QWidget):
         ocr_card = Card(
             "Nhận dạng ký tự",
             "Ảnh chụp vùng được xử lý ngay trên máy, không gửi lên dịch vụ nào.",
+            featured=True,
         )
         self.engine_box = self._combo(
             OCR_ENGINES, self.config.ocr_engine, self._on_ocr_changed
         )
         model_options = [
-            (
-                f"{model.label}{' · tích hợp' if model.builtin else ''}",
-                model.id,
-            )
-            for model in OCR_MODELS
+            (self._ocr_model_option_label(model), model.id) for model in OCR_MODELS
         ]
         self.model_box = self._combo(
             model_options, self.config.ocr_model, self._on_ocr_changed
         )
+        self._refresh_ocr_model_options(self.config.ocr_model)
         self.backend_box = self._combo(
             list(OCR_BACKENDS), self.config.ocr_backend, self._on_ocr_changed
         )
@@ -612,7 +621,7 @@ class SettingsWindow(QWidget):
         ocr_card.add_row(
             "Tăng tốc phần cứng",
             self.acceleration_check,
-            "Tắt để luôn chạy trên CPU — ổn định nhất.",
+            "Tắt để luôn chạy trên CPU. Đây là chế độ ổn định nhất.",
             control_width=0,
         )
         ocr_card.add_row("Backend tăng tốc", self.backend_box)
@@ -625,6 +634,7 @@ class SettingsWindow(QWidget):
         info_layout.setSpacing(12)
         self.engine_badge = QLabel()
         self.engine_badge.setObjectName("engineBadge")
+        _tracked(self.engine_badge, 106.0)
         self.engine_hint = QLabel()
         self.engine_hint.setObjectName("engineHint")
         self.engine_hint.setWordWrap(True)
@@ -648,9 +658,14 @@ class SettingsWindow(QWidget):
         self.model_download_button = QPushButton("Tải mô hình")
         self.model_download_button.setObjectName("modelDownload")
         self.model_download_button.clicked.connect(self._download_selected_model)
+        self.model_download_status = QLabel()
+        self.model_download_status.setObjectName("modelDownloadStatus")
+        self.model_download_status.setWordWrap(True)
+        self.model_download_status.hide()
         model_meta_layout.addWidget(self.model_title)
         model_meta_layout.addWidget(self.model_metrics)
         model_meta_layout.addWidget(self.model_languages)
+        model_meta_layout.addWidget(self.model_download_status)
         model_meta_layout.addSpacing(2)
         model_meta_layout.addWidget(_button_row(self.model_download_button))
         layout.addWidget(model_meta)
@@ -663,8 +678,9 @@ class SettingsWindow(QWidget):
 
         preview_card = Card(
             "Xem trước",
-            "Nền bàn cờ chỉ để minh hoạ phần trong suốt — khi dùng thật bạn sẽ "
+            "Nền bàn cờ chỉ minh hoạ phần trong suốt. Khi dùng thật, bạn sẽ "
             "thấy desktop phía sau.",
+            featured=True,
         )
         preview_surface = CheckerFrame()
         preview_surface.setMinimumHeight(96)
@@ -731,6 +747,10 @@ class SettingsWindow(QWidget):
         self.background_color_btn = ColorButton(
             self.config.hud_background_color, allow_alpha=True
         )
+        self.background_enabled_check = QCheckBox()
+        self.background_enabled_check.setChecked(self.config.hud_background_enabled)
+        self.background_enabled_check.setAccessibleName("Bật nền khung dịch")
+        self.background_color_btn.setEnabled(self.config.hud_background_enabled)
         edge_card.add_row("Độ dày viền", self.border_width_spin, control_width=110)
         edge_card.add_row("Màu viền", self.border_color_btn, control_width=0)
         edge_card.add_row(
@@ -741,9 +761,15 @@ class SettingsWindow(QWidget):
         )
         edge_card.add_row("Màu glow", self.shadow_color_btn, control_width=0)
         edge_card.add_row(
+            "Nền khung dịch",
+            self.background_enabled_check,
+            "Tô một lớp màu phía sau chữ để tách khỏi desktop lộn xộn.",
+            control_width=0,
+        )
+        edge_card.add_row(
             "Màu nền",
             self.background_color_btn,
-            "Để trong suốt nếu muốn chỉ thấy chữ nổi trên desktop.",
+            "Chỉ áp dụng khi bật “Nền khung dịch” ở trên.",
             control_width=0,
         )
         layout.addWidget(edge_card)
@@ -752,6 +778,10 @@ class SettingsWindow(QWidget):
         self.font_size_spin.valueChanged.connect(self._on_hud_style_changed)
         self.border_width_spin.valueChanged.connect(self._on_hud_style_changed)
         self.shadow_radius_spin.valueChanged.connect(self._on_hud_style_changed)
+        self.background_enabled_check.toggled.connect(self._on_hud_style_changed)
+        self.background_enabled_check.toggled.connect(
+            self.background_color_btn.setEnabled
+        )
         for button in (
             self.text_color_btn,
             self.border_color_btn,
@@ -764,7 +794,7 @@ class SettingsWindow(QWidget):
         reset_button = QPushButton("Đặt lại mặc định")
         reset_button.setObjectName("ghost")
         reset_button.setToolTip(
-            "Trả về chữ trắng lạnh · viền xanh-đen · glow cyan — rõ trên nền sáng và tối."
+            "Trả về chữ trắng · viền đen mảnh · không glow; phẳng trên mọi nền."
         )
         reset_button.clicked.connect(self._reset_hud_style)
         layout.addWidget(_button_row(reset_button))
@@ -779,20 +809,22 @@ class SettingsWindow(QWidget):
         card = Card(
             "Tổ hợp phím toàn cục",
             "Bấm vào ô rồi nhấn tổ hợp phím · Del để tắt · Esc để huỷ.",
+            featured=True,
         )
         self.hotkey_edits: dict[str, HotkeyEdit] = {}
-        for label, action in HOTKEY_ACTIONS:
+        for index, (label, action) in enumerate(HOTKEY_ACTIONS, start=1):
             edit = HotkeyEdit(self.config.hotkeys.get(action, ""))
             edit.setFixedWidth(178)
             edit.changed.connect(self._mark_hotkey_conflicts)
             self.hotkey_edits[action] = edit
-            card.add_row(label, edit, control_width=0)
+            card.add_row(f"[{index:02d}] {label}", edit, control_width=0)
         layout.addWidget(card)
 
         self.hotkey_warning = QLabel("")
         self.hotkey_warning.setObjectName("stateBadge")
         self.hotkey_warning.setProperty("state", "missing")
         self.hotkey_warning.setVisible(False)
+        _tracked(self.hotkey_warning, 106.0)
         layout.addWidget(self.hotkey_warning)
 
         save_button = QPushButton("Lưu phím tắt")
@@ -809,7 +841,7 @@ class SettingsWindow(QWidget):
     def _build_about_page(self) -> QScrollArea:
         page, layout = self._page("Giới thiệu", NAV_SECTIONS[5][2])
 
-        about_card = Card()
+        about_card = Card(featured=True)
         identity = QWidget()
         identity_layout = QHBoxLayout(identity)
         identity_layout.setContentsMargins(0, 0, 0, 0)
@@ -826,10 +858,11 @@ class SettingsWindow(QWidget):
         version.setObjectName("cardHint")
         texts.addWidget(name)
         texts.addWidget(version)
-        texts.addWidget(_link_label(f"https://github.com/{GITHUB_REPO}", GITHUB_REPO))
         identity_layout.addWidget(mark, 0, Qt.AlignTop)
         identity_layout.addLayout(texts, 1)
         about_card.add_block(identity)
+        repo_field = CodeField(f"github.com/{GITHUB_REPO}")
+        about_card.add_block(repo_field)
         layout.addWidget(about_card)
 
         update_card = Card("Cập nhật", "Tải và cài bản mới trực tiếp từ GitHub.")
@@ -1105,7 +1138,7 @@ class SettingsWindow(QWidget):
             self.llm_key_edit.setText(self.config.provider_api_key(code))
             self.llm_registration_link.setText(
                 f'<a href="{spec["register"]}" '
-                f'style="color:{TOKENS["ACCENT_HI"]};">'
+                f'style="color:{TOKENS["TEXT"]};text-decoration:underline;">'
                 "Đăng ký tài khoản và lấy API key →</a>"
             )
             self.llm_registration_link.setVisible(True)
@@ -1215,7 +1248,67 @@ class SettingsWindow(QWidget):
         self.hud.set_status(message, "ready")
 
     # --------------------------------------------------------------------- OCR
+    @staticmethod
+    def _ocr_model_option_label(model) -> str:
+        if model_installed(model.id):
+            status = "Tích hợp" if model.builtin else "Đã tải"
+            return f"✓ {model.label} · {status}"
+        return f"↓ {model.label} · Chưa tải · {model.size_mb:g} MB"
+
+    def _refresh_ocr_model_options(self, selected: str | None = None) -> None:
+        """Cập nhật dấu đã tải trong dropdown mà không phát tín hiệu đổi model."""
+        selected = selected or self.model_box.currentData() or self.config.ocr_model
+        self.model_box.blockSignals(True)
+        self.model_box.clear()
+        for model in OCR_MODELS:
+            installed = model_installed(model.id)
+            self.model_box.addItem(self._ocr_model_option_label(model), model.id)
+            index = self.model_box.count() - 1
+            tooltip = (
+                "Mô hình đã có trên máy và có thể dùng ngay."
+                if installed
+                else f"Chưa tải về máy · dung lượng khoảng {model.size_mb:g} MB."
+            )
+            self.model_box.setItemData(index, tooltip, Qt.ItemDataRole.ToolTipRole)
+        index = self.model_box.findData(selected)
+        self.model_box.setCurrentIndex(index if index >= 0 else 0)
+        self.model_box.blockSignals(False)
+
+    def _set_model_download_status(self, text: str = "", state: str = "") -> None:
+        self.model_download_status.setText(text)
+        self.model_download_status.setProperty("state", state)
+        self.model_download_status.setVisible(bool(text))
+        self.model_download_status.style().unpolish(self.model_download_status)
+        self.model_download_status.style().polish(self.model_download_status)
+
+    @staticmethod
+    def _friendly_model_download_error(message: str) -> str:
+        """Đổi lỗi thư viện thành nguyên nhân và hướng khắc phục dễ hiểu."""
+        lowered = message.casefold()
+        if "unsupported" in lowered or "not support" in lowered:
+            return (
+                "Mô hình này không tương thích với phiên bản RapidOCR đang dùng. "
+                "Hãy cập nhật ứng dụng hoặc chọn một mô hình khác."
+            )
+        if "checksum" in lowered or "sha256" in lowered:
+            return (
+                "Tệp tải về bị lỗi kiểm tra toàn vẹn. Hãy kiểm tra mạng rồi tải lại."
+            )
+        if any(
+            token in lowered
+            for token in ("timed out", "timeout", "connection", "network", "urlopen")
+        ):
+            return "Không kết nối được máy chủ model. Hãy kiểm tra mạng rồi tải lại."
+        if "permission" in lowered or "access is denied" in lowered:
+            return (
+                "Ứng dụng không có quyền ghi model vào thư mục dữ liệu. "
+                "Hãy kiểm tra quyền thư mục rồi thử lại."
+            )
+        return f"Tải model thất bại. Chi tiết: {message}"
+
     def _on_ocr_changed(self) -> None:
+        if not self._model_download_running:
+            self._set_model_download_status()
         self.config.ocr_engine = self.engine_box.currentData()
         self.config.ocr_model = self.model_box.currentData()
         self.config.ocr_backend = self.backend_box.currentData()
@@ -1262,9 +1355,11 @@ class SettingsWindow(QWidget):
             self.backend_box.setEnabled(
                 uses_offline_model and self.acceleration_check.isChecked()
             )
-        self.model_title.setText(
-            f"{model.label}  ·  {'Đã tích hợp' if model.builtin else 'Tải theo nhu cầu'}"
-        )
+        if not installed:
+            model_state = "Chưa tải"
+        else:
+            model_state = "Đã tích hợp" if model.builtin else "Đã tải"
+        self.model_title.setText(f"{model.label}  ·  {model_state}")
         self.model_metrics.setText(
             f"Detection Hmean {model.detection_hmean:.1f}%  ·  "
             f"Recognition {model.recognition_accuracy:g}%  ·  {model.size_mb:g} MB"
@@ -1284,7 +1379,11 @@ class SettingsWindow(QWidget):
         if self._model_download_running:
             button_text = "Đang tải và kiểm tra…"
         elif installed:
-            button_text = "Đã sẵn sàng"
+            button_text = (
+                "✓ Đã tích hợp và sẵn sàng"
+                if model.builtin
+                else "✓ Đã tải và sẵn sàng"
+            )
         else:
             button_text = f"Tải mô hình · {model.size_mb:g} MB"
         self.model_download_button.setText(button_text)
@@ -1294,6 +1393,9 @@ class SettingsWindow(QWidget):
             return
         model_id = self.model_box.currentData()
         self._model_download_running = True
+        self._set_model_download_status(
+            f"Đang tải {model_spec(model_id).label} và kiểm tra tệp…", "busy"
+        )
         self._update_engine_info()
         self.hud.set_status("Đang tải mô hình OCR…", "busy")
 
@@ -1315,17 +1417,29 @@ class SettingsWindow(QWidget):
 
     def _finish_model_download(self, model_id: str, error_message: str | None) -> None:
         self._model_download_running = False
+        self._refresh_ocr_model_options(model_id)
         self._update_engine_info()
         if error_message:
+            friendly_error = self._friendly_model_download_error(error_message)
+            self._set_model_download_status(
+                f"Không tải được {model_spec(model_id).label}. {friendly_error}",
+                "error",
+            )
             self.hud.set_status(
-                f"Không tải được {model_spec(model_id).label}: {error_message}",
+                f"Không tải được {model_spec(model_id).label}. {friendly_error}",
                 "error",
             )
         else:
+            self._set_model_download_status(
+                f"✓ {model_spec(model_id).label} đã tải xong và có thể dùng ngay.",
+                "ready",
+            )
             self.hud.set_status(f"Đã cài {model_spec(model_id).label}.", "ok")
 
     # ------------------------------------------------------------- khung dịch
-    def _hud_style_values(self) -> tuple[str, int, str, float, str, str, float, str]:
+    def _hud_style_values(
+        self,
+    ) -> tuple[str, int, str, float, str, str, float, str, bool]:
         return (
             self.font_family_box.currentData(),
             self.font_size_spin.value(),
@@ -1335,6 +1449,7 @@ class SettingsWindow(QWidget):
             self.background_color_btn.color_value(),
             self.shadow_radius_spin.value(),
             self.shadow_color_btn.color_value(),
+            self.background_enabled_check.isChecked(),
         )
 
     def _sync_preview(self) -> None:
@@ -1351,9 +1466,29 @@ class SettingsWindow(QWidget):
             self.config.hud_background_color,
             self.config.hud_shadow_radius,
             self.config.hud_shadow_color,
+            self.config.hud_background_enabled,
         ) = self._hud_style_values()
         self.config.save()
         self.hud.apply_hud_text_style()
+        self._sync_preview()
+        self._sync_bar_background_toggle()
+
+    def _sync_bar_background_toggle(self) -> None:
+        """Đồng bộ nút bật/tắt nền trên thanh HUD sau khi đổi ở Cài đặt."""
+        button = self.hud.background_toggle_button
+        if button.isChecked() == self.config.hud_background_enabled:
+            return
+        button.blockSignals(True)
+        button.setChecked(self.config.hud_background_enabled)
+        button.blockSignals(False)
+        self.hud._sync_background_toggle_tooltip()
+
+    def sync_hud_background_toggle(self) -> None:
+        """Đồng bộ checkbox Cài đặt sau khi bật/tắt nhanh từ nút trên bar."""
+        self.background_enabled_check.blockSignals(True)
+        self.background_enabled_check.setChecked(self.config.hud_background_enabled)
+        self.background_enabled_check.blockSignals(False)
+        self.background_color_btn.setEnabled(self.config.hud_background_enabled)
         self._sync_preview()
 
     def _preview_hud_style(self) -> None:
@@ -1368,6 +1503,7 @@ class SettingsWindow(QWidget):
             self.font_size_spin,
             self.border_width_spin,
             self.shadow_radius_spin,
+            self.background_enabled_check,
         )
         for control in controls:
             control.blockSignals(True)
@@ -1377,8 +1513,10 @@ class SettingsWindow(QWidget):
         self.font_size_spin.setValue(defaults["hud_font_size"])
         self.border_width_spin.setValue(defaults["hud_border_width"])
         self.shadow_radius_spin.setValue(defaults["hud_shadow_radius"])
+        self.background_enabled_check.setChecked(defaults["hud_background_enabled"])
         for control in controls:
             control.blockSignals(False)
+        self.background_color_btn.setEnabled(defaults["hud_background_enabled"])
         self.text_color_btn.set_color(defaults["hud_text_color"])
         self.border_color_btn.set_color(defaults["hud_border_color"])
         self.shadow_color_btn.set_color(defaults["hud_shadow_color"])
@@ -1415,7 +1553,7 @@ class SettingsWindow(QWidget):
         for action, edit in self.hotkey_edits.items():
             edit.set_combo(DEFAULT_HOTKEYS.get(action, ""))
         self._mark_hotkey_conflicts()
-        self.hud.set_status("Đã nạp phím tắt mặc định — bấm Lưu để áp dụng.", "ready")
+        self.hud.set_status("Đã nạp phím tắt mặc định. Bấm Lưu để áp dụng.", "ready")
 
     def _apply_hotkeys(self) -> None:
         if self._mark_hotkey_conflicts():

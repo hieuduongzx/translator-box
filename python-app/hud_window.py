@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QGuiApplication
+from PySide6.QtGui import QAction, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -138,6 +137,13 @@ class HUDWindow(QWidget):
         self.pin_button.setChecked(self.config.hud_pinned)
         self.pin_button.toggled.connect(self._set_pinned)
         layout.addWidget(self.pin_button)
+
+        self.background_toggle_button = BarButton("bgtoggle")
+        self.background_toggle_button.setAccessibleName("Nền khung dịch")
+        self.background_toggle_button.setCheckable(True)
+        self.background_toggle_button.setChecked(self.config.hud_background_enabled)
+        self.background_toggle_button.toggled.connect(self._toggle_hud_background)
+        layout.addWidget(self.background_toggle_button)
         layout.addWidget(self._bar_separator())
 
         self._action_btns: dict[str, BarButton] = {}
@@ -211,14 +217,9 @@ class HUDWindow(QWidget):
         busy_row.addWidget(self.busy_bar)
         shell.addLayout(busy_row)
 
-        shadow = QGraphicsDropShadowEffect(bar)
-        shadow.setBlurRadius(22)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 150))
-        bar.setGraphicsEffect(shadow)
-
         self.refresh_bar_tooltips()
         self._sync_pin_tooltip()
+        self._sync_background_toggle_tooltip()
         self._sync_output_actions()
         return bar
 
@@ -285,33 +286,45 @@ class HUDWindow(QWidget):
         layout.setSpacing(0)
 
         self.output = HudTextView()
+        self.output.setAccessibleName("Nội dung bản dịch")
         self.apply_hud_text_style()
         layout.addWidget(self.output, 1)
         return display
 
     def _copy_output(self) -> None:
         text = self.output.text().strip()
-        if not text:
+        image = self.output.image()
+        if not text and image.isNull():
             self.set_status("Khung dịch đang trống.", "error")
             return
         clipboard = QGuiApplication.clipboard()
         if clipboard is None:
             self.set_status("Không truy cập được clipboard.", "error")
             return
-        clipboard.setText(text)
-        self.set_status("Đã copy bản dịch vào clipboard.", "ok")
+        if not image.isNull():
+            clipboard.setImage(image)
+            self.set_status("Đã copy ảnh dịch vào clipboard.", "ok")
+        else:
+            clipboard.setText(text)
+            self.set_status("Đã copy bản dịch vào clipboard.", "ok")
 
     def _clear_output(self) -> None:
-        if not self.output.text():
+        if not self.output.has_content():
             return
         self.set_output("")
         self.set_status("Đã xoá khung dịch.", "ready")
 
     def _sync_output_actions(self) -> None:
         """Copy/Xoá chỉ bấm được khi trong khung đang có bản dịch."""
-        has_text = bool(self.output.text().strip()) if hasattr(self, "output") else False
+        has_content = self.output.has_content() if hasattr(self, "output") else False
         for button in (self.copy_button, self.clear_button):
-            button.setEnabled(has_text)
+            button.setEnabled(has_content)
+        if hasattr(self, "output") and not self.output.image().isNull():
+            self.copy_button.setAccessibleName("Copy ảnh dịch")
+            self.copy_button.setToolTip("Copy ảnh đã dịch vào clipboard")
+        else:
+            self.copy_button.setAccessibleName("Copy bản dịch")
+            self.copy_button.setToolTip("Copy bản dịch trong khung vào clipboard")
 
     def _sync_placeholder(self) -> None:
         """Gợi ý trong khung trống: nói rõ vùng này để làm gì + phím tắt."""
@@ -331,6 +344,7 @@ class HUDWindow(QWidget):
             self.config.hud_background_color,
             self.config.hud_shadow_radius,
             self.config.hud_shadow_color,
+            self.config.hud_background_enabled,
         )
 
     def preview_hud_text_style(
@@ -343,6 +357,7 @@ class HUDWindow(QWidget):
         background_color: str,
         shadow_radius: float = 0.0,
         shadow_color: str = "#00000000",
+        background_enabled: bool = True,
     ) -> None:
         self.output.apply_style(
             font_family,
@@ -353,6 +368,7 @@ class HUDWindow(QWidget):
             background_color,
             shadow_radius,
             shadow_color,
+            background_enabled,
         )
 
     def _sync_pin_tooltip(self) -> None:
@@ -378,6 +394,29 @@ class HUDWindow(QWidget):
         self._sync_pin_tooltip()
         if was_visible:
             _bring_to_front(self)
+
+    def _sync_background_toggle_tooltip(self) -> None:
+        if self.background_toggle_button.isChecked():
+            self.background_toggle_button.setToolTip(
+                "Nền khung dịch: BẬT · Bấm để xem chữ trong suốt trên desktop"
+            )
+        else:
+            self.background_toggle_button.setToolTip(
+                "Nền khung dịch: TẮT · Bấm để tô màu nền đã chọn ở Cài đặt"
+            )
+
+    def _toggle_hud_background(self, enabled: bool) -> None:
+        self._sync_background_toggle_tooltip()
+        if self.config.hud_background_enabled == enabled:
+            return
+        self.config.hud_background_enabled = enabled
+        self.config.save()
+        self.apply_hud_text_style()
+        if self._settings_win is not None:
+            self._settings_win.sync_hud_background_toggle()
+        self.set_status(
+            "Đã bật nền khung dịch." if enabled else "Đã tắt nền khung dịch.", "ready"
+        )
 
     def _active_window_belongs_to_settings(self) -> bool:
         active = QApplication.activeWindow()
@@ -689,6 +728,10 @@ class HUDWindow(QWidget):
 
     def set_output(self, text: str) -> None:
         self.output.setText(text)
+        self._sync_output_actions()
+
+    def set_output_image(self, image: QImage) -> None:
+        self.output.setImage(image)
         self._sync_output_actions()
 
     def ensure_visible(self) -> None:

@@ -89,25 +89,10 @@ class TranslationOverlayPaintTests(unittest.TestCase):
         )
         self.assertTrue(changed)
 
-    def test_translated_image_result_is_shown_and_copied(self) -> None:
-        source = QImage(80, 30, QImage.Format.Format_RGB32)
-        source.fill(QColor("#203040"))
-        region = overlay.OverlayRegion(
-            (10, 5, 70, 25), "Translated", (226, 232, 240), (20, 24, 30)
-        )
-
-        window = overlay.show_translated_image(source, [region], (80, 30))
-        self.app.processEvents()
-
-        clipboard_image = self.app.clipboard().image()
-        self.assertTrue(window.isVisible())
-        self.assertFalse(clipboard_image.isNull())
-        self.assertEqual(clipboard_image.size(), source.size())
-        window.close()
-        self.app.clipboard().clear()
-
     @staticmethod
-    def _region(text: str, bbox, ink=None, thickness=0.0) -> overlay.OverlayRegion:
+    def _region(
+        text: str, bbox, ink=None, thickness=0.0, source_lines=1
+    ) -> overlay.OverlayRegion:
         return overlay.OverlayRegion(
             bbox,
             text,
@@ -118,6 +103,7 @@ class TranslationOverlayPaintTests(unittest.TestCase):
             None,
             ink,
             thickness,
+            source_lines,
         )
 
     def test_font_size_follows_original_ink_not_loose_ocr_box(self) -> None:
@@ -201,6 +187,32 @@ class TranslationOverlayPaintTests(unittest.TestCase):
         )
         short.close()
         long_text.close()
+
+    def test_manga_block_wraps_inside_original_speech_bubble(self) -> None:
+        widget = overlay.TranslationOverlay(
+            (0, 0, 240, 160),
+            [
+                self._region(
+                    "Đây là bản dịch dài cần xuống nhiều dòng",
+                    (60, 30, 180, 130),
+                    (65, 35, 175, 125),
+                    source_lines=4,
+                )
+            ],
+            (240, 160),
+        )
+
+        line = widget._paint_regions[0]
+        text_rect = widget._line_text_rect(line)
+        metrics = QFontMetricsF(line.font)
+        self.assertEqual(line.source_lines, 4)
+        self.assertLessEqual(text_rect.width(), line.patch.width())
+        self.assertGreater(
+            metrics.horizontalAdvance(line.text),
+            text_rect.width(),
+            "Bản dịch đủ dài để kiểm tra word-wrap thực sự",
+        )
+        widget.close()
 
     def test_width_fitting_uses_original_footprint(self) -> None:
         ink = (10, 12, 120, 28)
