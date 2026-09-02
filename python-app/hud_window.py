@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QSystemTrayIcon,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -25,13 +26,16 @@ from constants import (
     BAR_GROUP_OVERLAY,
     BUILTIN_AI_IDS,
     LANGUAGES,
+    SONIOX_LANGUAGES,
     bar_service_key,
     bar_translator_entries,
     parse_bar_service_key,
 )
+from desktop_apps import list_desktop_applications
 from hotkeys import HotkeyManager
 from settings_window import SettingsWindow
 from translation_workflows import TranslationWorkflowController
+from soniox_realtime import SonioxRealtimeSession
 from update_controller import UpdateController
 from version import APP_NAME
 from ui_utils import (
@@ -44,13 +48,23 @@ from ui_utils import (
     _fmt_hotkey,
     _make_icon,
 )
-from widgets import BarButton, BusyBar, DragBar, HudBar, HudTextView, StatusPill
+from widgets import (
+    BarButton,
+    BarMenuButton,
+    BarComboBox,
+    BusyBar,
+    DragBar,
+    HudBar,
+    HudTextView,
+    StatusPill,
+)
 
 
 class HUDWindow(QWidget):
     """HUD trong suốt; delegate nghiệp vụ dịch cho workflow controller."""
 
     RESIZE_MARGIN = 12
+    SNAP_DISTANCE = 18
 
     def __init__(self) -> None:
         super().__init__()
@@ -81,6 +95,11 @@ class HUDWindow(QWidget):
         self.setMouseTracking(True)
 
         self._build_ui()
+        self.audio_session = SonioxRealtimeSession(self)
+        self.audio_session.state_changed.connect(self._on_audio_state_changed)
+        self.audio_session.transcript_changed.connect(self._on_audio_transcript)
+        self.audio_session.failed.connect(self._on_audio_failed)
+        self.audio_session.finished.connect(self._on_audio_finished)
         self._geometry_timer = QTimer(self)
         self._geometry_timer.setSingleShot(True)
         self._geometry_timer.timeout.connect(self._persist_geometry)
@@ -110,7 +129,6 @@ class HUDWindow(QWidget):
         self._display = self._build_display()
         root.addWidget(self._bar)
         root.addWidget(self._display, 1)
-        self._sync_placeholder()
         self._sync_output_actions()
 
     def _build_bar(self) -> QWidget:
@@ -123,36 +141,162 @@ class HUDWindow(QWidget):
         layout = QHBoxLayout()
         layout.setContentsMargins(8, 5, 8, 3)
         layout.setSpacing(2)
+        self._standard_mode_widgets: list[QWidget] = []
+        self._audio_mode_widgets: list[QWidget] = []
+        self._audio_mode = False
+
+        def add_standard(widget: QWidget) -> None:
+            layout.addWidget(widget)
+            self._standard_mode_widgets.append(widget)
+
+        def add_audio(widget: QWidget) -> None:
+            layout.addWidget(widget)
+            self._audio_mode_widgets.append(widget)
 
         logo = QLabel()
         logo.setPixmap(_brand_pixmap(19))
         logo.setFixedSize(19, 19)
-        logo.setToolTip("Kéo để di chuyển · Nhấp đúp để ẩn/hiện thanh công cụ.")
+        logo.setToolTip(
+            "Kéo để di chuyển · Kéo gần cạnh màn hình để tự hít · "
+            "Nhấp đúp để ẩn/hiện thanh công cụ."
+        )
         layout.addWidget(logo)
         layout.addSpacing(6)
+
+        # Audio mode là một workspace riêng trên cùng thanh HUD. Các control
+        # được tạo sẵn để chuyển mode không làm layout nhảy hoặc tạo lại widget.
+        self.audio_mode_back_button = QPushButton("← AUDIO")
+        self.audio_mode_back_button.setObjectName("barModeButton")
+        self.audio_mode_back_button.setAccessibleName("Thoát chế độ dịch audio")
+        self.audio_mode_back_button.setToolTip(
+            "Quay lại các công cụ dịch ảnh và văn bản"
+        )
+        self.audio_mode_back_button.setFixedHeight(30)
+        self.audio_mode_back_button.clicked.connect(self._exit_audio_mode)
+        add_audio(self.audio_mode_back_button)
+        add_audio(self._bar_separator())
+
+        self.audio_button = BarButton("audio")
+        self.audio_button.setAccessibleName("Bắt đầu dịch audio realtime")
+        self.audio_button.setToolTip(
+            "Bắt đầu/dừng phiên dịch audio với cấu hình đang chọn"
+        )
+        self.audio_button.setCheckable(True)
+        self.audio_button.clicked.connect(self.toggle_audio_realtime)
+        add_audio(self.audio_button)
+
+        self.audio_source_combo = BarComboBox()
+        self.audio_source_combo.setObjectName("barCombo")
+        self.audio_source_combo.setAccessibleName("Nguồn audio Soniox")
+        self.audio_source_combo.setToolTip(
+            "Chọn âm thanh đang phát trên máy hoặc microphone"
+        )
+        self.audio_source_combo.setMinimumWidth(104)
+        self.audio_source_combo.setMaximumWidth(132)
+        self.audio_source_combo.addItem("HỆ THỐNG", "system")
+        self.audio_source_combo.addItem("MICROPHONE", "microphone")
+        add_audio(self.audio_source_combo)
+
+        self.audio_display_combo = BarComboBox()
+        self.audio_display_combo.setObjectName("barCombo")
+        self.audio_display_combo.setAccessibleName("Chế độ hiển thị transcript")
+        self.audio_display_combo.setToolTip(
+            "Hiện song ngữ hoặc chỉ hiện bản dịch trong HUD"
+        )
+        self.audio_display_combo.setMinimumWidth(96)
+        self.audio_display_combo.setMaximumWidth(112)
+        self.audio_display_combo.addItem("SONG NGỮ", "bilingual")
+        self.audio_display_combo.addItem("CHỈ DỊCH", "translation")
+        add_audio(self.audio_display_combo)
+
+        self.audio_target_combo = BarComboBox()
+        self.audio_target_combo.setObjectName("barCombo")
+        self.audio_target_combo.setAccessibleName("Ngôn ngữ đích audio")
+        self.audio_target_combo.setToolTip(
+            "Chọn ngôn ngữ đích cho dịch audio một chiều"
+        )
+        self.audio_target_combo.setMinimumWidth(94)
+        self.audio_target_combo.setMaximumWidth(132)
+        for label, code in SONIOX_LANGUAGES:
+            self.audio_target_combo.addItem(f"→ {label}", code)
+        add_audio(self.audio_target_combo)
+
+        self.audio_alignment_combo = BarComboBox()
+        self.audio_alignment_combo.setObjectName("barCombo")
+        self.audio_alignment_combo.setAccessibleName("Căn lề transcript")
+        self.audio_alignment_combo.setToolTip("Căn trái, giữa hoặc phải transcript")
+        self.audio_alignment_combo.setMinimumWidth(82)
+        self.audio_alignment_combo.setMaximumWidth(104)
+        self.audio_alignment_combo.addItem("CĂN TRÁI", "left")
+        self.audio_alignment_combo.addItem("CĂN GIỮA", "center")
+        self.audio_alignment_combo.addItem("CĂN PHẢI", "right")
+        add_audio(self.audio_alignment_combo)
+        add_audio(self._bar_separator())
+
+        for combo in (
+            self.audio_source_combo,
+            self.audio_display_combo,
+            self.audio_target_combo,
+            self.audio_alignment_combo,
+        ):
+            self._fit_popup(combo)
+        self.sync_audio_controls()
+        self.audio_source_combo.currentIndexChanged.connect(self._audio_source_changed)
+        self.audio_display_combo.currentIndexChanged.connect(
+            self._audio_display_changed
+        )
+        self.audio_target_combo.currentIndexChanged.connect(self._audio_target_changed)
+        self.audio_alignment_combo.currentIndexChanged.connect(
+            self._audio_alignment_changed
+        )
 
         self.pin_button = BarButton("pin")
         self.pin_button.setAccessibleName("Ghim khung dịch")
         self.pin_button.setCheckable(True)
         self.pin_button.setChecked(self.config.hud_pinned)
         self.pin_button.toggled.connect(self._set_pinned)
-        layout.addWidget(self.pin_button)
+        add_standard(self.pin_button)
 
         self.background_toggle_button = BarButton("bgtoggle")
         self.background_toggle_button.setAccessibleName("Nền khung dịch")
         self.background_toggle_button.setCheckable(True)
         self.background_toggle_button.setChecked(self.config.hud_background_enabled)
         self.background_toggle_button.toggled.connect(self._toggle_hud_background)
-        layout.addWidget(self.background_toggle_button)
-        layout.addWidget(self._bar_separator())
+        add_standard(self.background_toggle_button)
+        add_standard(self._bar_separator())
 
-        self._action_btns: dict[str, BarButton] = {}
-        self._add_action_group(layout, BAR_GROUP_OVERLAY)
-        layout.addWidget(self._bar_separator())
-        self._add_action_group(layout, BAR_GROUP_CLIPBOARD)
-        layout.addWidget(self._bar_separator())
-        self._add_action_group(layout, BAR_GROUP_FRAME)
-        layout.addWidget(self._bar_separator())
+        self._translation_actions: dict[str, QAction] = {}
+        self._action_group_buttons: dict[str, BarMenuButton] = {}
+        self._action_group_menus: dict[str, QMenu] = {}
+        self._action_group_for_action: dict[str, str] = {}
+        self._group_actions: dict[str, tuple[str, ...]] = {}
+        action_groups = (
+            (
+                "screen",
+                BAR_GROUP_OVERLAY + BAR_GROUP_FRAME[:2],
+                "scan",
+                "MÀN HÌNH",
+            ),
+            ("clipboard", BAR_GROUP_CLIPBOARD, "image", "ẢNH"),
+            ("text", BAR_GROUP_FRAME[2:], "text", "VĂN BẢN"),
+        )
+        for group_id, actions, kind, label in action_groups:
+            add_standard(self._build_action_menu(group_id, actions, kind, label))
+        add_standard(self._bar_separator())
+
+        self.audio_mode_button = QPushButton("Audio")
+        self.audio_mode_button.setIcon(_make_icon("audio", ICON_IDLE, 18))
+        self.audio_mode_button.setObjectName("barGroupToggle")
+        self.audio_mode_button.setAccessibleName("Mở điều khiển dịch audio")
+        self.audio_mode_button.setToolTip(
+            "Mở Audio mode để chọn nguồn, ngôn ngữ và cách hiển thị"
+        )
+        self.audio_mode_button.setCheckable(True)
+        self.audio_mode_button.setFixedHeight(30)
+        self.audio_mode_button.setCursor(Qt.PointingHandCursor)
+        self.audio_mode_button.clicked.connect(self._enter_audio_mode)
+        add_standard(self.audio_mode_button)
+        add_standard(self._bar_separator())
 
         self.copy_button = BarButton("copy")
         self.copy_button.setAccessibleName("Copy bản dịch")
@@ -172,7 +316,7 @@ class HUDWindow(QWidget):
         layout.addSpacing(4)
         layout.addWidget(self._bar_separator())
 
-        self.service_combo = QComboBox()
+        self.service_combo = BarComboBox()
         self.service_combo.setObjectName("barCombo")
         self.service_combo.setAccessibleName("Dịch vụ dịch")
         self.service_combo.setToolTip("Chọn dịch vụ dịch")
@@ -181,7 +325,7 @@ class HUDWindow(QWidget):
         for label, key in self._service_entries():
             self.service_combo.addItem(label, key)
 
-        self.target_combo = QComboBox()
+        self.target_combo = BarComboBox()
         self.target_combo.setObjectName("barCombo")
         self.target_combo.setAccessibleName("Ngôn ngữ đích")
         self.target_combo.setToolTip("Chọn ngôn ngữ đích của bản dịch")
@@ -194,9 +338,9 @@ class HUDWindow(QWidget):
         self._fit_popup(self.target_combo)
         self.service_combo.currentIndexChanged.connect(self._service_changed)
         self.target_combo.currentIndexChanged.connect(self._target_changed)
-        layout.addWidget(self.service_combo)
-        layout.addWidget(self.target_combo)
-        layout.addWidget(self._bar_separator())
+        add_standard(self.service_combo)
+        add_standard(self.target_combo)
+        add_standard(self._bar_separator())
 
         settings_button = BarButton("settings")
         settings_button.setAccessibleName("Cài đặt")
@@ -217,11 +361,108 @@ class HUDWindow(QWidget):
         busy_row.addWidget(self.busy_bar)
         shell.addLayout(busy_row)
 
+        self._set_audio_mode(False)
         self.refresh_bar_tooltips()
         self._sync_pin_tooltip()
         self._sync_background_toggle_tooltip()
         self._sync_output_actions()
         return bar
+
+    @staticmethod
+    def _set_combo_value(combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0 or index == combo.currentIndex():
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    def sync_audio_controls(self) -> None:
+        """Đồng bộ Audio mode với cấu hình dùng chung của cửa sổ Cài đặt."""
+        if not hasattr(self, "audio_source_combo"):
+            return
+        self._set_combo_value(self.audio_source_combo, self.config.soniox_audio_source)
+        self._set_combo_value(self.audio_display_combo, self.config.soniox_display_mode)
+        self._set_combo_value(
+            self.audio_target_combo, self.config.soniox_target_language
+        )
+        self._set_combo_value(
+            self.audio_alignment_combo, self.config.soniox_text_alignment
+        )
+
+    def _set_audio_mode(self, enabled: bool) -> None:
+        self._audio_mode = enabled
+        self.audio_mode_button.setChecked(enabled)
+        for widget in self._standard_mode_widgets:
+            widget.setVisible(not enabled)
+        for widget in self._audio_mode_widgets:
+            widget.setVisible(enabled)
+        active = bool(getattr(getattr(self, "audio_session", None), "is_active", False))
+        self.audio_mode_back_button.setEnabled(not active)
+        self._sync_bar_density()
+
+    def _sync_bar_density(self) -> None:
+        if not hasattr(self, "status_pill"):
+            return
+        width = self.width()
+        if self._audio_mode:
+            show_output = width >= 820
+            self.copy_button.setVisible(show_output)
+            self.clear_button.setVisible(show_output)
+            self.status_pill.setVisible(show_output)
+            return
+        show_output = width >= 720
+        self.copy_button.setVisible(show_output)
+        self.clear_button.setVisible(show_output)
+        self.status_pill.setVisible(width >= 900)
+        self.service_combo.setVisible(width >= 700)
+
+    def _enter_audio_mode(self) -> None:
+        self.sync_audio_controls()
+        self._set_audio_mode(True)
+
+    def _exit_audio_mode(self) -> None:
+        if self.audio_session.is_active:
+            return
+        self._set_audio_mode(False)
+
+    def _sync_open_soniox_controls(self) -> None:
+        if self._settings_win is not None:
+            self._settings_win.sync_soniox_controls()
+
+    def _audio_source_changed(self) -> None:
+        source = self.audio_source_combo.currentData()
+        if not isinstance(source, str):
+            return
+        self.config.soniox_audio_source = source
+        self.config.save()
+        self._sync_open_soniox_controls()
+
+    def _audio_display_changed(self) -> None:
+        display_mode = self.audio_display_combo.currentData()
+        if not isinstance(display_mode, str):
+            return
+        self.config.soniox_display_mode = display_mode
+        self.config.save()
+        self.refresh_audio_transcript_display()
+        self._sync_open_soniox_controls()
+
+    def _audio_target_changed(self) -> None:
+        language = self.audio_target_combo.currentData()
+        if not isinstance(language, str):
+            return
+        self.config.soniox_target_language = language
+        self.config.save()
+        self._sync_open_soniox_controls()
+
+    def _audio_alignment_changed(self) -> None:
+        alignment = self.audio_alignment_combo.currentData()
+        if not isinstance(alignment, str):
+            return
+        self.config.soniox_text_alignment = alignment
+        self.config.save()
+        self.refresh_audio_transcript_display()
+        self._sync_open_soniox_controls()
 
     def _service_entries(self) -> list[tuple[str, str]]:
         models = {
@@ -251,18 +492,99 @@ class HUDWindow(QWidget):
         )
         combo.view().setMinimumWidth(widest + 46)
 
-    def _add_action_group(self, layout: QHBoxLayout, group: list) -> None:
-        for kind, label, action, _tooltip in group:
-            button = BarButton(kind)
-            button.setAccessibleName(label)
-            button.setCheckable(action in ("region_to_live", "region_to_live_frame"))
-            button.clicked.connect(
+    def _build_action_menu(
+        self, group_id: str, actions: list, kind: str, label: str
+    ) -> BarMenuButton:
+        button = BarMenuButton(kind, label)
+        button.setAccessibleName(f"Nhóm dịch {label}")
+        button.setToolTip(f"Nhấn để mở nhóm dịch {label.lower()} ở phía trên")
+        menu = QMenu(button)
+        menu.setObjectName("barActionMenu")
+        menu.setAccessibleName(f"Chức năng dịch {label}")
+        action_ids: list[str] = []
+        for icon_kind, accessible_name, action, _tooltip in actions:
+            menu_action = QAction(
+                _make_icon(icon_kind, ICON_IDLE, 18), accessible_name, menu
+            )
+            menu_action.setCheckable(
+                action in ("region_to_live", "region_to_live_frame")
+            )
+            menu_action.triggered.connect(
                 lambda _checked=False, current=action: self.workflow.handle_action(
                     current
                 )
             )
-            self._action_btns[action] = button
-            layout.addWidget(button)
+            menu.addAction(menu_action)
+            self._translation_actions[action] = menu_action
+            self._action_group_for_action[action] = group_id
+            action_ids.append(action)
+        if group_id == "screen":
+            menu.addSeparator()
+            self._application_menu = QMenu("Chọn ứng dụng", menu)
+            self._application_menu.setObjectName("applicationFocusMenu")
+            self._application_menu.setAccessibleName(
+                "Chọn ứng dụng được phép dịch Live"
+            )
+            self._application_menu.setIcon(_make_icon("scan", ICON_IDLE, 18))
+            self._application_menu.aboutToShow.connect(self._populate_application_menu)
+            menu.addMenu(self._application_menu)
+        button.attach_menu(menu)
+        self._action_group_buttons[group_id] = button
+        self._action_group_menus[group_id] = menu
+        self._group_actions[group_id] = tuple(action_ids)
+        return button
+
+    def _populate_application_menu(self) -> None:
+        menu = self._application_menu
+        menu.clear()
+        selected_id = self.config.live_focus_app_id
+
+        all_apps = QAction("Mọi ứng dụng", menu)
+        all_apps.setCheckable(True)
+        all_apps.setChecked(not selected_id)
+        all_apps.triggered.connect(
+            lambda _checked=False: self._select_live_focus_application("", "")
+        )
+        menu.addAction(all_apps)
+        menu.addSeparator()
+
+        applications = list_desktop_applications()
+        known_ids = {application.application_id for application in applications}
+        if selected_id and selected_id not in known_ids:
+            unavailable = QAction(
+                f"{self.config.live_focus_app_label or 'Ứng dụng đã chọn'} (không mở)",
+                menu,
+            )
+            unavailable.setCheckable(True)
+            unavailable.setChecked(True)
+            unavailable.setEnabled(False)
+            menu.addAction(unavailable)
+            menu.addSeparator()
+        if not applications:
+            empty = QAction("Không tìm thấy ứng dụng đang mở", menu)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+            return
+        for application in applications:
+            action = QAction(application.label, menu)
+            action.setCheckable(True)
+            action.setChecked(application.application_id == selected_id)
+            action.setToolTip(
+                f"Live chỉ dịch khi {application.name} là ứng dụng đang focus"
+            )
+            action.triggered.connect(
+                lambda _checked=False, current=application: (
+                    self._select_live_focus_application(
+                        current.application_id, current.label
+                    )
+                )
+            )
+            menu.addAction(action)
+
+    def _select_live_focus_application(
+        self, application_id: str, application_label: str
+    ) -> None:
+        self.workflow.set_live_focus_application(application_id, application_label)
 
     def _bar_separator(self) -> QFrame:
         separator = QFrame()
@@ -314,6 +636,84 @@ class HUDWindow(QWidget):
         self.set_output("")
         self.set_status("Đã xoá khung dịch.", "ready")
 
+    def toggle_audio_realtime(self) -> None:
+        """Bật/tắt phiên dịch mic hoặc audio hệ thống từ HUD/Cài đặt."""
+        if self.audio_session.is_active:
+            self.audio_session.stop()
+            return
+        if not self.audio_session.is_active:
+            self._enter_audio_mode()
+        started = self.audio_session.start(
+            api_key=self.config.soniox_api_key,
+            audio_source=self.config.soniox_audio_source,
+            device_id=self.config.soniox_input_device,
+            system_device=self.config.soniox_system_device,
+            translation_mode=self.config.soniox_translation_mode,
+            target_language=self.config.soniox_target_language,
+            language_a=self.config.soniox_language_a,
+            language_b=self.config.soniox_language_b,
+            speaker_diarization=self.config.soniox_speaker_diarization,
+        )
+        if started:
+            self.set_output("")
+            self.ensure_visible()
+
+    def _on_audio_state_changed(self, state: str) -> None:
+        active = state != "idle"
+        if active:
+            self._set_audio_mode(True)
+        self.audio_button.blockSignals(True)
+        self.audio_button.setChecked(active)
+        self.audio_button.blockSignals(False)
+        self.set_busy(active)
+        self.audio_button.setEnabled(state != "stopping")
+        self.audio_mode_back_button.setEnabled(not active)
+        self.audio_button.setAccessibleName(
+            "Dừng dịch audio realtime" if active else "Bắt đầu dịch audio realtime"
+        )
+        self.audio_button.setToolTip(
+            "Dừng và hoàn tất transcript đang nghe"
+            if active
+            else "Bắt đầu phiên dịch audio với cấu hình đang chọn"
+        )
+        source_label = (
+            "audio hệ thống" if self.audio_session.source == "system" else "microphone"
+        )
+        if state == "connecting":
+            self.set_status(f"Đang kết nối Soniox · {source_label}…", "busy")
+        elif state == "listening":
+            self.set_status(f"Đang nghe và dịch {source_label}…", "busy")
+        elif state == "stopping":
+            self.set_status("Đang hoàn tất transcript Soniox…", "busy")
+        if self._settings_win is not None:
+            self._settings_win.sync_soniox_state(state)
+            self._settings_win.sync_soniox_controls()
+
+    def _on_audio_transcript(self, text: str) -> None:
+        self.refresh_audio_transcript_display(fallback=text)
+        self.ensure_visible()
+
+    def refresh_audio_transcript_display(self, fallback: str = "") -> None:
+        """Áp dụng chế độ/căn lề mới mà không cần khởi động lại phiên."""
+        blocks = self.audio_session.transcript_blocks
+        if not blocks:
+            if fallback:
+                self.set_output(fallback)
+            return
+        self.output.set_transcript(
+            blocks,
+            display_mode=self.config.soniox_display_mode,
+            alignment=self.config.soniox_text_alignment,
+        )
+        self._sync_output_actions()
+
+    def _on_audio_failed(self, message: str) -> None:
+        self.set_status(message, "error")
+        self.ensure_visible()
+
+    def _on_audio_finished(self) -> None:
+        self.set_status("Đã kết thúc phiên dịch audio.", "ok")
+
     def _sync_output_actions(self) -> None:
         """Copy/Xoá chỉ bấm được khi trong khung đang có bản dịch."""
         has_content = self.output.has_content() if hasattr(self, "output") else False
@@ -325,14 +725,6 @@ class HUDWindow(QWidget):
         else:
             self.copy_button.setAccessibleName("Copy bản dịch")
             self.copy_button.setToolTip("Copy bản dịch trong khung vào clipboard")
-
-    def _sync_placeholder(self) -> None:
-        """Gợi ý trong khung trống: nói rõ vùng này để làm gì + phím tắt."""
-        if not hasattr(self, "output"):
-            return
-        hotkey = _fmt_hotkey(self.config.hotkeys.get("region_to_text", ""))
-        suffix = f" · {hotkey}" if hotkey != "Tắt" else ""
-        self.output.set_placeholder(f"Bản dịch hiện ở đây{suffix}")
 
     def apply_hud_text_style(self) -> None:
         self.preview_hud_text_style(
@@ -498,11 +890,13 @@ class HUDWindow(QWidget):
 
     def refresh_bar_tooltips(self) -> None:
         for _kind, label, action, tooltip in BAR_ACTIONS:
-            button = self._action_btns.get(action)
-            if button is not None:
-                hotkey = _fmt_hotkey(self.config.hotkeys.get(action, ""))
-                button.setToolTip(f"{label} · {tooltip}\nPhím tắt: {hotkey}")
-        self._sync_placeholder()
+            menu_action = self._translation_actions.get(action)
+            if menu_action is None:
+                continue
+            hotkey = _fmt_hotkey(self.config.hotkeys.get(action, ""))
+            menu_action.setText(f"{label}\t{hotkey}")
+            menu_action.setToolTip(f"{tooltip}\nPhím tắt: {hotkey}")
+            menu_action.setStatusTip(tooltip)
 
     def _restore_geometry(self) -> None:
         geometry = self.config.hud_geometry
@@ -526,6 +920,31 @@ class HUDWindow(QWidget):
             max(virtual.top(), min(int(y), max_y)),
         )
 
+    def _snapped_position(self, position: QPoint, pointer: QPoint) -> QPoint:
+        """Hít mép HUD vào cạnh vùng làm việc của màn hình đang kéo tới."""
+        screen = QGuiApplication.screenAt(pointer)
+        if screen is None:
+            screen = QGuiApplication.screenAt(
+                position + QPoint(self.width() // 2, self.height() // 2)
+            )
+        if screen is None:
+            return position
+        available = screen.availableGeometry()
+        right = max(available.left(), available.right() - self.width() + 1)
+        bottom = max(available.top(), available.bottom() - self.height() + 1)
+
+        def snap(value: int, first: int, second: int) -> int:
+            target = min((first, second), key=lambda edge: abs(value - edge))
+            return target if abs(value - target) <= self.SNAP_DISTANCE else value
+
+        return QPoint(
+            snap(position.x(), available.left(), right),
+            snap(position.y(), available.top(), bottom),
+        )
+
+    def _move_with_snap(self, position: QPoint, pointer: QPoint) -> None:
+        self.move(self._snapped_position(position, pointer))
+
     def _persist_geometry(self) -> None:
         if self._quitting:
             return
@@ -539,6 +958,7 @@ class HUDWindow(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._sync_bar_density()
         if not self._quitting and self.isVisible():
             self._geometry_timer.start(400)
 
@@ -610,6 +1030,7 @@ class HUDWindow(QWidget):
         icons = {
             "Mở HUD": "overlay",
             "Hiện thanh công cụ": "text",
+            "Dịch audio": "audio",
             "Cài đặt…": "settings",
             "Ẩn": "hide",
         }
@@ -633,6 +1054,7 @@ class HUDWindow(QWidget):
         return (
             ("Mở HUD", self._restore_from_tray),
             ("Hiện thanh công cụ", self.show_toolbar),
+            ("Dịch audio", self.toggle_audio_realtime),
             ("Cài đặt…", self._open_settings),
             ("Ẩn", self._hide_to_tray),
         )
@@ -687,7 +1109,7 @@ class HUDWindow(QWidget):
 
             self._mouse = mouse
             mouse.on_right_click(
-                lambda: self.bridge.run.emit(self.workflow.dismiss_all_overlays)
+                lambda: self.bridge.run.emit(self.workflow.dismiss_transient_overlays)
             )
         except Exception:  # noqa: BLE001
             self._mouse = None
@@ -704,11 +1126,23 @@ class HUDWindow(QWidget):
     def set_busy(self, busy: bool) -> None:
         if hasattr(self, "busy_bar"):
             self.busy_bar.set_active(busy)
-        for action, button in self._action_btns.items():
-            if action not in ("region_to_live", "region_to_live_frame"):
-                button.setEnabled(not busy)
+        for action, menu_action in self._translation_actions.items():
+            is_live = action in ("region_to_live", "region_to_live_frame")
+            menu_action.setEnabled(not busy or is_live)
+        for group_id, button in self._action_group_buttons.items():
+            button.setEnabled(
+                any(
+                    self._translation_actions[action].isEnabled()
+                    for action in self._group_actions[group_id]
+                )
+            )
         self.target_combo.setEnabled(not busy)
         self.service_combo.setEnabled(not busy)
+        self.audio_mode_button.setEnabled(not busy)
+        self.audio_source_combo.setEnabled(not busy)
+        self.audio_target_combo.setEnabled(not busy)
+        if hasattr(self, "audio_button"):
+            self.audio_button.setEnabled(self.audio_session.is_active or not busy)
         if self._settings_win is not None:
             for control in (
                 self._settings_win.service_box,
@@ -721,6 +1155,15 @@ class HUDWindow(QWidget):
                 self._settings_win.backend_box,
                 self._settings_win.acceleration_check,
                 self._settings_win.ocr_box,
+                self._settings_win.soniox_key_edit,
+                self._settings_win.soniox_source_box,
+                self._settings_win.soniox_microphone_box,
+                self._settings_win.soniox_system_device_box,
+                self._settings_win.soniox_mode_box,
+                self._settings_win.soniox_target_box,
+                self._settings_win.soniox_language_a_box,
+                self._settings_win.soniox_language_b_box,
+                self._settings_win.soniox_diarization_check,
             ):
                 control.setEnabled(not busy)
             if not busy:
@@ -741,9 +1184,20 @@ class HUDWindow(QWidget):
             self.raise_()
 
     def set_live_action_checked(self, action: str, checked: bool) -> None:
-        button = self._action_btns.get(action)
-        if button is not None:
-            button.setChecked(checked)
+        menu_action = self._translation_actions.get(action)
+        group_id = self._action_group_for_action.get(action)
+        if menu_action is None or group_id is None:
+            return
+        menu_action.setChecked(checked)
+        group_button = self._action_group_buttons[group_id]
+        group_live = any(
+            self._translation_actions[group_action].isChecked()
+            for group_action in self._group_actions[group_id]
+        )
+        group_button.setProperty("live", group_live)
+        group_button.style().unpolish(group_button)
+        group_button.style().polish(group_button)
+        group_button.update()
 
     def event(self, event) -> bool:
         result = super().event(event)
@@ -772,6 +1226,7 @@ class HUDWindow(QWidget):
         self._quitting = True
         self._geometry_timer.stop()
         self.workflow.shutdown()
+        self.audio_session.shutdown()
         self.config.hud_geometry = {
             "x": self.x(),
             "y": self.y(),

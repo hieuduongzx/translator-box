@@ -12,6 +12,19 @@ LANGUAGES = [
     ("Español", "es"),
     ("Deutsch", "de"),
 ]
+
+# Soniox dùng mã ISO ngắn; tiếng Trung là ``zh`` thay vì mã locale ``zh-CN``.
+SONIOX_LANGUAGES = [
+    ("Tiếng Việt", "vi"),
+    ("English", "en"),
+    ("日本語", "ja"),
+    ("한국어", "ko"),
+    ("中文", "zh"),
+    ("Français", "fr"),
+    ("Español", "es"),
+    ("Deutsch", "de"),
+]
+SONIOX_LANGUAGE_CODES = {code for _label, code in SONIOX_LANGUAGES}
 OCR_LANGUAGES = [
     ("Đa ngôn ngữ", "multi"),
     ("Nhật + Anh", "jpn+eng"),
@@ -140,7 +153,9 @@ def bar_translator_entries(
         )
         for model_id in models:
             label = labels.get(model_id, model_id)
-            entries.append((f"{provider['name']} · {label}", f"{provider_id}::{model_id}"))
+            entries.append(
+                (f"{provider['name']} · {label}", f"{provider_id}::{model_id}")
+            )
     for provider in custom_providers or []:
         code = f"custom:{provider['id']}"
         if enabled_providers is not None and code not in enabled_providers:
@@ -149,6 +164,7 @@ def bar_translator_entries(
             label = f"{provider['name']} · {model_id}"
             entries.append((label, f"{_CUSTOM_BAR_PREFIX}{provider['id']}::{model_id}"))
     return entries
+
 
 # Danh mục font HUD có giới hạn. Qt vẫn tự ghép font fallback cho glyph còn thiếu.
 HUD_FONT_OPTIONS = (

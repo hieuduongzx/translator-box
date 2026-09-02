@@ -7,8 +7,10 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFontMetricsF, QImage
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
@@ -77,9 +79,7 @@ class TranslationOverlayPaintTests(unittest.TestCase):
 
         self.assertEqual(result.size(), source.size())
         self.assertEqual(result.pixelColor(0, 29), source_color)
-        compositor = overlay.TranslationOverlay(
-            (0, 0, 80, 30), [region], (80, 30)
-        )
+        compositor = overlay.TranslationOverlay((0, 0, 80, 30), [region], (80, 30))
         patch = compositor._paint_regions[0].patch
         compositor.close()
         changed = any(
@@ -148,7 +148,9 @@ class TranslationOverlayPaintTests(unittest.TestCase):
         regions = [
             self._region("Ngắn", (10, 10, 340, 32), (10, 12, 340, 30)),
             self._region(
-                "Dòng dịch dài hơn hẳn bản gốc " * 3, (10, 36, 340, 58), (10, 38, 340, 56)
+                "Dòng dịch dài hơn hẳn bản gốc " * 3,
+                (10, 36, 340, 58),
+                (10, 38, 340, 56),
             ),
             self._region("Vừa phải thôi", (10, 62, 340, 84), (10, 64, 340, 82)),
         ]
@@ -255,6 +257,25 @@ class TranslationOverlayPaintTests(unittest.TestCase):
         )
         thin.close()
         thick.close()
+
+    def test_live_overlay_ignores_mouse_clicks_and_escape(self) -> None:
+        widget = overlay.TranslationOverlay(
+            (0, 0, 220, 60),
+            [self._region("Live", (10, 10, 190, 34))],
+            (220, 60),
+        )
+        widget.set_live(True)
+        widget.show()
+        self.app.processEvents()
+
+        QTest.mouseClick(widget, Qt.MouseButton.RightButton)
+        QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+        QTest.keyClick(widget, Qt.Key.Key_Escape)
+        self.app.processEvents()
+
+        self.assertTrue(widget.isVisible())
+        self.assertIn("bar", widget.toolTip())
+        widget.close()
 
 
 if __name__ == "__main__":

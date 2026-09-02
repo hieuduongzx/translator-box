@@ -4,6 +4,7 @@ keyboard
 mouse
 pyperclip
 winsdk  ; sys_platform == "win32"  # Windows.Media.Ocr trên Windows 10/11
+PyAudioWPatch>=0.2.12.8,<0.3 ; sys_platform == "win32"  # WASAPI loopback: thu âm thanh hệ thống
 rapidocr>=3.9,<4       # PP-OCRv5/v6, tự tải model theo cấu hình
 onnxruntime>=1.17,<2   # runtime CPU cho RapidOCR
 numpy                  # dựng lại nền overlay (inpaint). Có sẵn theo rapidocr.

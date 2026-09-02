@@ -246,7 +246,9 @@ class _RegionOverlay(QWidget):
         Với nhiều màn hình, canh giữa desktop ảo có thể rơi vào khe giữa hai
         màn hình và người dùng không đọc được gì.
         """
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        screen = (
+            QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        )
         if screen is None:
             return QPoint((self.width() - pill_width) // 2, 28)
         geometry = screen.geometry()
@@ -409,10 +411,11 @@ def select_region(_parent=None) -> tuple[int, int, int, int] | None:
 _live_overlays: list["TranslationOverlay"] = []
 
 
-def close_all_translations() -> None:
-    """Đóng toàn bộ ô dịch nổi đang hiển thị."""
+def close_all_translations(*, include_live: bool = True) -> None:
+    """Đóng các ô dịch nổi; có thể giữ nguyên overlay của phiên Live."""
     for widget in list(_live_overlays):
-        widget.close()
+        if include_live or not widget._live:
+            widget.close()
 
 
 def hide_translations_for_capture() -> list["TranslationOverlay"]:
@@ -470,14 +473,11 @@ class TranslationOverlay(QWidget):
         self._h = max(1, bottom - top)
         self.setGeometry(left, top, self._w, self._h)
         self._live = False
-        # Callback thay cho hành vi đóng mặc định (dùng cho chế độ live).
-        self.dismiss_callback = None
         self._paint_regions = []
         self._build_paint_regions(regions, image_size)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Chuột trái: đóng ô này · Chuột phải (bất kỳ đâu): xoá hết")
         _live_overlays.append(self)
-
 
     def _build_paint_regions(
         self, regions: list[OverlayRegion], image_size: tuple[int, int]
@@ -618,6 +618,7 @@ class TranslationOverlay(QWidget):
             return []
 
         groups: list[list[dict]] = []
+
         def source_line_height(item: dict) -> float:
             return max(1.0, item["box"].height() / item["source_lines"])
 
@@ -657,8 +658,7 @@ class TranslationOverlay(QWidget):
     def _reference_ink(items: list[dict]) -> float:
         """Chiều cao ink đại diện của một khối (percentile 90, chống nhiễu OCR)."""
         heights = sorted(
-            max(1.0, item["ink"].height() / item["source_lines"])
-            for item in items
+            max(1.0, item["ink"].height() / item["source_lines"]) for item in items
         )
         reference = heights[min(len(heights) - 1, int(len(heights) * 0.9))]
         # Hộp OCR chưa đo được ink thật thì trừ bớt phần lỏng thường thấy (~12%).
@@ -713,9 +713,7 @@ class TranslationOverlay(QWidget):
         thickness = item.get("thickness") or 0.0
         return thickness > 0 and thickness >= 0.14 * target_ink + 0.7
 
-    def _fit_ink_height(
-        self, font: QFont, text: str, max_ink: float, size: int
-    ) -> int:
+    def _fit_ink_height(self, font: QFont, text: str, max_ink: float, size: int) -> int:
         """Co cỡ chữ khi ink bản dịch cao QUÁ mức cho phép so với chữ gốc.
 
         Chỉ CO chứ không nới — dòng nào bản dịch toàn chữ thấp (không dấu, không
@@ -767,8 +765,11 @@ class TranslationOverlay(QWidget):
     def set_live(self, on: bool) -> None:
         self._live = on
         if on:
-            self.setToolTip("Đang LIVE dịch · Chuột phải hoặc Esc để dừng")
-        self.update()
+            self.setToolTip(
+                "Đang LIVE dịch · Dừng bằng nút Live trên thanh bar hoặc phím tắt"
+            )
+        else:
+            self.setToolTip("Trái: đóng ô này · Phải: đóng tất cả")
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -847,8 +848,8 @@ class TranslationOverlay(QWidget):
         )
 
     def mousePressEvent(self, event) -> None:
-        if self.dismiss_callback is not None:
-            self.dismiss_callback()
+        if self._live:
+            event.accept()
             return
         if event.button() == Qt.RightButton:
             close_all_translations()
@@ -856,11 +857,13 @@ class TranslationOverlay(QWidget):
             self.close()
 
     def keyPressEvent(self, event) -> None:
+        if self._live:
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape:
-            if self.dismiss_callback is not None:
-                self.dismiss_callback()
-                return
             close_all_translations()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:
         try:

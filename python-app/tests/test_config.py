@@ -46,7 +46,9 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(settings.hud_text_color, defaults["hud_text_color"])
         self.assertEqual(settings.hud_border_color, defaults["hud_border_color"])
         self.assertEqual(settings.hud_font_family, defaults["hud_font_family"])
-        self.assertEqual(settings.hud_background_color, defaults["hud_background_color"])
+        self.assertEqual(
+            settings.hud_background_color, defaults["hud_background_color"]
+        )
         # Config này đã có kiểu chữ riêng → không tự bật bóng chữ.
         self.assertEqual(settings.hud_shadow_radius, 0.0)
         self.assertEqual(settings.hud_shadow_color, defaults["hud_shadow_color"])
@@ -74,11 +76,81 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.ocr_model, "ppocrv5_mobile")
 
+    def test_live_focus_application_is_normalized_and_persisted(self) -> None:
+        settings = config.AppConfig(
+            {
+                "live_focus_app_id": " C:/Apps/Reader.EXE ",
+                "live_focus_app_label": " Reader ",
+            }
+        )
+
+        self.assertEqual(settings.live_focus_app_id, "c:/apps/reader.exe")
+        self.assertEqual(settings.live_focus_app_label, "Reader")
+        self.assertEqual(settings.to_dict()["live_focus_app_id"], "c:/apps/reader.exe")
+        invalid = config.AppConfig(
+            {"live_focus_app_id": 123, "live_focus_app_label": object()}
+        )
+        self.assertEqual(invalid.live_focus_app_id, "")
+        self.assertEqual(invalid.live_focus_app_label, "")
+
     def test_fresh_config_uses_legible_hud_preset(self) -> None:
         settings = config.AppConfig({})
 
         for key, value in config.HUD_STYLE_DEFAULTS.items():
             self.assertEqual(getattr(settings, key), value, key)
+
+    def test_soniox_defaults_and_validation_keep_language_pair_distinct(self) -> None:
+        defaults = config.AppConfig()
+        self.assertEqual(defaults.soniox_api_key, "")
+        self.assertEqual(defaults.soniox_audio_source, "system")
+        self.assertEqual(defaults.soniox_system_device, "")
+        self.assertEqual(defaults.soniox_translation_mode, "one_way")
+        self.assertEqual(defaults.soniox_target_language, "vi")
+        self.assertEqual(
+            (defaults.soniox_language_a, defaults.soniox_language_b), ("en", "vi")
+        )
+        self.assertFalse(defaults.soniox_speaker_diarization)
+        self.assertEqual(defaults.soniox_display_mode, "bilingual")
+        self.assertEqual(defaults.soniox_text_alignment, "center")
+
+        normalized = config.AppConfig(
+            {
+                "soniox_api_key": 123,
+                "soniox_audio_source": "invalid",
+                "soniox_system_device": "Headphones [Loopback]",
+                "soniox_translation_mode": "invalid",
+                "soniox_target_language": "zh-CN",
+                "soniox_language_a": "ja",
+                "soniox_language_b": "ja",
+                "soniox_speaker_diarization": "yes",
+                "soniox_display_mode": "invalid",
+                "soniox_text_alignment": "justify",
+            }
+        )
+        self.assertEqual(normalized.soniox_api_key, "")
+        self.assertEqual(normalized.soniox_audio_source, "system")
+        self.assertEqual(normalized.soniox_system_device, "Headphones [Loopback]")
+        self.assertEqual(normalized.soniox_translation_mode, "one_way")
+        self.assertEqual(normalized.soniox_target_language, "vi")
+        self.assertEqual(
+            (normalized.soniox_language_a, normalized.soniox_language_b), ("ja", "vi")
+        )
+        self.assertFalse(normalized.soniox_speaker_diarization)
+        self.assertEqual(normalized.soniox_display_mode, "bilingual")
+        self.assertEqual(normalized.soniox_text_alignment, "center")
+        self.assertFalse(
+            config.AppConfig(
+                {"soniox_speaker_diarization": True}
+            ).soniox_speaker_diarization
+        )
+        self.assertTrue(
+            config.AppConfig(
+                {
+                    "soniox_speaker_diarization": True,
+                    "soniox_speaker_setting_version": 2,
+                }
+            ).soniox_speaker_diarization
+        )
 
     def test_previous_default_preset_upgrades_to_new_glow_preset(self) -> None:
         legacy = {
@@ -168,7 +240,9 @@ class AppConfigTests(unittest.TestCase):
         # Model mặc định rơi về model đầu tiên của provider khi chưa hợp lệ.
         self.assertEqual(gemini.provider_api_key("gemini"), "sk-gm")
 
-    def test_ai_models_are_normalized_and_unconfigured_provider_cannot_run(self) -> None:
+    def test_ai_models_are_normalized_and_unconfigured_provider_cannot_run(
+        self,
+    ) -> None:
         settings = config.AppConfig(
             {
                 "ai_models": {

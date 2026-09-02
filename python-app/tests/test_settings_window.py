@@ -37,6 +37,8 @@ class FakeHud:
         self.background_toggle_button = QPushButton()
         self.background_toggle_button.setCheckable(True)
         self.background_toggle_button.setChecked(self.config.hud_background_enabled)
+        self.audio_session = SimpleNamespace(state="idle")
+        self.audio_refreshes = 0
 
     def _sync_background_toggle_tooltip(self) -> None:
         pass
@@ -59,6 +61,12 @@ class FakeHud:
     def refresh_bar_tooltips(self) -> None:
         pass
 
+    def toggle_audio_realtime(self) -> None:
+        pass
+
+    def refresh_audio_transcript_display(self) -> None:
+        self.audio_refreshes += 1
+
 
 class SettingsWindowTests(unittest.TestCase):
     @classmethod
@@ -79,6 +87,17 @@ class SettingsWindowTests(unittest.TestCase):
             mock.patch(
                 "settings_window.QFontDatabase.families",
                 return_value=["Yu Gothic", "Arial", "Comic Sans MS"],
+            ),
+            mock.patch(
+                "settings_window.audio_input_options",
+                return_value=[("Mặc định hệ thống", "")],
+            ),
+            mock.patch(
+                "settings_window.system_audio_input_options",
+                return_value=[
+                    ("Mặc định Windows", ""),
+                    ("Headphones", "Headphones [Loopback]"),
+                ],
             ),
         )
         self.patches = patches
@@ -103,13 +122,14 @@ class SettingsWindowTests(unittest.TestCase):
             [
                 "[01]  DỊCH",
                 "[02]  DỊCH VỤ AI",
-                "[03]  OCR",
-                "[04]  KHUNG DỊCH",
-                "[05]  PHÍM TẮT",
-                "[06]  GIỚI THIỆU",
+                "[03]  AUDIO",
+                "[04]  OCR",
+                "[05]  KHUNG DỊCH",
+                "[06]  PHÍM TẮT",
+                "[07]  GIỚI THIỆU",
             ],
         )
-        self.assertEqual(self.window.pages.count(), 6)
+        self.assertEqual(self.window.pages.count(), 7)
         self.assertEqual(
             self.window.navigation.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
@@ -147,7 +167,9 @@ class SettingsWindowTests(unittest.TestCase):
         openai_index = self.window.ai_provider_box.findData("openai")
         self.window.ai_provider_box.setCurrentIndex(openai_index)
 
-        self.assertEqual(self.window.llm_endpoint_edit.text(), "https://api.openai.com/v1")
+        self.assertEqual(
+            self.window.llm_endpoint_edit.text(), "https://api.openai.com/v1"
+        )
         self.assertFalse(self.window.activate_ai_btn.isEnabled())
         self.assertEqual(self.window.ai_provider_state.text(), "CHƯA CÓ API KEY")
         self.assertEqual(self.window.service_box.findData("openai::gpt-4o"), -1)
@@ -259,8 +281,12 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(
             self.window.text_color_btn.color_hex(), defaults["hud_text_color"]
         )
-        self.assertEqual(self.window.config.hud_border_width, defaults["hud_border_width"])
-        self.assertEqual(self.window.config.hud_shadow_color, defaults["hud_shadow_color"])
+        self.assertEqual(
+            self.window.config.hud_border_width, defaults["hud_border_width"]
+        )
+        self.assertEqual(
+            self.window.config.hud_shadow_color, defaults["hud_shadow_color"]
+        )
         self.assertEqual(
             self.window.background_enabled_check.isChecked(),
             defaults["hud_background_enabled"],
@@ -299,8 +325,7 @@ class SettingsWindowTests(unittest.TestCase):
     def test_ocr_model_dropdown_marks_download_state(self) -> None:
         with mock.patch(
             "settings_window.model_installed",
-            side_effect=lambda model_id: model_id
-            in {"ppocrv5_mobile", "ppocrv6_tiny"},
+            side_effect=lambda model_id: model_id in {"ppocrv5_mobile", "ppocrv6_tiny"},
         ):
             self.window._refresh_ocr_model_options("ppocrv6_tiny")
 
@@ -309,9 +334,7 @@ class SettingsWindowTests(unittest.TestCase):
             for index in range(self.window.model_box.count())
         }
         self.assertEqual(len(labels), 4)
-        self.assertEqual(
-            labels["ppocrv5_mobile"], "✓ PP-OCRv5 mobile · Tích hợp"
-        )
+        self.assertEqual(labels["ppocrv5_mobile"], "✓ PP-OCRv5 mobile · Tích hợp")
         self.assertEqual(labels["ppocrv6_tiny"], "✓ PP-OCRv6 tiny · Đã tải")
         self.assertIn("Chưa tải", labels["ppocrv6_small"])
         self.assertIn("25.2 MB", labels["ppocrv6_small"])
@@ -326,6 +349,56 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertFalse(self.window.model_download_status.isHidden())
         self.assertIn("không tương thích", message)
         self.assertNotIn("Unsupported", message)
+
+    def test_soniox_source_defaults_to_system_and_can_switch_to_microphone(
+        self,
+    ) -> None:
+        self.assertEqual(self.window.soniox_source_box.currentData(), "system")
+        self.assertTrue(self.window.soniox_microphone_row.isHidden())
+        self.assertFalse(self.window.soniox_system_device_row.isHidden())
+
+        self.window.soniox_source_box.setCurrentIndex(
+            self.window.soniox_source_box.findData("microphone")
+        )
+        self.assertEqual(self.window.config.soniox_audio_source, "microphone")
+        self.assertFalse(self.window.soniox_microphone_row.isHidden())
+        self.assertTrue(self.window.soniox_system_device_row.isHidden())
+
+        self.window.soniox_source_box.setCurrentIndex(
+            self.window.soniox_source_box.findData("system")
+        )
+        self.window.soniox_system_device_box.setCurrentIndex(
+            self.window.soniox_system_device_box.findData("Headphones [Loopback]")
+        )
+        self.assertEqual(
+            self.window.config.soniox_system_device,
+            "Headphones [Loopback]",
+        )
+
+    def test_soniox_speaker_labels_default_off_and_can_be_enabled(self) -> None:
+        self.assertFalse(self.window.soniox_diarization_check.isChecked())
+        self.assertEqual(
+            self.window.soniox_diarization_check.text(), "Hiện nhãn người nói"
+        )
+
+        self.window.soniox_diarization_check.setChecked(True)
+
+        self.assertTrue(self.window.config.soniox_speaker_diarization)
+
+    def test_soniox_display_mode_and_alignment_apply_immediately(self) -> None:
+        self.assertEqual(self.window.soniox_display_mode_box.currentData(), "bilingual")
+        self.assertEqual(self.window.soniox_alignment_box.currentData(), "center")
+
+        self.window.soniox_display_mode_box.setCurrentIndex(
+            self.window.soniox_display_mode_box.findData("translation")
+        )
+        self.window.soniox_alignment_box.setCurrentIndex(
+            self.window.soniox_alignment_box.findData("right")
+        )
+
+        self.assertEqual(self.window.config.soniox_display_mode, "translation")
+        self.assertEqual(self.window.config.soniox_text_alignment, "right")
+        self.assertEqual(self.window.hud.audio_refreshes, 2)
 
     def test_llm_fields_use_public_endpoint_and_require_user_key(self) -> None:
         self.window.service_box.setCurrentIndex(self.window.service_box.findData("llm"))

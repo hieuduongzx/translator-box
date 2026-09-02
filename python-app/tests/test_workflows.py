@@ -16,7 +16,10 @@ sys.path.insert(0, str(APP_DIR))
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from translation_workflows import TranslationWorkflowController  # noqa: E402
+from translation_workflows import (  # noqa: E402
+    LiveSession,
+    TranslationWorkflowController,
+)
 
 
 class ImmediateSignal:
@@ -39,6 +42,8 @@ class FakeHud:
             llm_api_key="test-key",
             llm_model="test-model",
             live_interval_ms=900,
+            live_focus_app_id="",
+            live_focus_app_label="",
         )
         self.config.resolve_llm = lambda: (
             "google",
@@ -46,6 +51,7 @@ class FakeHud:
             self.config.llm_api_key,
             self.config.llm_model,
         )
+        self.config.save = mock.Mock()
         self.bridge = SimpleNamespace(run=ImmediateSignal())
         self.statuses = []
         self.busy_values = []
@@ -194,9 +200,7 @@ class TranslationWorkflowTests(unittest.TestCase):
                 "translation_workflows.services.reconstruct_layout",
                 return_value=((120, 40), [visual]),
             ),
-            mock.patch(
-                "translation_workflows.QImage", return_value=source_image
-            ),
+            mock.patch("translation_workflows.QImage", return_value=source_image),
             mock.patch(
                 "translation_workflows.overlay.render_translated_image",
                 return_value=translated_image,
@@ -269,7 +273,8 @@ class TranslationWorkflowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                controller, "_save_clipboard_image",
+                controller,
+                "_save_clipboard_image",
                 side_effect=RuntimeError("Clipboard không có ảnh."),
             ),
             mock.patch.object(
@@ -338,9 +343,7 @@ class TranslationWorkflowTests(unittest.TestCase):
                 "translation_workflows.services.translate",
                 return_value="Hello",
             ) as translate,
-            mock.patch(
-                "translation_workflows.services.paste_replacement"
-            ) as paste,
+            mock.patch("translation_workflows.services.paste_replacement") as paste,
             mock.patch("translation_workflows.threading.Thread") as thread_type,
         ):
             thread_type.return_value.start.side_effect = lambda: (
@@ -357,6 +360,99 @@ class TranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(hud.output_history, [])
         # KHÔNG kéo HUD lên (giữ focus ở app đích để Ctrl+V dán đúng chỗ).
         self.assertEqual(hud.ensure_visible_calls, 0)
+
+    def test_live_focus_selection_persists_and_updates_running_session(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        session = LiveSession(
+            (0, 0, 100, 50),
+            "frame",
+            controller._options(),
+            0.9,
+            "region_to_live_frame",
+        )
+        controller._live = session
+
+        controller.set_live_focus_application("C:/Apps/Reader.exe", "Reader")
+
+        self.assertEqual(hud.config.live_focus_app_id, "c:/apps/reader.exe")
+        self.assertEqual(hud.config.live_focus_app_label, "Reader")
+        self.assertEqual(session.focus_application_id, "c:/apps/reader.exe")
+        hud.config.save.assert_called_once_with()
+
+    def test_live_focus_filter_skips_capture_while_other_app_is_focused(
+        self,
+    ) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        session = LiveSession(
+            (0, 0, 100, 50),
+            "frame",
+            controller._options(),
+            0.05,
+            "region_to_live_frame",
+            "c:/apps/reader.exe",
+            "Reader",
+        )
+        controller._live = session
+
+        def lose_focus() -> str:
+            session.stop_event.set()
+            return "c:/apps/browser.exe"
+
+        with (
+            mock.patch(
+                "translation_workflows.foreground_application_id",
+                side_effect=lose_focus,
+            ),
+            mock.patch("translation_workflows.services.capture") as capture,
+            mock.patch.object(controller, "_new_temp_image", return_value="live.png"),
+            mock.patch.object(controller, "_remove_temp_image"),
+        ):
+            controller._live_loop(session)
+
+        capture.assert_not_called()
+        self.assertIn("TẠM DỪNG", hud.statuses[-1][0])
+
+    def test_live_result_is_applied_only_while_selected_app_is_focused(
+        self,
+    ) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        session = LiveSession(
+            (0, 0, 100, 50),
+            "frame",
+            controller._options(),
+            0.9,
+            "region_to_live_frame",
+            "c:/apps/reader.exe",
+            "Reader",
+        )
+        controller._live = session
+
+        with mock.patch(
+            "translation_workflows.foreground_application_id",
+            return_value="c:/apps/browser.exe",
+        ):
+            controller._live_apply_frame(session.token, "Không áp dụng")
+        self.assertEqual(hud.output, "")
+
+        with mock.patch(
+            "translation_workflows.foreground_application_id",
+            return_value="c:/apps/reader.exe",
+        ):
+            controller._live_apply_frame(session.token, "Đã áp dụng")
+        self.assertEqual(hud.output, "Đã áp dụng")
+
+    def test_global_right_click_closes_only_transient_overlays(self) -> None:
+        controller = TranslationWorkflowController(FakeHud())
+
+        with mock.patch(
+            "translation_workflows.overlay.close_all_translations"
+        ) as close:
+            controller.dismiss_transient_overlays()
+
+        close.assert_called_once_with(include_live=False)
 
 
 if __name__ == "__main__":

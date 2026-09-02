@@ -121,6 +121,7 @@ def asset_path(name: str) -> str | None:
             return candidate
     return None
 
+
 def _load_ui_fonts() -> list[str]:
     """Nạp IBM Plex Mono đóng gói trước khi QSS và widget tạo QFont."""
     loaded: list[str] = []
@@ -258,6 +259,12 @@ def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None
         painter.setPen(pen)
         painter.drawArc(QRectF(14 * s, 14 * s, 12 * s, 12 * s), -50 * 16, 100 * 16)
         painter.drawArc(QRectF(14 * s, 14 * s, 12 * s, 12 * s), 130 * 16, 100 * 16)
+    elif kind == "audio":  # waveform — nguồn microphone hoặc âm thanh hệ thống
+        line(8, 20, 12, 20)
+        line(14, 16, 14, 24)
+        line(20, 10, 20, 30)
+        line(26, 14, 26, 26)
+        line(32, 18, 32, 22)
     elif kind == "pin":  # ghim cửa sổ
         line(14, 9, 26, 9)
         line(16, 9, 17, 18)
@@ -297,9 +304,7 @@ def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None
         # Kinh tuyến: ellipse hẹp lồng trong quả cầu.
         painter.drawEllipse(QPointF(20 * s, 20 * s), 6.5 * s, 12 * s)
     elif kind == "ai":  # chip xử lý — nhóm cấu hình provider AI
-        painter.drawRoundedRect(
-            QRectF(11 * s, 11 * s, 18 * s, 18 * s), 4 * s, 4 * s
-        )
+        painter.drawRoundedRect(QRectF(11 * s, 11 * s, 18 * s, 18 * s), 4 * s, 4 * s)
         for offset in (15, 20, 25):
             line(offset, 7, offset, 11)
             line(offset, 29, offset, 33)
@@ -311,9 +316,7 @@ def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None
         painter.setBrush(Qt.NoBrush)
         painter.setPen(pen)
     elif kind == "keyboard":  # bàn phím — nhóm "Phím tắt"
-        painter.drawRoundedRect(
-            QRectF(7 * s, 12 * s, 26 * s, 17 * s), 3.5 * s, 3.5 * s
-        )
+        painter.drawRoundedRect(QRectF(7 * s, 12 * s, 26 * s, 17 * s), 3.5 * s, 3.5 * s)
         painter.setBrush(color)
         painter.setPen(Qt.NoPen)
         for x in (12, 17, 22, 27):
@@ -361,15 +364,18 @@ def _make_icon(kind: str, color: QColor, px: int = 48) -> QIcon:
     return QIcon(_glyph_pixmap(kind, color, px, 1.0))
 
 
-def _state_icon(kind: str, logical: int = 18) -> QIcon:
+def _state_icon(
+    kind: str, logical: int = 18, idle_color: QColor | None = None
+) -> QIcon:
     """Icon đa trạng thái: thường / hover (Active) / bật (On) / mờ (Disabled).
 
     Qt tự chọn pixmap theo mode+state nên nút không cần tự đổi icon khi hover
     hay khi được check.
     """
     icon = QIcon()
+    normal_color = idle_color or ICON_IDLE
     variants = (
-        (ICON_IDLE, QIcon.Mode.Normal, QIcon.State.Off),
+        (normal_color, QIcon.Mode.Normal, QIcon.State.Off),
         (ICON_ACTIVE, QIcon.Mode.Active, QIcon.State.Off),
         (ICON_ACTIVE, QIcon.Mode.Selected, QIcon.State.Off),
         (ICON_OFF, QIcon.Mode.Disabled, QIcon.State.Off),

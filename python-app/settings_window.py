@@ -52,8 +52,10 @@ from constants import (
     OCR_LANGUAGES,
     bar_service_key,
     bar_translator_entries,
+    SONIOX_LANGUAGES,
     parse_bar_service_key,
 )
+from soniox_realtime import audio_input_options, system_audio_input_options
 from theme import TOKENS
 from ui_utils import (
     _brand_pixmap,
@@ -72,6 +74,11 @@ if TYPE_CHECKING:
 NAV_SECTIONS = (
     ("Dịch", "globe", "Chọn dịch vụ và ngôn ngữ nhận kết quả."),
     ("Dịch vụ AI", "ai", "API key, model và provider OpenAI-compatible."),
+    (
+        "Audio",
+        "audio",
+        "Dịch microphone hoặc audio hệ thống bằng Soniox, nhận diện từng người nói.",
+    ),
     ("OCR", "scan", "Engine, mô hình và thiết bị xử lý nhận dạng ngoại tuyến."),
     ("Khung dịch", "type", "Kiểu chữ và màu của bản dịch hiện trên màn hình."),
     ("Phím tắt", "keyboard", "Tổ hợp phím toàn cục cho từng lệnh dịch."),
@@ -226,7 +233,9 @@ class ProviderDialog(QDialog):
             return
         endpoint = self.endpoint_edit.text().strip().rstrip("/")
         if not endpoint.startswith(("http://", "https://")):
-            self.error_label.setText("Endpoint phải bắt đầu bằng http:// hoặc https://.")
+            self.error_label.setText(
+                "Endpoint phải bắt đầu bằng http:// hoặc https://."
+            )
             return
         if not self._models():
             self.error_label.setText("Thêm ít nhất một model.")
@@ -311,7 +320,9 @@ class SettingsWindow(QWidget):
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for index, (label, icon_kind, description) in enumerate(NAV_SECTIONS, start=1):
-            item = QListWidgetItem(_nav_icon(icon_kind), f"[{index:02d}]  {label.upper()}")
+            item = QListWidgetItem(
+                _nav_icon(icon_kind), f"[{index:02d}]  {label.upper()}"
+            )
             item.setToolTip(description)
             self.navigation.addItem(item)
         navigation_height = sum(
@@ -330,6 +341,7 @@ class SettingsWindow(QWidget):
         for page in (
             self._build_translation_page(),
             self._build_ai_page(),
+            self._build_soniox_page(),
             self._build_ocr_page(),
             self._build_hud_page(),
             self._build_hotkeys_page(),
@@ -583,9 +595,171 @@ class SettingsWindow(QWidget):
         box.setCurrentIndex(index if index >= 0 else 0)
         box.blockSignals(False)
 
+    # --------------------------------------------------------------- trang Audio
+    def _build_soniox_page(self) -> QScrollArea:
+        page, layout = self._page("Audio", NAV_SECTIONS[2][2])
+
+        self.soniox_state = QLabel()
+        self.soniox_state.setObjectName("aiProviderStatus")
+        _tracked(self.soniox_state, 106.0)
+        connection_card = Card(
+            "Soniox realtime",
+            "Stream PCM từ microphone hoặc âm thanh hệ thống; transcript và bản dịch về cùng một kết nối.",
+            trailing=self.soniox_state,
+            featured=True,
+        )
+        self.soniox_connection_card = connection_card
+        self.soniox_key_edit = QLineEdit(self.config.soniox_api_key)
+        self.soniox_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.soniox_key_edit.setPlaceholderText("Nhập Soniox API key")
+        self.soniox_key_edit.setClearButtonEnabled(True)
+        self.soniox_key_edit.editingFinished.connect(self._on_soniox_key_changed)
+        connection_card.add_row(
+            "API key",
+            self.soniox_key_edit,
+            "Tạo tại console.soniox.com; key chỉ lưu trong file cấu hình cục bộ.",
+            control_width=300,
+        )
+        self.soniox_source_box = self._combo(
+            [
+                ("Microphone", "microphone"),
+                ("Âm thanh hệ thống", "system"),
+            ],
+            self.config.soniox_audio_source,
+            self._on_soniox_source_changed,
+        )
+        connection_card.add_row(
+            "Nguồn âm thanh",
+            self.soniox_source_box,
+            "Audio hệ thống dùng WASAPI loopback của thiết bị đang phát.",
+            control_width=300,
+        )
+
+        self.soniox_microphone_box = self._combo(
+            audio_input_options(),
+            self.config.soniox_input_device,
+            self._on_soniox_microphone_changed,
+        )
+        self.soniox_microphone_row = connection_card.add_row(
+            "Microphone",
+            self.soniox_microphone_box,
+            "Thiết bị mặc định được tra lại mỗi khi bắt đầu phiên.",
+            control_width=300,
+        )
+        self.soniox_system_device_box = self._combo(
+            system_audio_input_options(),
+            self.config.soniox_system_device,
+            self._on_soniox_system_device_changed,
+        )
+        self.soniox_system_device_row = connection_card.add_row(
+            "Thiết bị phát",
+            self.soniox_system_device_box,
+            "Thu toàn bộ âm thanh đang phát qua loa/tai nghe đã chọn.",
+            control_width=300,
+        )
+        connection_card.add_block(
+            _link_label("https://console.soniox.com/", "Mở Soniox Console →")
+        )
+        layout.addWidget(connection_card)
+
+        translation_card = Card(
+            "Dịch & phân tách người nói",
+            "Model stt-rt-v5 nhận dạng ngôn ngữ, gắn nhãn speaker và dịch khi đang nói.",
+        )
+        self.soniox_translation_card = translation_card
+        self.soniox_mode_box = self._combo(
+            [("Một chiều → ngôn ngữ đích", "one_way"), ("Hai chiều A ↔ B", "two_way")],
+            self.config.soniox_translation_mode,
+            self._on_soniox_mode_changed,
+        )
+        translation_card.add_row("Chế độ", self.soniox_mode_box)
+        self.soniox_target_box = self._combo(
+            SONIOX_LANGUAGES,
+            self.config.soniox_target_language,
+            self._on_soniox_target_changed,
+        )
+        self.soniox_target_row = translation_card.add_row(
+            "Ngôn ngữ đích",
+            self.soniox_target_box,
+            "Mọi ngôn ngữ được phát hiện sẽ dịch sang ngôn ngữ này.",
+        )
+        self.soniox_language_a_box = self._combo(
+            SONIOX_LANGUAGES,
+            self.config.soniox_language_a,
+            self._on_soniox_language_a_changed,
+        )
+        self.soniox_language_a_row = translation_card.add_row(
+            "Ngôn ngữ A", self.soniox_language_a_box
+        )
+        self.soniox_language_b_box = self._combo(
+            SONIOX_LANGUAGES,
+            self.config.soniox_language_b,
+            self._on_soniox_language_b_changed,
+        )
+        self.soniox_language_b_row = translation_card.add_row(
+            "Ngôn ngữ B", self.soniox_language_b_box
+        )
+        self.soniox_diarization_check = QCheckBox("Hiện nhãn người nói")
+        self.soniox_diarization_check.setChecked(self.config.soniox_speaker_diarization)
+        self.soniox_diarization_check.toggled.connect(
+            self._on_soniox_diarization_changed
+        )
+        translation_card.add_row(
+            "Nhận diện người nói",
+            self.soniox_diarization_check,
+            "Soniox ước lượng người nói; có thể nhầm khi giọng giống nhau hoặc nói chồng.",
+        )
+        layout.addWidget(translation_card)
+
+        display_card = Card(
+            "Hiển thị phụ đề",
+            "Chọn lượng thông tin và cách căn transcript trong khung HUD.",
+        )
+        self.soniox_display_mode_box = self._combo(
+            [
+                ("Song ngữ · lời gốc + bản dịch", "bilingual"),
+                ("Chỉ bản dịch", "translation"),
+            ],
+            self.config.soniox_display_mode,
+            self._on_soniox_display_mode_changed,
+        )
+        display_card.add_row(
+            "Nội dung",
+            self.soniox_display_mode_box,
+            "Song ngữ: lời gốc nhỏ và mờ; bản dịch lớn ở dòng bên dưới.",
+            control_width=300,
+        )
+        self.soniox_alignment_box = self._combo(
+            [("Căn trái", "left"), ("Căn giữa", "center"), ("Căn phải", "right")],
+            self.config.soniox_text_alignment,
+            self._on_soniox_alignment_changed,
+        )
+        display_card.add_row(
+            "Căn lề",
+            self.soniox_alignment_box,
+            "Áp dụng ngay cho transcript đang hiển thị.",
+            control_width=300,
+        )
+        layout.addWidget(display_card)
+
+        self.soniox_toggle_button = QPushButton("Bắt đầu dịch audio")
+        self.soniox_toggle_button.setObjectName("primary")
+        self.soniox_toggle_button.clicked.connect(self.hud.toggle_audio_realtime)
+        controls = Card(
+            "Điều khiển phiên",
+            "Cũng có thể bật/tắt bằng nút audio trên thanh HUD.",
+        )
+        controls.add_block(_button_row(self.soniox_toggle_button))
+        layout.addWidget(controls)
+        self._sync_soniox_source_rows()
+        self._sync_soniox_mode_rows()
+        self.sync_soniox_state(self.hud.audio_session.state)
+        layout.addStretch(1)
+        return page
+
     # ----------------------------------------------------------------- trang OCR
     def _build_ocr_page(self) -> QScrollArea:
-        page, layout = self._page("OCR", NAV_SECTIONS[2][2])
+        page, layout = self._page("OCR", NAV_SECTIONS[3][2])
 
         ocr_card = Card(
             "Nhận dạng ký tự",
@@ -674,7 +848,7 @@ class SettingsWindow(QWidget):
 
     # ---------------------------------------------------------- trang Khung dịch
     def _build_hud_page(self) -> QScrollArea:
-        page, layout = self._page("Khung dịch", NAV_SECTIONS[3][2])
+        page, layout = self._page("Khung dịch", NAV_SECTIONS[4][2])
 
         preview_card = Card(
             "Xem trước",
@@ -804,7 +978,7 @@ class SettingsWindow(QWidget):
 
     # ----------------------------------------------------------- trang Phím tắt
     def _build_hotkeys_page(self) -> QScrollArea:
-        page, layout = self._page("Phím tắt", NAV_SECTIONS[4][2])
+        page, layout = self._page("Phím tắt", NAV_SECTIONS[5][2])
 
         card = Card(
             "Tổ hợp phím toàn cục",
@@ -839,7 +1013,7 @@ class SettingsWindow(QWidget):
 
     # ---------------------------------------------------------- trang Giới thiệu
     def _build_about_page(self) -> QScrollArea:
-        page, layout = self._page("Giới thiệu", NAV_SECTIONS[5][2])
+        page, layout = self._page("Giới thiệu", NAV_SECTIONS[6][2])
 
         about_card = Card(featured=True)
         identity = QWidget()
@@ -949,6 +1123,161 @@ class SettingsWindow(QWidget):
         self.config.replace_target_language = self.replace_target_box.currentData()
         self.config.save()
 
+    # -------------------------------------------------------------- Soniox
+    def _on_soniox_key_changed(self) -> None:
+        self.config.soniox_api_key = self.soniox_key_edit.text().strip()[:512]
+        self.config.save()
+        self.sync_soniox_state(self.hud.audio_session.state)
+
+    def _on_soniox_source_changed(self) -> None:
+        source = self.soniox_source_box.currentData()
+        if isinstance(source, str):
+            self.config.soniox_audio_source = source
+            self.config.save()
+        self._sync_soniox_source_rows()
+        self.sync_soniox_state(self.hud.audio_session.state)
+        self._sync_hud_audio_controls()
+
+    def _sync_soniox_source_rows(self) -> None:
+        system = self.soniox_source_box.currentData() == "system"
+        self.soniox_connection_card.set_row_visible(
+            self.soniox_microphone_row, not system
+        )
+        self.soniox_connection_card.set_row_visible(
+            self.soniox_system_device_row, system
+        )
+
+    def _on_soniox_microphone_changed(self) -> None:
+        device_id = self.soniox_microphone_box.currentData()
+        self.config.soniox_input_device = (
+            device_id if isinstance(device_id, str) else ""
+        )
+        self.config.save()
+
+    def _on_soniox_system_device_changed(self) -> None:
+        device_name = self.soniox_system_device_box.currentData()
+        self.config.soniox_system_device = (
+            device_name if isinstance(device_name, str) else ""
+        )
+        self.config.save()
+
+    def _on_soniox_mode_changed(self) -> None:
+        mode = self.soniox_mode_box.currentData()
+        if isinstance(mode, str):
+            self.config.soniox_translation_mode = mode
+            self.config.save()
+        self._sync_soniox_mode_rows()
+
+    def _sync_soniox_mode_rows(self) -> None:
+        two_way = self.soniox_mode_box.currentData() == "two_way"
+        self.soniox_translation_card.set_row_visible(
+            self.soniox_target_row, not two_way
+        )
+        self.soniox_translation_card.set_row_visible(
+            self.soniox_language_a_row, two_way
+        )
+        self.soniox_translation_card.set_row_visible(
+            self.soniox_language_b_row, two_way
+        )
+
+    def _on_soniox_target_changed(self) -> None:
+        language = self.soniox_target_box.currentData()
+        if isinstance(language, str):
+            self.config.soniox_target_language = language
+            self.config.save()
+        self._sync_hud_audio_controls()
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    def _on_soniox_language_a_changed(self) -> None:
+        language_a = self.soniox_language_a_box.currentData()
+        if not isinstance(language_a, str):
+            return
+        self.config.soniox_language_a = language_a
+        if language_a == self.config.soniox_language_b:
+            self.config.soniox_language_b = "vi" if language_a != "vi" else "en"
+            self._set_combo_data(
+                self.soniox_language_b_box, self.config.soniox_language_b
+            )
+        self.config.save()
+
+    def _on_soniox_language_b_changed(self) -> None:
+        language_b = self.soniox_language_b_box.currentData()
+        if not isinstance(language_b, str):
+            return
+        self.config.soniox_language_b = language_b
+        if language_b == self.config.soniox_language_a:
+            self.config.soniox_language_a = "en" if language_b != "en" else "vi"
+            self._set_combo_data(
+                self.soniox_language_a_box, self.config.soniox_language_a
+            )
+        self.config.save()
+
+    def _on_soniox_diarization_changed(self, enabled: bool) -> None:
+        self.config.soniox_speaker_diarization = enabled
+        self.config.save()
+
+    def _on_soniox_display_mode_changed(self) -> None:
+        display_mode = self.soniox_display_mode_box.currentData()
+        if not isinstance(display_mode, str):
+            return
+        self.config.soniox_display_mode = display_mode
+        self.config.save()
+        self._sync_hud_audio_controls()
+        self.hud.refresh_audio_transcript_display()
+
+    def _on_soniox_alignment_changed(self) -> None:
+        alignment = self.soniox_alignment_box.currentData()
+        if not isinstance(alignment, str):
+            return
+        self.config.soniox_text_alignment = alignment
+        self.config.save()
+        self._sync_hud_audio_controls()
+        self.hud.refresh_audio_transcript_display()
+
+    def _sync_hud_audio_controls(self) -> None:
+        sync = getattr(self.hud, "sync_audio_controls", None)
+        if callable(sync):
+            sync()
+
+    def sync_soniox_controls(self) -> None:
+        """Nhận thay đổi Audio mode từ HUD mà không phát signal ngược."""
+        if not hasattr(self, "soniox_source_box"):
+            return
+        for combo, value in (
+            (self.soniox_source_box, self.config.soniox_audio_source),
+            (self.soniox_target_box, self.config.soniox_target_language),
+            (self.soniox_display_mode_box, self.config.soniox_display_mode),
+            (self.soniox_alignment_box, self.config.soniox_text_alignment),
+        ):
+            self._set_combo_data(combo, value)
+        self._sync_soniox_source_rows()
+
+    def sync_soniox_state(self, state: str) -> None:
+        if not hasattr(self, "soniox_state"):
+            return
+        labels = {
+            "connecting": "ĐANG KẾT NỐI",
+            "listening": "ĐANG NGHE",
+            "stopping": "ĐANG HOÀN TẤT",
+        }
+        active = state != "idle"
+        configured = bool(self.config.soniox_api_key)
+        self.soniox_state.setText(
+            labels.get(state, "SẴN SÀNG" if configured else "THIẾU API KEY")
+        )
+        self.soniox_toggle_button.setText(
+            "Dừng phiên realtime" if active else "Bắt đầu dịch audio"
+        )
+        self.soniox_toggle_button.setEnabled(active or configured)
+
     def _on_service_selected(self) -> None:
         key = self.service_box.currentData()
         if not isinstance(key, str):
@@ -992,9 +1321,7 @@ class SettingsWindow(QWidget):
     def _activate_ai_provider(self) -> None:
         code = self._selected_ai_code()
         if not self.config.ai_provider_configured(code):
-            self.hud.set_status(
-                "Nhập API key trước khi dùng provider này.", "error"
-            )
+            self.hud.set_status("Nhập API key trước khi dùng provider này.", "error")
             return
         self.config.translator = code
         model = self.llm_model_box.currentData()
@@ -1166,8 +1493,9 @@ class SettingsWindow(QWidget):
     def sync_service_controls(self) -> None:
         """Đồng bộ model đang dùng và trang quản lý AI theo config."""
         self._populate_service_box()
-        if self.config.translator in BUILTIN_AI_IDS or self.config.translator.startswith(
-            "custom:"
+        if (
+            self.config.translator in BUILTIN_AI_IDS
+            or self.config.translator.startswith("custom:")
         ):
             self.ai_provider_box.blockSignals(True)
             index = self.ai_provider_box.findData(self.config.translator)
@@ -1214,9 +1542,7 @@ class SettingsWindow(QWidget):
                 elif self.config.llm_model not in provider["models"]:
                     self.config.llm_model = provider["models"][0]
             self.config.save()
-            self._refresh_providers(
-                f"Đã cập nhật “{provider['name']}”.", selected=code
-            )
+            self._refresh_providers(f"Đã cập nhật “{provider['name']}”.", selected=code)
 
     def _delete_provider(self) -> None:
         code = self._selected_ai_code()
@@ -1291,9 +1617,7 @@ class SettingsWindow(QWidget):
                 "Hãy cập nhật ứng dụng hoặc chọn một mô hình khác."
             )
         if "checksum" in lowered or "sha256" in lowered:
-            return (
-                "Tệp tải về bị lỗi kiểm tra toàn vẹn. Hãy kiểm tra mạng rồi tải lại."
-            )
+            return "Tệp tải về bị lỗi kiểm tra toàn vẹn. Hãy kiểm tra mạng rồi tải lại."
         if any(
             token in lowered
             for token in ("timed out", "timeout", "connection", "network", "urlopen")
@@ -1380,9 +1704,7 @@ class SettingsWindow(QWidget):
             button_text = "Đang tải và kiểm tra…"
         elif installed:
             button_text = (
-                "✓ Đã tích hợp và sẵn sàng"
-                if model.builtin
-                else "✓ Đã tải và sẵn sàng"
+                "✓ Đã tích hợp và sẵn sàng" if model.builtin else "✓ Đã tải và sẵn sàng"
             )
         else:
             button_text = f"Tải mô hình · {model.size_mb:g} MB"

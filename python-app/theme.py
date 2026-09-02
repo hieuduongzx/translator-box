@@ -155,6 +155,44 @@ QPushButton#barBtn:checked {
 QPushButton#barBtn:checked:hover { background: @FOCUS_HOVER@; }
 QPushButton#barBtn:focus { border-color: @FOCUS@; }
 QPushButton#barBtn:disabled { background: transparent; border-color: transparent; }
+QPushButton#barBtn[emphasized="true"] {
+    background: @FOCUS_SOFT@; border-color: @FOCUS_LINE@;
+}
+QPushButton#barBtn[emphasized="true"]:hover {
+    background: @BAR_HOVER@; border-color: @FOCUS@;
+}
+QPushButton#barModeButton {
+    color: @FOCUS@; background: @FOCUS_SOFT@; border: 1px solid @FOCUS_LINE@;
+    border-radius: 3px; padding: 0 10px;
+    font-family: @FONT_MONO@; font-size: 11px; font-weight: 600;
+}
+QPushButton#barModeButton:hover { background: @BAR_HOVER@; border-color: @FOCUS@; }
+QPushButton#barModeButton:pressed { background: @BAR_PRESSED@; }
+QPushButton#barModeButton:disabled { color: @TEXT_OFF@; border-color: @BAR_FILL_LINE@; }
+QPushButton#barGroupToggle {
+    color: @TEXT_DIM@; background: @BAR_FILL@; border: 1px solid @BAR_FILL_LINE@;
+    border-radius: 3px; padding: 0 9px;
+    font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
+}
+QPushButton#barGroupToggle:hover {
+    color: @TEXT@; background: @BAR_HOVER@; border-color: @LINE_HI@;
+}
+QPushButton#barGroupToggle[live="true"] {
+    color: @FOCUS@; background: @FOCUS_SOFT@; border-color: @FOCUS_LINE@;
+}
+QPushButton#barGroupToggle:checked {
+    color: @FOCUS_INK@; background: @FOCUS@; border-color: @FOCUS@;
+}
+QPushButton#barGroupToggle:disabled {
+    color: @TEXT_OFF@; background: transparent; border-color: @BAR_PRESSED@;
+}
+QMenu#barActionMenu {
+    min-width: 238px; padding: 4px; border: 1px solid @LINE_STRONG@;
+}
+QMenu#barActionMenu::item {
+    min-height: 24px; padding: 6px 18px 6px 9px;
+    font-family: @FONT_MONO@; font-size: 11px;
+}
 QFrame#barSep { background: @BAR_SEP@; max-width: 1px; border: none; }
 QComboBox#barCombo {
     background: @BAR_FILL@; border: 1px solid @BAR_FILL_LINE@;

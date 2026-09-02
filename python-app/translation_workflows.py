@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 import overlay
 import services
+from desktop_apps import foreground_application_id
 from ui_utils import _image_signature, _sig_differs
 
 if TYPE_CHECKING:
@@ -46,6 +47,8 @@ class LiveSession:
     options: TranslationOptions
     interval_seconds: float
     action: str
+    focus_application_id: str = ""
+    focus_application_label: str = ""
     stop_event: threading.Event = field(default_factory=threading.Event)
     token: object = field(default_factory=object)
     thread: threading.Thread | None = None
@@ -67,6 +70,26 @@ class TranslationWorkflowController:
     @property
     def live_running(self) -> bool:
         return self._live is not None
+
+    def set_live_focus_application(
+        self, application_id: str, application_label: str
+    ) -> None:
+        application_id = application_id.strip().casefold()
+        application_label = application_label.strip()
+        self.hud.config.live_focus_app_id = application_id
+        self.hud.config.live_focus_app_label = application_label
+        self.hud.config.save()
+        if self._live is not None:
+            self._live.focus_application_id = application_id
+            self._live.focus_application_label = application_label
+        if application_id:
+            self.hud.set_status(
+                f"Live chỉ dịch khi đang focus: {application_label}.", "ok"
+            )
+        elif self._live is not None:
+            self._set_live_status(self._live.mode)
+        else:
+            self.hud.set_status("Live sẽ dịch trên mọi ứng dụng.", "ready")
 
     def _options(self) -> TranslationOptions:
         config = self.hud.config
@@ -196,9 +219,7 @@ class TranslationWorkflowController:
                     raise RuntimeError("Không nhận diện được chữ trong ảnh clipboard.")
                 translated_lines = self._translate_regions(regions, options)
                 image_size, visuals = services.reconstruct_layout(image_path, regions)
-                paint_regions = self._paint_regions(
-                    regions, translated_lines, visuals
-                )
+                paint_regions = self._paint_regions(regions, translated_lines, visuals)
                 source = QImage(image_path)
                 if source.isNull():
                     raise RuntimeError("Không đọc được ảnh nguồn từ clipboard.")
@@ -417,6 +438,8 @@ class TranslationWorkflowController:
             options=self._options(),
             interval_seconds=self.hud.config.live_interval_ms / 1000.0,
             action=action,
+            focus_application_id=self.hud.config.live_focus_app_id,
+            focus_application_label=self.hud.config.live_focus_app_label,
         )
         self._live = session
         self._live_overlay = None
@@ -430,17 +453,40 @@ class TranslationWorkflowController:
         session.thread.start()
 
     def _set_live_status(self, mode: TranslationMode) -> None:
-        if mode == "frame":
-            text = "● LIVE (khung) — chuột phải/Esc hoặc phím tắt để dừng."
-        else:
-            text = "● LIVE — chuột phải/Esc hoặc bấm phím tắt để dừng."
-        self.hud.set_status(text, "busy")
+        target = "khung" if mode == "frame" else "overlay"
+        self.hud.set_status(
+            f"● LIVE ({target}) — bấm lại trên bar hoặc phím tắt để dừng.", "busy"
+        )
 
     def _live_loop(self, session: LiveSession) -> None:
         image_path = self._new_temp_image()
         previous_signature = None
+        paused_for = ""
         try:
             while not session.stop_event.is_set():
+                required_application = session.focus_application_id
+                if (
+                    required_application
+                    and foreground_application_id() != required_application
+                ):
+                    if paused_for != required_application:
+                        label = session.focus_application_label or "ứng dụng đã chọn"
+                        self._emit(
+                            lambda current_label=label: (
+                                self._live_focus_paused_if_current(
+                                    session.token, current_label
+                                )
+                            )
+                        )
+                    paused_for = required_application
+                    session.stop_event.wait(max(0.05, session.interval_seconds))
+                    continue
+                if paused_for:
+                    paused_for = ""
+                    previous_signature = None
+                    self._emit(
+                        lambda: self._live_focus_resumed_if_current(session.token)
+                    )
                 started_at = time.perf_counter()
                 try:
                     services.capture(session.bbox, image_path)
@@ -481,24 +527,50 @@ class TranslationWorkflowController:
     def _is_current(self, token: object) -> bool:
         return self._live is not None and self._live.token is token
 
+    def _live_focus_matches(self, session: LiveSession) -> bool:
+        return (
+            not session.focus_application_id
+            or foreground_application_id() == session.focus_application_id
+        )
+
+    def _live_focus_paused_if_current(self, token: object, label: str) -> None:
+        if not self._is_current(token):
+            return
+        if self._live_overlay is not None:
+            self._live_overlay.hide()
+        self.hud.set_status(f"● LIVE TẠM DỪNG — chờ focus: {label}.", "busy")
+
+    def _live_focus_resumed_if_current(self, token: object) -> None:
+        if self._is_current(token) and self._live is not None:
+            self._set_live_status(self._live.mode)
+
     def _live_apply_overlay(
         self, token: object, bbox, paint_regions, image_size
     ) -> None:
-        if not self._is_current(token):
+        if not self._is_current(token) or self._live is None:
+            return
+        if not self._live_focus_matches(self._live):
+            label = self._live.focus_application_label or "ứng dụng đã chọn"
+            self._live_focus_paused_if_current(token, label)
             return
         if self._live_overlay is None:
             widget = overlay.show_translation(bbox, paint_regions, image_size)
             widget.set_live(True)
-            widget.dismiss_callback = self.stop_live
             self._live_overlay = widget
         else:
             self._live_overlay.update_content(paint_regions, image_size)
+            self._live_overlay.show()
         self._set_live_status("overlay")
 
     def _live_apply_frame(self, token: object, translated: str) -> None:
-        if self._is_current(token):
-            self.hud.set_output(translated)
-            self._set_live_status("frame")
+        if not self._is_current(token) or self._live is None:
+            return
+        if not self._live_focus_matches(self._live):
+            label = self._live.focus_application_label or "ứng dụng đã chọn"
+            self._live_focus_paused_if_current(token, label)
+            return
+        self.hud.set_output(translated)
+        self._set_live_status("frame")
 
     def _live_error_if_current(self, token: object, message: str) -> None:
         if self._is_current(token):
@@ -510,17 +582,14 @@ class TranslationWorkflowController:
         if session is not None:
             session.stop_event.set()
         if self._live_overlay is not None:
-            self._live_overlay.dismiss_callback = None
             self._live_overlay.close()
             self._live_overlay = None
         for action in ("region_to_live", "region_to_live_frame"):
             self.hud.set_live_action_checked(action, False)
         self.hud.set_status(message, "ready")
 
-    def dismiss_all_overlays(self) -> None:
-        if self.live_running:
-            self.stop_live()
-        overlay.close_all_translations()
+    def dismiss_transient_overlays(self) -> None:
+        overlay.close_all_translations(include_live=False)
 
     def shutdown(self) -> None:
         if self.live_running:

@@ -15,6 +15,7 @@ from constants import (
     DEFAULT_LLM_ENDPOINT,
     HUD_FONT_FAMILIES,
     LLM_MODELS,
+    SONIOX_LANGUAGE_CODES,
 )
 
 # Bộ kiểu chữ mặc định cho khung dịch: chữ trắng, viền đen mảnh, không glow.
@@ -74,6 +75,10 @@ _LLM_MODEL_IDS = {
 }
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _HEX_ARGB_COLOR = re.compile(r"^#[0-9a-fA-F]{8}$")
+_SONIOX_TRANSLATION_MODES = {"one_way", "two_way"}
+_SONIOX_AUDIO_SOURCES = {"microphone", "system"}
+_SONIOX_DISPLAY_MODES = {"bilingual", "translation"}
+_SONIOX_TEXT_ALIGNMENTS = {"left", "center", "right"}
 
 
 def config_path() -> Path:
@@ -161,6 +166,7 @@ def _ai_keys(value: Any) -> dict[str, str]:
                 keys[pid] = key.strip()[:512]
     return keys
 
+
 def _ai_models(value: Any) -> dict[str, list[str]]:
     """Model bổ sung do người dùng thêm cho provider AI tích hợp."""
     models: dict[str, list[str]] = {}
@@ -214,6 +220,67 @@ class AppConfig:
         self.replace_target_language = _string(
             source.get("replace_target_language"), "en"
         )
+        self.soniox_api_key = _optional_string(source.get("soniox_api_key"), 512)
+        soniox_source = source.get("soniox_audio_source")
+        self.soniox_audio_source = (
+            soniox_source
+            if isinstance(soniox_source, str) and soniox_source in _SONIOX_AUDIO_SOURCES
+            else "system"
+        )
+        self.soniox_input_device = _optional_string(
+            source.get("soniox_input_device"), 1024
+        )
+        self.soniox_system_device = _optional_string(
+            source.get("soniox_system_device"), 1024
+        )
+        soniox_mode = source.get("soniox_translation_mode")
+        self.soniox_translation_mode = (
+            soniox_mode
+            if isinstance(soniox_mode, str) and soniox_mode in _SONIOX_TRANSLATION_MODES
+            else "one_way"
+        )
+        soniox_target = source.get("soniox_target_language")
+        self.soniox_target_language = (
+            soniox_target
+            if isinstance(soniox_target, str) and soniox_target in SONIOX_LANGUAGE_CODES
+            else "vi"
+        )
+        soniox_language_a = source.get("soniox_language_a")
+        self.soniox_language_a = (
+            soniox_language_a
+            if isinstance(soniox_language_a, str)
+            and soniox_language_a in SONIOX_LANGUAGE_CODES
+            else "en"
+        )
+        soniox_language_b = source.get("soniox_language_b")
+        self.soniox_language_b = (
+            soniox_language_b
+            if isinstance(soniox_language_b, str)
+            and soniox_language_b in SONIOX_LANGUAGE_CODES
+            else "vi"
+        )
+        if self.soniox_language_a == self.soniox_language_b:
+            self.soniox_language_b = "vi" if self.soniox_language_a != "vi" else "en"
+        speaker_setting_is_current = source.get("soniox_speaker_setting_version") == 2
+        self.soniox_speaker_diarization = (
+            _boolean(source.get("soniox_speaker_diarization"), False)
+            if speaker_setting_is_current
+            else False
+        )
+        self.soniox_speaker_setting_version = 2
+        display_mode = source.get("soniox_display_mode")
+        self.soniox_display_mode = (
+            display_mode
+            if isinstance(display_mode, str) and display_mode in _SONIOX_DISPLAY_MODES
+            else "bilingual"
+        )
+        text_alignment = source.get("soniox_text_alignment")
+        self.soniox_text_alignment = (
+            text_alignment
+            if isinstance(text_alignment, str)
+            and text_alignment in _SONIOX_TEXT_ALIGNMENTS
+            else "center"
+        )
         self.ocr_language = _string(source.get("ocr_language"), "jpn+eng")
 
         engine = source.get("ocr_engine")
@@ -252,16 +319,18 @@ class AppConfig:
         self.ai_models = _ai_models(source.get("ai_models"))
         if not self.ai_provider_configured(self.translator):
             self.translator = (
-                self.translator
-                if self.translator in ("google", "bing")
-                else "google"
+                self.translator if self.translator in ("google", "bing") else "google"
             )
         # Model hợp lệ = model tích hợp ∪ model bổ sung ∪ model provider tùy chỉnh.
-        valid_models = _LLM_MODEL_IDS | {
-            model for models in self.ai_models.values() for model in models
-        } | {
-            model for provider in self.custom_providers for model in provider["models"]
-        }
+        valid_models = (
+            _LLM_MODEL_IDS
+            | {model for models in self.ai_models.values() for model in models}
+            | {
+                model
+                for provider in self.custom_providers
+                for model in provider["models"]
+            }
+        )
         llm_model = source.get("llm_model")
         self.llm_model = (
             llm_model
@@ -272,6 +341,13 @@ class AppConfig:
         self.auto_update = _boolean(source.get("auto_update"), True)
         self.skipped_update_version = _optional_string(
             source.get("skipped_update_version"), 32
+        )
+
+        self.live_focus_app_id = _optional_string(
+            source.get("live_focus_app_id"), 32768
+        ).casefold()
+        self.live_focus_app_label = _optional_string(
+            source.get("live_focus_app_label"), 256
         )
 
         self.live_interval_ms = _bounded_int(
@@ -432,7 +508,11 @@ class AppConfig:
             return "google", "", "", ""
         if self.translator in BUILTIN_AI_IDS:
             models = self.provider_models(self.translator)
-            model = self.llm_model if self.llm_model in models else (models[0] if models else "")
+            model = (
+                self.llm_model
+                if self.llm_model in models
+                else (models[0] if models else "")
+            )
             return (
                 "llm",
                 BUILTIN_AI_ENDPOINTS[self.translator],
@@ -442,7 +522,11 @@ class AppConfig:
         provider = self.active_provider()
         if provider is not None:
             models = provider["models"]
-            model = self.llm_model if self.llm_model in models else (models[0] if models else "")
+            model = (
+                self.llm_model
+                if self.llm_model in models
+                else (models[0] if models else "")
+            )
             return "llm", provider["endpoint"], provider["api_key"], model
         return "google", "", "", ""
 
@@ -459,6 +543,18 @@ class AppConfig:
         return {
             "target_language": self.target_language,
             "replace_target_language": self.replace_target_language,
+            "soniox_api_key": self.soniox_api_key,
+            "soniox_audio_source": self.soniox_audio_source,
+            "soniox_input_device": self.soniox_input_device,
+            "soniox_system_device": self.soniox_system_device,
+            "soniox_translation_mode": self.soniox_translation_mode,
+            "soniox_target_language": self.soniox_target_language,
+            "soniox_language_a": self.soniox_language_a,
+            "soniox_language_b": self.soniox_language_b,
+            "soniox_speaker_diarization": self.soniox_speaker_diarization,
+            "soniox_speaker_setting_version": self.soniox_speaker_setting_version,
+            "soniox_display_mode": self.soniox_display_mode,
+            "soniox_text_alignment": self.soniox_text_alignment,
             "ocr_language": self.ocr_language,
             "ocr_engine": self.ocr_engine,
             "ocr_model": self.ocr_model,
@@ -473,6 +569,8 @@ class AppConfig:
             "custom_providers": self.custom_providers,
             "auto_update": self.auto_update,
             "skipped_update_version": self.skipped_update_version,
+            "live_focus_app_id": self.live_focus_app_id,
+            "live_focus_app_label": self.live_focus_app_label,
             "live_interval_ms": self.live_interval_ms,
             "hud_geometry": self.hud_geometry,
             "hud_font_family": self.hud_font_family,
