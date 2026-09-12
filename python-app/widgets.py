@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Protocol, Sequence
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
-    QFontMetrics,
     QGuiApplication,
     QImage,
     QPainter,
-    QPainterPath,
     QPen,
+    QPixmap,
     QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
@@ -39,20 +40,35 @@ from config import HUD_STYLE_DEFAULTS
 from theme import TOKENS
 from ui_utils import (
     ICON_ACTIVE,
+    AlphaLayerCache,
     _combo_from_event,
     _fmt_hotkey,
     _state_icon,
-    _tracked,
-    alpha_text_layer,
 )
 
-# Màu của chấm trạng thái theo state do workflow gửi lên.
-_STATE_COLORS = {
-    "ready": TOKENS["TEXT_MUTED"],
-    "ok": TOKENS["OK"],
-    "busy": TOKENS["BUSY"],
-    "error": TOKENS["DANGER"],
+# Trạng thái hợp lệ của chấm trạng thái trên bar.
+_STATUS_STATES = ("ready", "ok", "busy", "error")
+
+# Font có glyph CJK cho transcript; tra một lần thay vì dựng dict mỗi block.
+_CJK_FONT_FAMILIES = {
+    "ja": "Yu Gothic",
+    "ko": "Malgun Gothic",
+    "zh": "Microsoft YaHei UI",
 }
+
+
+@lru_cache(maxsize=4)
+def _checker_brush(cell: int) -> QBrush:
+    """Brush lát 2×2 ô bàn cờ — một lệnh fill thay cho hàng nghìn drawRect."""
+    tile = QPixmap(cell * 2, cell * 2)
+    tile.fill(QColor("#27272a"))
+    painter = QPainter(tile)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#18181b"))
+    painter.drawRect(0, 0, cell, cell)
+    painter.drawRect(cell, cell, cell, cell)
+    painter.end()
+    return QBrush(tile)
 
 
 class DraggableWindow(Protocol):
@@ -218,31 +234,46 @@ class BarButton(QPushButton):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("barBtn")
-        self.setProperty("emphasized", emphasized)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(30, 30)
-        self.setIconSize(QSize(18, 18))
+        self.setFixedSize(28, 28)
+        self.setIconSize(QSize(17, 17))
         self.setIcon(_state_icon(kind, idle_color=ICON_ACTIVE if emphasized else None))
 
 
 class BarMenuButton(QPushButton):
-    """Toggle nhóm dịch; menu ưu tiên mở ngược lên trên HUD."""
+    """Nút mở một nhóm lệnh dịch; menu ưu tiên mở ngược lên trên HUD."""
 
     def __init__(self, kind: str, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(f"{label}  ↑", parent)
-        self.setObjectName("barGroupToggle")
+        super().__init__(label, parent)
+        self.setObjectName("barAction")
         self.setProperty("live", False)
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(30)
+        self.setFixedHeight(28)
         self.setIconSize(QSize(16, 16))
         self.setIcon(_state_icon(kind))
+        self._label = label
         self._menu: QMenu | None = None
         self.clicked.connect(self._toggle_menu)
 
     def attach_menu(self, menu: QMenu) -> None:
         self._menu = menu
         menu.aboutToHide.connect(self._menu_hidden)
+
+    def set_live(self, live: bool) -> None:
+        """Tô accent khi nhóm đang có một phiên Live chạy."""
+        if bool(self.property("live")) == live:
+            return
+        self.setProperty("live", live)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_compact(self, compact: bool) -> None:
+        """Bỏ nhãn, chỉ giữ icon khi HUD quá hẹp (tooltip vẫn mô tả đủ)."""
+        wanted = "" if compact else self._label
+        if self.text() == wanted:
+            return
+        self.setText(wanted)
 
     def _toggle_menu(self, checked: bool) -> None:
         if self._menu is None:
@@ -330,58 +361,12 @@ class DragBar(QFrame):
         event.accept()
 
 
-def draw_crop_marks(
-    painter: QPainter,
-    rect: QRectF,
-    length: float = 9.0,
-    color: QColor | None = None,
-    alpha: int = 210,
-) -> None:
-    """Ngoặc góc kiểu dấu cắt in ấn/bản vẽ kỹ thuật (blueprint crop-mark).
-
-    Panel giờ góc vuông (không bo tròn) nên ngoặc chạm đúng mép — cùng ngôn
-    ngữ với khung chọn vùng (overlay.py), dành riêng cho panel nổi bật. `color`
-    mặc định lấy từ TOKENS["FOCUS"] (mực chính của theme đang áp dụng) để tự
-    khớp nền sáng/tối của panel gọi hàm; truyền riêng khi panel có nền cố định
-    khác theme trang (vd. bàn cờ preview luôn tối).
-    """
-    mark = QColor(color) if color is not None else QColor(TOKENS["FOCUS"])
-    mark.setAlpha(alpha)
-    pen = QPen(mark)
-    pen.setWidthF(1.0)
-    pen.setCapStyle(Qt.SquareCap)
-    painter.save()
-    painter.setPen(pen)
-    left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
-    painter.drawLine(QPointF(left, top), QPointF(left + length, top))
-    painter.drawLine(QPointF(left, top), QPointF(left, top + length))
-    painter.drawLine(QPointF(right, top), QPointF(right - length, top))
-    painter.drawLine(QPointF(right, top), QPointF(right, top + length))
-    painter.drawLine(QPointF(left, bottom), QPointF(left + length, bottom))
-    painter.drawLine(QPointF(left, bottom), QPointF(left, bottom - length))
-    painter.drawLine(QPointF(right, bottom), QPointF(right - length, bottom))
-    painter.drawLine(QPointF(right, bottom), QPointF(right, bottom - length))
-    painter.restore()
-
-
 class HudBar(DragBar):
-    """Thanh bar phẳng, góc vuông: vẽ thêm ngoặc góc (crop-mark) — cùng ngôn
-    ngữ với khung chọn vùng (overlay.py) — để nhận ra ngay đây là dụng cụ
-    chụp/dịch, không phải khung chat bo tròn chung chung."""
-
-    CORNER = 8.0
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        draw_crop_marks(painter, rect, length=self.CORNER)
-        painter.end()
+    """Thanh bar của HUD: nền và viền do QSS lo, widget chỉ nhận kéo/resize."""
 
 
 class BusyBar(QWidget):
-    """Vạch tiến trình vô định 2px: beam lime đặc, không gradient."""
+    """Vạch tiến trình vô định 2px: beam accent đặc, không gradient."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -389,8 +374,10 @@ class BusyBar(QWidget):
         self.setFixedHeight(2)
         self._phase = 0.0
         self._active = False
+        self._beam = QColor(TOKENS["FOCUS"])
         self._timer = QTimer(self)
-        self._timer.setInterval(40)
+        # 20 fps đủ mượt cho một vạch 2px và rẻ hơn 25 fps cũ khi live chạy dài.
+        self._timer.setInterval(50)
         self._timer.timeout.connect(self._tick)
 
     def set_active(self, active: bool) -> None:
@@ -402,10 +389,11 @@ class BusyBar(QWidget):
             self._timer.start()
         else:
             self._timer.stop()
+        self.setVisible(active)
         self.update()
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.018) % 1.0
+        self._phase = (self._phase + 0.022) % 1.0
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -415,87 +403,84 @@ class BusyBar(QWidget):
         width = self.width()
         span = max(48.0, width * 0.22)
         left = -span + (width + span) * self._phase
-        painter.fillRect(
-            QRectF(left, 0.0, span, self.height()), QColor(TOKENS["FOCUS"])
-        )
+        painter.fillRect(QRectF(left, 0.0, span, self.height()), self._beam)
         painter.end()
 
 
-class StatusPill(QWidget):
-    """Chấm trạng thái + mô tả ngắn ngay trên bar (trước đây chỉ có tooltip)."""
+class StatusStrip(QWidget):
+    """Chấm trạng thái + mô tả ngắn, dựng bằng widget thật (không tự vẽ).
 
-    MAX_WIDTH = 260
+    Bản trước vẽ tay cả viên pill kèm QTimer nhấp nháy 90 ms — tức repaint liên
+    tục suốt phiên live chỉ để làm một chấm mờ dần. Ở đây chấm là QFrame do QSS
+    tô màu theo property `state`, chữ là QLabel elide bằng chính Qt: không timer,
+    không paintEvent, và đổi trạng thái chỉ tốn một lần polish.
+    """
+
+    MAX_WIDTH = 300
+    DOT_SIZE = 6
+    SPACING = 7
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(self.SPACING)
+        self._dot = QFrame(self)
+        self._dot.setObjectName("statusDot")
+        self._dot.setFixedSize(self.DOT_SIZE, self.DOT_SIZE)
+        self._dot.setProperty("state", "ready")
+        self._label = QLabel(self)
+        self._label.setObjectName("statusText")
+        # Ignored theo trục ngang: nhãn nhận đúng chỗ mà `sizeHint` của cả dải xin
+        # được, và co về 0 khi bar hẹp thay vì đẩy bề rộng tối thiểu của bar lên.
+        self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout.addWidget(self._dot, 0, Qt.AlignVCenter)
+        layout.addWidget(self._label, 1, Qt.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self._text = ""
         self._state = "ready"
-        self._pulse = 0.0
-        self._font = QFont("IBM Plex Mono", 9)
-        self._font.setWeight(QFont.Medium)
-        self._timer = QTimer(self)
-        self._timer.setInterval(90)
-        self._timer.timeout.connect(self._tick)
-        self.setFixedHeight(24)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
-    def set_state(self, text: str, state: str) -> None:
-        self._text = (text or "").replace("\n", " ").strip()
-        self._state = state if state in _STATE_COLORS else "ready"
-        if self._state == "busy":
-            if not self._timer.isActive():
-                self._timer.start()
-        else:
-            self._timer.stop()
-            self._pulse = 0.0
-        self.updateGeometry()
-        self.update()
-
-    def _tick(self) -> None:
-        self._pulse = (self._pulse + 0.14) % (math.pi * 2)
-        self.update()
-
-    def _text_width(self) -> int:
-        return QFontMetrics(self._font).horizontalAdvance(self._text)
 
     def sizeHint(self) -> QSize:
+        height = max(self.DOT_SIZE, self._label.sizeHint().height())
         if not self._text:
-            return QSize(0, 24)
-        return QSize(min(self.MAX_WIDTH, 36 + self._text_width()), 24)
+            return QSize(self.DOT_SIZE, height)
+        text_width = self._label.fontMetrics().horizontalAdvance(self._text)
+        return QSize(
+            min(self.MAX_WIDTH, self.DOT_SIZE + self.SPACING + text_width), height
+        )
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(0 if not self._text else 34, 24)
+        return QSize(self.DOT_SIZE, max(self.DOT_SIZE, self._label.sizeHint().height()))
 
-    def paintEvent(self, _event) -> None:
-        if not self._text or self.width() < 20:
+    def set_state(self, text: str, state: str) -> None:
+        text = (text or "").replace("\n", " ").strip()
+        state = state if state in _STATUS_STATES else "ready"
+        if text == self._text and state == self._state:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.TextAntialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(QPen(QColor(TOKENS["LINE"]), 1.0))
-        painter.setBrush(QColor(TOKENS["RAISED"]))
-        painter.drawRoundedRect(rect, 2.0, 2.0)
+        self._text = text
+        if state != self._state:
+            self._state = state
+            self._dot.setProperty("state", state)
+            self._dot.style().unpolish(self._dot)
+            self._dot.style().polish(self._dot)
+        self.updateGeometry()
+        self._sync_elide()
 
-        dot = QColor(_STATE_COLORS[self._state])
-        if self._state == "busy":
-            dot.setAlphaF(0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._pulse)))
-        center_y = rect.center().y()
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(dot)
-        painter.drawEllipse(QRectF(9.0, center_y - 3.0, 6.0, 6.0))
+    def _sync_elide(self) -> None:
+        available = self._label.width()
+        if not self._text:
+            self._label.clear()
+            return
+        if available <= 0:
+            self._label.setText(self._text)
+            return
+        metrics = self._label.fontMetrics()
+        self._label.setText(metrics.elidedText(self._text, Qt.ElideRight, available))
 
-        painter.setFont(self._font)
-        painter.setPen(QColor(TOKENS["TEXT_DIM"]))
-        text_rect = rect.adjusted(22.0, 0.0, -9.0, 0.0)
-        metrics = QFontMetrics(self._font)
-        painter.drawText(
-            text_rect,
-            Qt.AlignVCenter | Qt.AlignLeft,
-            metrics.elidedText(self._text, Qt.ElideRight, int(text_rect.width())),
-        )
-        painter.end()
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_elide()
 
 
 class TranscriptBlockView(Protocol):
@@ -507,7 +492,13 @@ class TranscriptBlockView(Protocol):
 
 
 class HudTextView(QWidget):
-    """Vẽ bản dịch với font, viền và màu nền do người dùng chọn."""
+    """Vẽ bản dịch với font, viền và màu nền do người dùng chọn.
+
+    Layout chữ (`QTextDocument`) và lớp ARGB trung gian đều được cache: nội dung
+    chỉ đổi khi có bản dịch mới, còn `paintEvent` thì Qt gọi lại vì rất nhiều lý
+    do khác (di chuyển cửa sổ, vùng bị che, đổi focus). Dựng lại document mỗi lần
+    vẽ là chỗ tốn nhất của khung dịch, nhất là ở transcript realtime.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -527,6 +518,19 @@ class HudTextView(QWidget):
         self._background_enabled = HUD_STYLE_DEFAULTS["hud_background_enabled"]
         self._shadow_radius = HUD_STYLE_DEFAULTS["hud_shadow_radius"]
         self._shadow_color = QColor(HUD_STYLE_DEFAULTS["hud_shadow_color"])
+        self._layer_cache = AlphaLayerCache()
+        self._cached_width = -1
+        self._cached_main: QTextDocument | None = None
+        self._cached_shadow: QTextDocument | None = None
+        self._cached_outline: QTextDocument | None = None
+
+    def _invalidate(self) -> None:
+        """Bỏ layout đã cache; lần vẽ tới sẽ dựng lại đúng một lần."""
+        self._cached_main = None
+        self._cached_shadow = None
+        self._cached_outline = None
+        self._cached_width = -1
+        self.update()
 
     def setText(self, text: str) -> None:
         self._text = text or ""
@@ -535,7 +539,7 @@ class HudTextView(QWidget):
         self.setAccessibleDescription(
             "Nội dung bản dịch dạng văn bản" if self._text else "Khung dịch đang trống"
         )
-        self.update()
+        self._invalidate()
 
     def text(self) -> str:
         return self._text
@@ -564,22 +568,24 @@ class HudTextView(QWidget):
             if self._transcript_display_mode == "bilingual"
             else "Bản dịch audio"
         )
-        self.update()
+        self._invalidate()
+
+    def _visible_blocks(self) -> list[TranscriptBlockView]:
+        if self._transcript_display_mode == "bilingual":
+            return list(self._transcript_blocks)
+        return [
+            block for block in self._transcript_blocks if block.kind == "translation"
+        ]
 
     def _transcript_plain_text(self) -> str:
         parts: list[str] = []
         current_speaker: str | None = None
-        visible = [
-            block
-            for block in self._transcript_blocks
-            if self._transcript_display_mode == "bilingual"
-            or block.kind == "translation"
-        ]
+        visible = self._visible_blocks()
         for block in visible:
             if block.speaker is not None and block.speaker != current_speaker:
                 if parts:
                     parts.append("")
-                parts.append(f"NGƯỜI NÓI {block.speaker}")
+                parts.append(f"Người nói {block.speaker}")
                 current_speaker = block.speaker
             parts.append(block.text.strip())
         if visible and not visible[-1].is_final:
@@ -594,7 +600,7 @@ class HudTextView(QWidget):
         self.setAccessibleDescription(
             "Ảnh đã dịch" if self._image is not None else "Khung dịch đang trống"
         )
-        self.update()
+        self._invalidate()
 
     def image(self) -> QImage:
         return self._image.copy() if self._image is not None else QImage()
@@ -623,10 +629,24 @@ class HudTextView(QWidget):
         self._background_enabled = bool(background_enabled)
         self._shadow_radius = max(0.0, float(shadow_radius))
         self._shadow_color = QColor(shadow_color)
-        self.update()
+        self._invalidate()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Layout phụ thuộc bề rộng nên chỉ cần bỏ cache khi bề rộng thật sự đổi.
+        if event.oldSize().width() != event.size().width():
+            self._invalidate()
+
+    def _outline_pen(self) -> QPen | None:
+        if not self._border_width:
+            return None
+        pen = QPen(self._border_color)
+        pen.setWidthF(self._border_width)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return pen
 
     def _document(
-        self, font: QFont, color: QColor, width: int, *, outline: bool
+        self, font: QFont, color: QColor, width: int, *, outline: bool, fill: bool = True
     ) -> QTextDocument:
         """Layout bản dịch một lần, dùng lại được cho cả bóng và chữ chính."""
         document = QTextDocument()
@@ -637,11 +657,10 @@ class HudTextView(QWidget):
         document.setDefaultTextOption(option)
         text_format = QTextCharFormat()
         text_format.setFont(font)
-        text_format.setForeground(color)
-        if outline and self._border_width:
-            pen = QPen(self._border_color)
-            pen.setWidthF(self._border_width)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        # Lớp viền chỉ tô nét (foreground trong suốt); lớp chữ chỉ tô đặc.
+        text_format.setForeground(color if fill else QColor(0, 0, 0, 0))
+        pen = self._outline_pen() if outline else None
+        if pen is not None:
             text_format.setTextOutline(pen)
         cursor = QTextCursor(document)
         cursor.insertText(self._text, text_format)
@@ -649,7 +668,7 @@ class HudTextView(QWidget):
         return document
 
     def _transcript_document(
-        self, font: QFont, color: QColor, width: int, *, outline: bool
+        self, font: QFont, color: QColor, width: int, *, outline: bool, fill: bool = True
     ) -> QTextDocument:
         """Layout caption: lời gốc nhỏ/mờ, bản dịch lớn ở dòng bên dưới."""
         document = QTextDocument()
@@ -666,52 +685,52 @@ class HudTextView(QWidget):
         block_format = QTextBlockFormat()
         block_format.setAlignment(alignment)
         block_format.setBottomMargin(3.0)
+        outline_pen = self._outline_pen() if outline else None
 
         def text_format(
             current_font: QFont, current_color: QColor, *, with_outline: bool
         ) -> QTextCharFormat:
             result = QTextCharFormat()
             result.setFont(current_font)
-            result.setForeground(current_color)
-            if with_outline and outline and self._border_width:
-                pen = QPen(self._border_color)
-                pen.setWidthF(self._border_width)
-                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                result.setTextOutline(pen)
+            result.setForeground(current_color if fill else QColor(0, 0, 0, 0))
+            if with_outline and outline_pen is not None:
+                result.setTextOutline(outline_pen)
             return result
 
         original_font = QFont(font)
         original_font.setPointSizeF(max(8.0, font.pointSizeF() * 0.72))
         original_font.setWeight(QFont.Medium)
-        label_font = QFont(TOKENS["FONT_MONO"].split(",")[0].strip("'"))
-        label_font.setPointSizeF(max(7.5, font.pointSizeF() * 0.48))
-        label_font.setWeight(QFont.DemiBold)
+        label_font = QFont(font)
+        label_font.setPointSizeF(max(8.0, font.pointSizeF() * 0.5))
+        label_font.setWeight(QFont.Medium)
         muted = QColor(color)
         muted.setAlphaF(max(0.28, color.alphaF() * 0.58))
         label_text_format = text_format(label_font, muted, with_outline=False)
 
-        def content_format(block: TranscriptBlockView) -> QTextCharFormat:
-            block_font = QFont(original_font if block.kind == "speech" else font)
-            language = (block.language or "").split("-", 1)[0].lower()
-            cjk_families = {
-                "ja": "Yu Gothic",
-                "ko": "Malgun Gothic",
-                "zh": "Microsoft YaHei UI",
-            }
-            if language in cjk_families:
-                block_font.setFamily(cjk_families[language])
-            return text_format(
-                block_font,
-                muted if block.kind == "speech" else color,
-                with_outline=block.kind == "translation",
-            )
+        # Font thay thế cho chữ CJK: tính một lần thay vì mỗi block mỗi lần vẽ.
+        speech_formats: dict[str, QTextCharFormat] = {}
+        translation_formats: dict[str, QTextCharFormat] = {}
 
-        visible = [
-            block
-            for block in self._transcript_blocks
-            if self._transcript_display_mode == "bilingual"
-            or block.kind == "translation"
-        ]
+        def content_format(block: TranscriptBlockView) -> QTextCharFormat:
+            language = (block.language or "").split("-", 1)[0].lower()
+            is_speech = block.kind == "speech"
+            cache = speech_formats if is_speech else translation_formats
+            cached = cache.get(language)
+            if cached is not None:
+                return cached
+            block_font = QFont(original_font if is_speech else font)
+            family = _CJK_FONT_FAMILIES.get(language)
+            if family is not None:
+                block_font.setFamily(family)
+            result = text_format(
+                block_font,
+                muted if is_speech else color,
+                with_outline=not is_speech,
+            )
+            cache[language] = result
+            return result
+
+        visible = self._visible_blocks()
         cursor = QTextCursor(document)
         first_line = True
         current_speaker: str | None = None
@@ -725,14 +744,15 @@ class HudTextView(QWidget):
             cursor.setBlockFormat(current_block)
             first_line = False
 
+        last_index = len(visible) - 1
         for index, block in enumerate(visible):
             if block.speaker is not None and block.speaker != current_speaker:
                 begin_line(top_margin=5.0 if not first_line else 0.0)
-                cursor.insertText(f"// NGƯỜI NÓI {block.speaker}", label_text_format)
+                cursor.insertText(f"Người nói {block.speaker}", label_text_format)
                 current_speaker = block.speaker
 
             begin_line(top_margin=4.0 if block.kind == "translation" else 0.0)
-            is_pending = index == len(visible) - 1 and not block.is_final
+            is_pending = index == last_index and not block.is_final
             cursor_text = " ▌" if is_pending else ""
             cursor.insertText(block.text.strip() + cursor_text, content_format(block))
 
@@ -740,11 +760,44 @@ class HudTextView(QWidget):
         return document
 
     def _content_document(
-        self, font: QFont, color: QColor, width: int, *, outline: bool
+        self, font: QFont, color: QColor, width: int, *, outline: bool, fill: bool = True
     ) -> QTextDocument:
         if self._transcript_blocks:
-            return self._transcript_document(font, color, width, outline=outline)
-        return self._document(font, color, width, outline=outline)
+            return self._transcript_document(
+                font, color, width, outline=outline, fill=fill
+            )
+        return self._document(font, color, width, outline=outline, fill=fill)
+
+    def _documents(
+        self, font: QFont, width: int, *, with_shadow: bool
+    ) -> tuple[QTextDocument, QTextDocument | None, QTextDocument | None]:
+        """Layout đã cache cho (chữ chính, bóng, lớp viền) ở bề rộng `width`."""
+        needs_outline = self._border_width > 0
+        if self._cached_width == width and self._cached_main is not None:
+            if (not with_shadow or self._cached_shadow is not None) and (
+                not needs_outline or self._cached_outline is not None
+            ):
+                return self._cached_main, self._cached_shadow, self._cached_outline
+        self._cached_width = width
+        # Viền vẽ ở lớp riêng phía dưới, chữ tô đặc ở lớp trên. Nếu để Qt vừa viền
+        # vừa tô trong cùng một lần, nét viền (canh giữa) ăn vào thân chữ — nét
+        # mảnh CJK bị đứt, chữ trông "vỡ". Tách lớp giữ viền nằm ngoài nét chữ.
+        self._cached_outline = (
+            self._content_document(
+                font, self._border_color, width, outline=True, fill=False
+            )
+            if needs_outline
+            else None
+        )
+        self._cached_main = self._content_document(
+            font, self._color, width, outline=False
+        )
+        self._cached_shadow = (
+            self._content_document(font, self._shadow_color, width, outline=False)
+            if with_shadow
+            else None
+        )
+        return self._cached_main, self._cached_shadow, self._cached_outline
 
     def _document_top(self, document: QTextDocument, rect: QRectF) -> float:
         if not self._transcript_blocks:
@@ -763,11 +816,8 @@ class HudTextView(QWidget):
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
         if self._background_enabled and self._background_color.alpha() > 0:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(self._background_color)
-            painter.drawRect(self.rect())
+            painter.fillRect(self.rect(), self._background_color)
         if self._image is not None:
             available = self.rect().adjusted(3, 2, -3, -2)
             fitted = self._image.size()
@@ -788,32 +838,39 @@ class HudTextView(QWidget):
         rect = self.rect().adjusted(3, 2, -3, -2)
         font = QFont(self._font_family, self._font_size)
         font.setWeight(QFont.Bold)
+        with_shadow = self._shadow_radius > 0 and self._shadow_color.alpha() > 0
+        document, shadow, outline = self._documents(
+            font, rect.width(), with_shadow=with_shadow
+        )
         # Vẽ chữ qua lớp ARGB trong suốt: nếu vẽ thẳng lên nền đục (người dùng chọn
         # màu nền) thì Windows bật ClearType và để lại riềm đỏ/xanh quanh nét chữ.
-        layer = alpha_text_layer(self.size())
+        layer = self._layer_cache.acquire(self.size())
         target = QPainter(layer) if layer is not None else painter
         target.setRenderHint(QPainter.Antialiasing, True)
         target.setRenderHint(QPainter.TextAntialiasing, True)
 
-        if self._shadow_radius > 0 and self._shadow_color.alpha() > 0:
+        if shadow is not None:
             # Một document bóng, vẽ lại ở nhiều vị trí → xấp xỉ blur rất rẻ.
-            shadow = self._content_document(
-                font, self._shadow_color, rect.width(), outline=False
-            )
             offsets = self._shadow_offsets()
+            shadow_top = self._document_top(shadow, rect)
             target.save()
             target.setOpacity(min(1.0, 2.0 / len(offsets)))
             target.setClipRect(rect)
             for dx, dy in offsets:
                 target.save()
-                target.translate(
-                    rect.left() + dx, self._document_top(shadow, rect) + dy
-                )
+                target.translate(rect.left() + dx, shadow_top + dy)
                 shadow.drawContents(target)
                 target.restore()
             target.restore()
 
-        document = self._content_document(font, self._color, rect.width(), outline=True)
+        if outline is not None:
+            # Lớp viền nằm dưới lớp chữ, nên thân chữ không bị nét viền ăn mất.
+            # Mỗi lớp tự save/restore để trạng thái painter không rò sang lớp chữ.
+            target.save()
+            target.setClipRect(rect)
+            target.translate(rect.left(), self._document_top(outline, rect))
+            outline.drawContents(target)
+            target.restore()
         target.save()
         target.setClipRect(rect)
         target.translate(rect.left(), self._document_top(document, rect))
@@ -824,31 +881,16 @@ class HudTextView(QWidget):
             painter.drawImage(0, 0, layer)
 
 
-def paint_checkerboard(
-    painter: QPainter, rect: QRectF, cell: int = 7, radius: float = 0.0
-) -> None:
-    """Ô bàn cờ mờ phía sau màu có alpha — để thấy rõ phần trong suốt."""
+def paint_checkerboard(painter: QPainter, rect: QRectF, cell: int = 8) -> None:
+    """Ô bàn cờ mờ phía sau màu có alpha — để thấy rõ phần trong suốt.
+
+    Dùng một brush hoa văn lát 2×2 ô: Qt lặp nó trong một lệnh fill thay vì hàng
+    nghìn `drawRect` như trước.
+    """
     painter.save()
-    path = QPainterPath()
-    path.addRoundedRect(rect, radius, radius)
-    painter.setClipPath(path)
-    painter.fillRect(rect, QColor("#27272a"))
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#18181b"))
-    rows = int(rect.height() // cell) + 1
-    columns = int(rect.width() // cell) + 1
-    for row in range(rows):
-        for column in range(columns):
-            if (row + column) % 2:
-                continue
-            painter.drawRect(
-                QRectF(
-                    rect.left() + column * cell,
-                    rect.top() + row * cell,
-                    cell,
-                    cell,
-                )
-            )
+    painter.setBrushOrigin(rect.topLeft().toPoint())
+    painter.fillRect(rect, _checker_brush(cell))
     painter.restore()
 
 
@@ -857,6 +899,7 @@ class ColorButton(QPushButton):
 
     picked = Signal()
     previewed = Signal()
+    RADIUS = 4.0
 
     def __init__(
         self,
@@ -916,16 +959,19 @@ class ColorButton(QPushButton):
             + self._color.green() * 0.587
             + self._color.blue() * 0.114
         )
-        return QColor("#0a0a0c") if luminance > 150 else QColor("#fafafa")
+        return QColor(TOKENS["FOCUS_INK"]) if luminance > 150 else QColor(TOKENS["TEXT"])
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = 8.0
+        radius = self.RADIUS
         if self._color.alpha() < 255:
-            paint_checkerboard(painter, rect, radius=radius)
+            painter.save()
+            painter.setClipRect(rect)
+            paint_checkerboard(painter, rect)
+            painter.restore()
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
         painter.drawRoundedRect(rect, radius, radius)
@@ -941,10 +987,6 @@ class ColorButton(QPushButton):
 
         text = self.text()
         if text:
-            font = QFont()
-            font.setPointSizeF(8.5)
-            font.setWeight(QFont.Medium)
-            painter.setFont(font)
             painter.setPen(self._ink())
             painter.drawText(rect, Qt.AlignCenter, text)
         painter.end()
@@ -988,15 +1030,12 @@ class Card(QFrame):
         parent: QWidget | None = None,
         *,
         sunken: bool = False,
-        featured: bool = False,
         trailing: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._featured = featured
-        name = "cardFeatured" if featured else ("cardSunken" if sunken else "card")
-        self.setObjectName(name)
+        self.setObjectName("cardSunken" if sunken else "card")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(17, 15, 17, 15)
+        self._layout.setContentsMargins(16, 14, 16, 14)
         self._layout.setSpacing(0)
         self._has_content = False
         self._row_leading: dict[QWidget, QWidget] = {}
@@ -1008,9 +1047,8 @@ class Card(QFrame):
             titles.setContentsMargins(0, 0, 0, 0)
             titles.setSpacing(2)
             if title:
-                label = QLabel(f"// {title.upper()}")
+                label = QLabel(title)
                 label.setObjectName("cardTitle")
-                _tracked(label, 108.0)
                 titles.addWidget(label)
             if hint:
                 subtitle = QLabel(hint)
@@ -1026,13 +1064,13 @@ class Card(QFrame):
     def _spaced(self) -> None:
         """Chèn khoảng/kẻ ngăn giữa các khối trong thẻ."""
         if self._has_content:
-            self._layout.addSpacing(11)
+            self._layout.addSpacing(12)
         self._has_content = True
 
     def add_divider(self) -> QWidget:
         holder = QWidget()
         holder_layout = QVBoxLayout(holder)
-        holder_layout.setContentsMargins(0, 11, 0, 0)
+        holder_layout.setContentsMargins(0, 12, 0, 0)
         holder_layout.setSpacing(0)
         divider = QFrame()
         divider.setObjectName("rowDivider")
@@ -1054,7 +1092,7 @@ class Card(QFrame):
         leading = self.add_divider() if self._has_content else None
         row = QWidget()
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 11, 0, 0)
+        layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(14)
         texts = QVBoxLayout()
         texts.setContentsMargins(0, 0, 0, 0)
@@ -1091,69 +1129,33 @@ class Card(QFrame):
         self._layout.addWidget(widget)
         return widget
 
-    def add_layout(self, layout) -> None:
-        self._spaced()
-        self._layout.addLayout(layout)
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if not self._featured:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        draw_crop_marks(painter, rect, length=10.0, alpha=210)
-        painter.end()
-
 
 class CodeField(QFrame):
-    """Block `.cmd` có chrome terminal, prompt và nút copy thật."""
+    """Ô chỉ-đọc cho giá trị kỹ thuật (endpoint, repo) kèm nút copy."""
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("codeBlock")
 
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        header = QFrame()
-        header.setObjectName("codeHeader")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(10, 0, 0, 0)
-        header_layout.setSpacing(8)
-        title = QLabel("SCREEN_TRANSLATOR.CMD")
-        title.setObjectName("codeTitle")
-        _tracked(title, 110.0)
-        self._copy_btn = QPushButton("COPY")
-        self._copy_btn.setObjectName("codeCopyBtn")
-        self._copy_btn.setCursor(Qt.PointingHandCursor)
-        self._copy_btn.setToolTip("Copy vào clipboard")
-        self._copy_btn.clicked.connect(self._copy)
-        header_layout.addWidget(title)
-        header_layout.addStretch(1)
-        header_layout.addWidget(self._copy_btn)
-
-        command = QWidget()
-        command_layout = QHBoxLayout(command)
-        command_layout.setContentsMargins(10, 0, 6, 0)
-        command_layout.setSpacing(8)
-        prompt = QLabel("PS>")
-        prompt.setObjectName("codePrompt")
         self._edit = QLineEdit(text)
         self._edit.setObjectName("codeField")
         self._edit.setReadOnly(True)
         self._edit.setCursorPosition(0)
-        command_layout.addWidget(prompt)
-        command_layout.addWidget(self._edit, 1)
-
-        layout.addWidget(header)
-        layout.addWidget(command)
+        self._copy_btn = QPushButton("Copy")
+        self._copy_btn.setObjectName("codeCopyBtn")
+        self._copy_btn.setCursor(Qt.PointingHandCursor)
+        self._copy_btn.setToolTip("Copy vào clipboard")
+        self._copy_btn.clicked.connect(self._copy)
+        layout.addWidget(self._edit, 1)
+        layout.addWidget(self._copy_btn, 0)
 
         self._reset_timer = QTimer(self)
         self._reset_timer.setSingleShot(True)
         self._reset_timer.setInterval(1100)
-        self._reset_timer.timeout.connect(lambda: self._copy_btn.setText("COPY"))
+        self._reset_timer.timeout.connect(lambda: self._copy_btn.setText("Copy"))
 
     def setText(self, text: str) -> None:
         self._edit.setText(text)
@@ -1167,7 +1169,7 @@ class CodeField(QFrame):
         if clipboard is None or not self._edit.text():
             return
         clipboard.setText(self._edit.text())
-        self._copy_btn.setText("COPIED")
+        self._copy_btn.setText("Đã copy")
         self._reset_timer.start()
 
 
@@ -1180,10 +1182,6 @@ class CheckerFrame(QFrame):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        paint_checkerboard(painter, rect, cell=8, radius=0.0)
-        # Preview là panel nổi bật nên dùng cùng crop-mark lime của blueprint shell.
-        draw_crop_marks(painter, rect, length=10.0, alpha=210)
+        paint_checkerboard(painter, QRectF(self.rect()).adjusted(1, 1, -1, -1))
         painter.end()
         super().paintEvent(event)

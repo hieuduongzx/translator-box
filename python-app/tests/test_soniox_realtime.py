@@ -184,8 +184,11 @@ class SonioxContractTests(unittest.TestCase):
             ]
         )
         self.assertEqual(
-            transcript.render(),
-            "NGƯỜI NÓI 1\nLỜI NÓI [en]: Hello world ▌",
+            [
+                (block.kind, block.speaker, block.language, block.text, block.is_final)
+                for block in transcript.blocks()
+            ],
+            [("speech", "1", "en", "Hello world", False)],
         )
 
         transcript.ingest(
@@ -214,12 +217,15 @@ class SonioxContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            transcript.render(),
-            "NGƯỜI NÓI 1\n"
-            "LỜI NÓI [en]: Hello world\n"
-            "BẢN DỊCH [vi]: Xin chào thế giới.\n\n"
-            "NGƯỜI NÓI 2\n"
-            "LỜI NÓI [en]: Good morning.",
+            [
+                (block.kind, block.speaker, block.language, block.text)
+                for block in transcript.blocks()
+            ],
+            [
+                ("speech", "1", "en", "Hello world"),
+                ("translation", "1", "vi", "Xin chào thế giới."),
+                ("speech", "2", "en", "Good morning."),
+            ],
         )
 
         transcript.ingest(
@@ -245,8 +251,11 @@ class SonioxContractTests(unittest.TestCase):
                 },
             ]
         )
-        self.assertIn("LỜI NÓI [ja]: 次の文です。 ▌", transcript.render())
-        self.assertNotIn("<end>", transcript.render())
+        pending = transcript.blocks()[-1]
+        self.assertEqual((pending.kind, pending.language), ("speech", "ja"))
+        self.assertEqual(pending.text, "次の文です。")
+        self.assertFalse(pending.is_final)
+        self.assertNotIn("<end>", "".join(block.text for block in transcript.blocks()))
 
         transcript.ingest(
             [
@@ -279,7 +288,65 @@ class SonioxContractTests(unittest.TestCase):
         )
         self.assertEqual(blocks[-2].text, "次の文です。")
         self.assertEqual(blocks[-1].text, "Đây là câu tiếp theo.")
-        self.assertNotIn("<end>", transcript.render())
+        self.assertTrue(all(block.is_final for block in blocks))
+
+
+    def test_blocks_cache_matches_full_recomputation(self) -> None:
+        """Ảnh chụp incremental phải trùng khớp với dựng lại từ đầu."""
+        transcript = TranscriptBuffer()
+        batches = [
+            [
+                {
+                    "text": "Hello ",
+                    "is_final": True,
+                    "speaker": "1",
+                    "language": "en",
+                    "translation_status": "original",
+                },
+                {
+                    "text": "there",
+                    "is_final": False,
+                    "speaker": "1",
+                    "language": "en",
+                    "translation_status": "original",
+                },
+            ],
+            [
+                {
+                    "text": "there",
+                    "is_final": True,
+                    "speaker": "1",
+                    "language": "en",
+                    "translation_status": "original",
+                },
+                {
+                    "text": "Xin chào",
+                    "is_final": True,
+                    "language": "vi",
+                    "translation_status": "translation",
+                },
+            ],
+            [
+                {
+                    "text": "Bye",
+                    "is_final": False,
+                    "speaker": "2",
+                    "language": "en",
+                    "translation_status": "original",
+                }
+            ],
+        ]
+        for batch in batches:
+            transcript.ingest(batch)
+            cached = transcript.blocks()
+            reference = TranscriptBuffer()
+            reference.final_tokens = list(transcript.final_tokens)
+            reference.non_final_tokens = list(transcript.non_final_tokens)
+            self.assertEqual(cached, reference.blocks())
+
+        # Bắt đầu phiên mới: ảnh chụp phải được xoá sạch.
+        transcript.clear()
+        self.assertEqual(transcript.blocks(), ())
 
 
 if __name__ == "__main__":

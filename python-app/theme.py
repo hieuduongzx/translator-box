@@ -2,21 +2,17 @@
 
 Một nguồn sự thật duy nhất cho màu/bán kính/kiểu chữ: `TOKENS` được thay vào
 `STYLE` (placeholder dạng `@TÊN@`) bởi `build_style()`. Code Python cần màu thì
-đọc `TOKENS` qua `color()` thay vì rải hex khắp nơi.
+đọc `TOKENS` thay vì rải hex khắp nơi.
 
-Hướng thị giác — "Swiss Tactical Terminal" (phẳng, chính xác, near-monochrome),
-pha 3 yếu tố:
-  - Swiss/International Typographic: nền gần đen, lưới đều, hairline 1px, nhãn
-    hoa tracking rộng có chọn lọc, phân cấp bằng khoảng trắng thay vì shadow.
-  - Terminal/CLI: IBM Plex Mono cho heading + số liệu, tiêu đề có prefix "// ",
-    danh sách đánh số kiểu "[01]", ô dữ liệu kỹ thuật là block `.cmd` có prompt
-    và nút copy thật.
-  - Blueprint/schematic: ngoặc góc (crop-mark) ở panel nổi bật — mượn từ dấu
-    cắt in ấn/bản vẽ kỹ thuật.
-Quy tắc: HOÀN TOÀN PHẲNG — không shadow, không gradient. Bán kính bo góc ≤4px
-CHỈ ở control; mọi khung/panel chứa bo góc = 0. Accent duy nhất là xanh chanh
-neon #c8ff4d cho CTA/trạng thái active. Bốn màu semantic và sáu hue categorical
-chỉ xuất hiện trên badge/tag dữ liệu; phần còn lại near-monochrome.
+Hướng thị giác — tối giản, phẳng, im lặng:
+  - Một font hệ thống cho toàn bộ chữ. Mono CHỈ dùng cho giá trị kỹ thuật thật
+    (phím tắt, endpoint, số phiên bản) — không dùng cho tiêu đề hay nhãn.
+  - Không tiền tố "// ", không nhãn HOA giãn chữ, không đánh số "[01]", không
+    ngoặc góc trang trí. Phân cấp bằng khoảng trắng, cỡ chữ và một hairline.
+  - Không shadow, không gradient. Bán kính bo góc theo hai bậc: @RADIUS@ cho
+    control, @RADIUS_LG@ cho panel/khung.
+  - Một accent duy nhất (lime thương hiệu) cho CTA/trạng thái đang bật. Ba màu
+    trạng thái (ok/busy/danger) chỉ xuất hiện ở badge và chấm trạng thái.
 """
 
 from __future__ import annotations
@@ -24,79 +20,51 @@ from __future__ import annotations
 import re
 
 TOKENS: dict[str, str] = {
-    # ---- lớp nền: tactical dark, không dùng đen tuyệt đối ----
-    "BG": "#0a0a0b",
-    "SURFACE": "#101012",
-    "SUNKEN": "#070708",
-    "RAISED": "#171719",
-    "HOVER": "#202024",
-    "PRESSED": "#29292e",
+    # ---- bán kính: chỉ hai bậc cho toàn app ----
+    "RADIUS": "4px",
+    "RADIUS_LG": "6px",
+    # ---- lớp nền ----
+    "BG": "#0f0f11",
+    "SURFACE": "#16161a",
+    "SUNKEN": "#101013",
+    "RAISED": "#1d1d22",
+    "HOVER": "#26262c",
+    "PRESSED": "#2e2e35",
     # ---- hairline ----
-    "LINE_SOFT": "#202024",
-    "LINE": "#2c2c31",
-    "LINE_STRONG": "#414149",
-    "LINE_HI": "#62626d",
+    "LINE": "#26262c",
+    "LINE_STRONG": "#33333b",
+    "LINE_HI": "#4a4a54",
     # ---- chữ ----
-    "TEXT": "#f4f4f5",
-    "TEXT_DIM": "#c5c5cb",
-    "TEXT_MUTED": "#8b8b95",
-    "TEXT_OFF": "#5c5c65",
-    # ---- accent duy nhất: xanh chanh neon ----
+    "TEXT": "#f2f2f3",
+    "TEXT_DIM": "#b9b9c0",
+    "TEXT_MUTED": "#86868f",
+    "TEXT_OFF": "#5a5a63",
+    # ---- accent duy nhất ----
     "FOCUS": "#c8ff4d",
-    "FOCUS_INK": "#0a0a0b",
-    "FOCUS_HOVER": "#d5ff73",
-    "FOCUS_PRESSED": "#b6ed38",
-    "FOCUS_SOFT": "rgba(200, 255, 77, 0.08)",
-    "FOCUS_LINE": "rgba(200, 255, 77, 0.46)",
-    # ---- 4 màu semantic: chỉ cho badge/tag trạng thái ----
-    "OK": "#48d597",
-    "OK_SOFT": "rgba(72, 213, 151, 0.12)",
-    "BUSY": "#ffca5c",
-    "BUSY_SOFT": "rgba(255, 202, 92, 0.12)",
-    "DANGER": "#ff6475",
-    "DANGER_HOVER_TEXT": "#ff8c99",
-    "DANGER_SOFT": "rgba(255, 100, 117, 0.12)",
-    "INFO": "#66a3ff",
-    "INFO_SOFT": "rgba(102, 163, 255, 0.12)",
-    "LIVE": "#c8ff4d",
-    # ---- 6 hue categorical: chỉ cho badge/tag phân loại ----
-    "CAT_1": "#59dbe8",
-    "CAT_1_SOFT": "rgba(89, 219, 232, 0.12)",
-    "CAT_2": "#ad8cff",
-    "CAT_2_SOFT": "rgba(173, 140, 255, 0.12)",
-    "CAT_3": "#ff9d57",
-    "CAT_3_SOFT": "rgba(255, 157, 87, 0.12)",
-    "CAT_4": "#ed72bb",
-    "CAT_4_SOFT": "rgba(237, 114, 187, 0.12)",
-    "CAT_5": "#6d8cff",
-    "CAT_5_SOFT": "rgba(109, 140, 255, 0.12)",
-    "CAT_6": "#5bd6b1",
-    "CAT_6_SOFT": "rgba(91, 214, 177, 0.12)",
-    # ---- HUD phẳng, đục, không glass/shadow ----
-    "BAR": "rgba(10, 10, 11, 0.98)",
-    "BAR_LINE": "rgba(244, 244, 245, 0.22)",
-    "BAR_HOVER": "rgba(244, 244, 245, 0.08)",
-    "BAR_PRESSED": "rgba(244, 244, 245, 0.13)",
-    "BAR_FILL": "rgba(244, 244, 245, 0.05)",
-    "BAR_FILL_LINE": "rgba(244, 244, 245, 0.18)",
-    "BAR_SEP": "rgba(244, 244, 245, 0.18)",
-    # ---- terminal `.cmd` ----
-    "CODE_BG": "#050506",
-    "CODE_BORDER": "#35353c",
-    "CODE_TEXT": "#f4f4f5",
-    "CODE_PROMPT": "#c8ff4d",
-    "CODE_HEADER": "#101012",
-    "CODE_BTN_BG": "#101012",
-    "CODE_BTN_TEXT": "#a7a7b0",
-    "CODE_BTN_HOVER_BG": "#c8ff4d",
-    "CODE_BTN_HOVER_TEXT": "#0a0a0b",
-    "CODE_BTN_PRESSED_BG": "#b6ed38",
+    "FOCUS_INK": "#0f0f11",
+    "FOCUS_HOVER": "#d6ff77",
+    "FOCUS_PRESSED": "#b4ed36",
+    "FOCUS_SOFT": "rgba(200, 255, 77, 0.10)",
+    "FOCUS_LINE": "rgba(200, 255, 77, 0.42)",
+    # ---- trạng thái: chỉ cho badge và chấm trạng thái ----
+    "OK": "#4ad295",
+    "OK_SOFT": "rgba(74, 210, 149, 0.12)",
+    "BUSY": "#ffc95c",
+    "BUSY_SOFT": "rgba(255, 201, 92, 0.12)",
+    "DANGER": "#ff6b7a",
+    "DANGER_SOFT": "rgba(255, 107, 122, 0.12)",
+    "INFO": "#6ea8ff",
+    "INFO_SOFT": "rgba(110, 168, 255, 0.12)",
+    # ---- HUD: phẳng, đục, không glass ----
+    "BAR": "rgba(15, 15, 17, 0.97)",
+    "BAR_LINE": "rgba(242, 242, 243, 0.16)",
+    "BAR_HOVER": "rgba(242, 242, 243, 0.08)",
+    "BAR_PRESSED": "rgba(242, 242, 243, 0.13)",
+    "BAR_FILL": "rgba(242, 242, 243, 0.05)",
+    "BAR_FILL_LINE": "rgba(242, 242, 243, 0.14)",
     # ---- kiểu chữ ----
     "FONT": (
         "'Segoe UI Variable Text', 'Segoe UI', 'Segoe UI Emoji', system-ui, sans-serif"
-    ),
-    "FONT_DISPLAY": (
-        "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', 'Consolas', monospace"
     ),
     "FONT_MONO": (
         "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', 'Consolas', monospace"
@@ -118,187 +86,139 @@ QLabel { background: transparent; border: none; }
 QLabel:disabled, QCheckBox:disabled { color: @TEXT_OFF@; }
 QToolTip {
     background: @SURFACE@; color: @TEXT@; border: 1px solid @LINE_STRONG@;
-    border-radius: 0px; padding: 7px 10px; font-size: 12px;
+    border-radius: @RADIUS@; padding: 6px 9px; font-size: 12px;
 }
 QMenu {
     background: @SURFACE@; color: @TEXT_DIM@; border: 1px solid @LINE_STRONG@;
-    padding: 4px; border-radius: 0px;
+    padding: 5px; border-radius: @RADIUS_LG@;
 }
-QMenu::item { padding: 8px 26px 8px 12px; border-radius: 3px; }
-QMenu::item:selected { background: @FOCUS@; color: @FOCUS_INK@; }
+QMenu::item { padding: 7px 24px 7px 11px; border-radius: @RADIUS@; }
+QMenu::item:selected { background: @HOVER@; color: @TEXT@; }
+QMenu::item:checked { color: @FOCUS@; }
 QMenu::item:disabled { color: @TEXT_OFF@; }
-QMenu::separator { height: 1px; background: @LINE@; margin: 5px 8px; }
+QMenu::separator { height: 1px; background: @LINE@; margin: 5px 7px; }
 
 /* Hộp thoại hệ thống (thông báo cập nhật, xác nhận xoá…) theo cùng shell. */
 QDialog, QMessageBox { background: @BG@; }
 QMessageBox QLabel { color: @TEXT@; }
 
-/* ======================= HUD tactical ======================= */
-/* Thanh bar phẳng, góc vuông, nền gần đen. Ngoặc góc do HudBar tự vẽ. */
+/* ======================= HUD ======================= */
 QFrame#hudBar {
     background: @BAR@;
     border: 1px solid @BAR_LINE@;
-    border-radius: 0px;
+    border-radius: @RADIUS_LG@;
 }
 /* Vùng bản dịch: trong suốt hoàn toàn — chỉ thấy chữ nổi trên desktop. */
 QFrame#hudDisplay { background: transparent; border: none; }
 QPushButton#barBtn {
-    background: transparent; border: 1px solid transparent; border-radius: 3px;
+    background: transparent; border: 1px solid transparent;
+    border-radius: @RADIUS@;
 }
-QPushButton#barBtn:hover {
-    background: @BAR_HOVER@; border-color: @BAR_FILL_LINE@;
-}
+QPushButton#barBtn:hover { background: @BAR_HOVER@; }
 QPushButton#barBtn:pressed { background: @BAR_PRESSED@; }
-QPushButton#barBtn:checked {
-    background: @FOCUS@; border-color: @FOCUS@;
-}
+QPushButton#barBtn:checked { background: @FOCUS@; border-color: @FOCUS@; }
 QPushButton#barBtn:checked:hover { background: @FOCUS_HOVER@; }
-QPushButton#barBtn:focus { border-color: @FOCUS@; }
+QPushButton#barBtn:focus { border-color: @FOCUS_LINE@; }
 QPushButton#barBtn:disabled { background: transparent; border-color: transparent; }
-QPushButton#barBtn[emphasized="true"] {
-    background: @FOCUS_SOFT@; border-color: @FOCUS_LINE@;
+QPushButton#barAction {
+    color: @TEXT_DIM@; background: transparent;
+    border: 1px solid transparent; border-radius: @RADIUS@;
+    padding: 0 10px 0 8px; text-align: left;
 }
-QPushButton#barBtn[emphasized="true"]:hover {
-    background: @BAR_HOVER@; border-color: @FOCUS@;
-}
-QPushButton#barModeButton {
-    color: @FOCUS@; background: @FOCUS_SOFT@; border: 1px solid @FOCUS_LINE@;
-    border-radius: 3px; padding: 0 10px;
-    font-family: @FONT_MONO@; font-size: 11px; font-weight: 600;
-}
-QPushButton#barModeButton:hover { background: @BAR_HOVER@; border-color: @FOCUS@; }
-QPushButton#barModeButton:pressed { background: @BAR_PRESSED@; }
-QPushButton#barModeButton:disabled { color: @TEXT_OFF@; border-color: @BAR_FILL_LINE@; }
-QPushButton#barGroupToggle {
-    color: @TEXT_DIM@; background: @BAR_FILL@; border: 1px solid @BAR_FILL_LINE@;
-    border-radius: 3px; padding: 0 9px;
-    font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-}
-QPushButton#barGroupToggle:hover {
-    color: @TEXT@; background: @BAR_HOVER@; border-color: @LINE_HI@;
-}
-QPushButton#barGroupToggle[live="true"] {
+QPushButton#barAction:hover { color: @TEXT@; background: @BAR_HOVER@; }
+QPushButton#barAction:pressed { background: @BAR_PRESSED@; }
+QPushButton#barAction:checked { color: @TEXT@; background: @BAR_PRESSED@; }
+QPushButton#barAction:focus { border-color: @FOCUS_LINE@; }
+QPushButton#barAction[live="true"] {
     color: @FOCUS@; background: @FOCUS_SOFT@; border-color: @FOCUS_LINE@;
 }
-QPushButton#barGroupToggle:checked {
-    color: @FOCUS_INK@; background: @FOCUS@; border-color: @FOCUS@;
-}
-QPushButton#barGroupToggle:disabled {
-    color: @TEXT_OFF@; background: transparent; border-color: @BAR_PRESSED@;
-}
-QMenu#barActionMenu {
-    min-width: 238px; padding: 4px; border: 1px solid @LINE_STRONG@;
-}
-QMenu#barActionMenu::item {
-    min-height: 24px; padding: 6px 18px 6px 9px;
-    font-family: @FONT_MONO@; font-size: 11px;
-}
-QFrame#barSep { background: @BAR_SEP@; max-width: 1px; border: none; }
+QPushButton#barAction:disabled { color: @TEXT_OFF@; background: transparent; }
 QComboBox#barCombo {
     background: @BAR_FILL@; border: 1px solid @BAR_FILL_LINE@;
-    border-radius: 3px; padding: 4px 8px; min-height: 20px; color: @TEXT@;
-    font-family: @FONT_MONO@; font-size: 11px;
+    border-radius: @RADIUS@; padding: 4px 6px 4px 9px; min-height: 20px;
+    color: @TEXT_DIM@;
 }
-QComboBox#barCombo:hover { background: @BAR_HOVER@; border-color: @FOCUS_LINE@; }
-QComboBox#barCombo:focus, QComboBox#barCombo:on { border-color: @FOCUS@; }
+QComboBox#barCombo:hover { color: @TEXT@; background: @BAR_HOVER@; }
+QComboBox#barCombo:focus, QComboBox#barCombo:on { border-color: @FOCUS_LINE@; }
 QComboBox#barCombo:disabled { color: @TEXT_OFF@; border-color: @BAR_PRESSED@; }
-QComboBox#barCombo::drop-down { border: none; width: 18px; }
+QComboBox#barCombo::drop-down { border: none; width: 16px; }
 QComboBox#barCombo::down-arrow { image: url("@CHEVRON@"); width: 11px; height: 11px; }
 QComboBox QAbstractItemView {
-    background: @SURFACE@; border: 1px solid @LINE_STRONG@; border-radius: 0px;
-    selection-background-color: @FOCUS@; selection-color: @FOCUS_INK@;
-    color: @TEXT_DIM@; outline: none; padding: 3px;
+    background: @SURFACE@; border: 1px solid @LINE_STRONG@;
+    border-radius: @RADIUS_LG@;
+    selection-background-color: @HOVER@; selection-color: @TEXT@;
+    color: @TEXT_DIM@; outline: none; padding: 4px;
 }
-QComboBox QAbstractItemView::item { min-height: 26px; border-radius: 2px; }
+QComboBox QAbstractItemView::item { min-height: 26px; border-radius: @RADIUS@; }
 QSizeGrip { background: transparent; width: 14px; height: 14px; }
+
+/* Chấm + nhãn trạng thái trên bar. */
+QFrame#statusDot { border: none; border-radius: 3px; background: @TEXT_MUTED@; }
+QFrame#statusDot[state="ok"] { background: @OK@; }
+QFrame#statusDot[state="busy"] { background: @BUSY@; }
+QFrame#statusDot[state="error"] { background: @DANGER@; }
+QLabel#statusText { color: @TEXT_MUTED@; font-size: 12px; }
 
 /* ======================= Cửa sổ Cài đặt ======================= */
 QWidget#settingsRoot { background: @BG@; }
-QFrame#divider { background: @LINE@; max-height: 1px; border: none; }
-QFrame#vDivider { background: @LINE@; max-width: 1px; border: none; }
 QFrame#settingsSidebar {
     background: @SUNKEN@; border: none; border-right: 1px solid @LINE@;
 }
-QLabel#sidebarLabel {
-    color: @TEXT_MUTED@; font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-}
 QLabel#sidebarHint { color: @TEXT_MUTED@; font-size: 11px; }
-QLabel#brandWordmark {
-    font-family: @FONT_DISPLAY@; color: @TEXT@; font-size: 14px; font-weight: 500;
-}
+QLabel#brandWordmark { color: @TEXT@; font-size: 14px; font-weight: 600; }
 QLabel#brandVersion {
-    color: @TEXT_DIM@; font-size: 11px; font-family: @FONT_MONO@;
-    background: @RAISED@; border: 1px solid @LINE@; border-radius: 3px;
-    padding: 2px 7px;
+    color: @TEXT_MUTED@; font-size: 11px; font-family: @FONT_MONO@;
 }
-QLabel#muted, QLabel#footerHint { color: @TEXT_MUTED@; font-size: 12px; }
-QLabel#pageTitle, QLabel#tabTitle {
-    font-family: @FONT_DISPLAY@; color: @TEXT@; font-size: 19px; font-weight: 500;
-}
-QLabel#pageSubtitle, QLabel#tabDescription { color: @TEXT_DIM@; font-size: 12px; }
-QLabel#fieldLabel {
-    color: @TEXT_DIM@; font-family: @FONT_MONO@; font-size: 11px; font-weight: 600;
-}
+QLabel#muted { color: @TEXT_MUTED@; font-size: 12px; }
+QLabel#pageTitle { color: @TEXT@; font-size: 20px; font-weight: 600; }
+QLabel#pageSubtitle { color: @TEXT_MUTED@; font-size: 12px; }
+QLabel#fieldLabel { color: @TEXT_DIM@; font-size: 12px; }
 
 QListWidget#settingsNav {
     background: transparent; border: none; padding: 0; outline: none;
-    font-family: @FONT_MONO@;
 }
 QListWidget#settingsNav::item {
-    color: @TEXT_DIM@; font-size: 12px; border: 1px solid transparent;
-    border-radius: 0px; padding: 10px 11px; margin: 0;
+    color: @TEXT_DIM@; font-size: 13px; border: 1px solid transparent;
+    border-radius: @RADIUS@; padding: 8px 10px; margin: 1px 0;
 }
 QListWidget#settingsNav::item:hover { color: @TEXT@; background: @SURFACE@; }
 QListWidget#settingsNav::item:selected,
 QListWidget#settingsNav::item:selected:active,
 QListWidget#settingsNav::item:selected:!active {
-    color: @FOCUS_INK@; background: @FOCUS@; border-color: @FOCUS@;
+    color: @TEXT@; background: @RAISED@; border-color: @LINE_STRONG@;
 }
 QStackedWidget#settingsPages { background: transparent; }
 
-/* ---- panel: góc vuông, phân cấp bằng hairline + khoảng trắng ---- */
-QFrame#card, QFrame#surface, QFrame#engineInfo, QFrame#cardFeatured {
-    background: @SURFACE@; border: 1px solid @LINE@; border-radius: 0px;
+/* ---- panel ---- */
+QFrame#card, QFrame#engineInfo {
+    background: @SURFACE@; border: 1px solid @LINE@; border-radius: @RADIUS_LG@;
 }
-QFrame#cardFeatured { border-color: @LINE_STRONG@; }
 QFrame#cardSunken, QFrame#modelMeta {
-    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: 0px;
+    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: @RADIUS_LG@;
 }
-/* Khung xem trước: nền bàn cờ do widget tự vẽ nên chỉ giữ lại viền + crop-mark. */
+/* Khung xem trước: nền bàn cờ do widget tự vẽ nên chỉ giữ lại viền. */
 QFrame#previewSurface {
-    background: transparent; border: 1px solid @LINE@; border-radius: 0px;
+    background: transparent; border: 1px solid @LINE@; border-radius: @RADIUS_LG@;
 }
-QLabel#cardTitle {
-    color: @TEXT@; font-family: @FONT_DISPLAY@; font-size: 12px; font-weight: 500;
-}
+QLabel#cardTitle { color: @TEXT@; font-size: 13px; font-weight: 600; }
 QLabel#cardHint { color: @TEXT_MUTED@; font-size: 12px; }
-QLabel#rowLabel, QLabel#hotkeyLabel { color: @TEXT@; font-size: 13px; }
+QLabel#rowLabel { color: @TEXT@; font-size: 13px; }
 QLabel#rowHint, QLabel#engineHint { color: @TEXT_MUTED@; font-size: 12px; }
-QLabel#aiProviderStatus {
-    font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-    border-radius: 2px; padding: 4px 8px;
-}
-QLabel#aiProviderStatus[state="active"] {
-    color: @FOCUS@; background: @FOCUS_SOFT@; border: 1px solid @FOCUS_LINE@;
-}
-QLabel#aiProviderStatus[state="inactive"] {
-    color: @TEXT_MUTED@; background: @RAISED@; border: 1px solid @LINE@;
-}
-QFrame#rowDivider { background: @LINE_SOFT@; max-height: 1px; border: none; }
+QFrame#rowDivider { background: @LINE@; max-height: 1px; border: none; }
 
 /* ---- ô nhập ---- */
 QLineEdit {
-    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: 3px;
-    padding: 8px 11px; color: @TEXT@;
+    background: @SUNKEN@; border: 1px solid @LINE_STRONG@; border-radius: @RADIUS@;
+    padding: 7px 10px; color: @TEXT@;
     selection-background-color: @FOCUS@; selection-color: @FOCUS_INK@;
 }
-QLineEdit:hover { border-color: @LINE_STRONG@; }
+QLineEdit:hover { border-color: @LINE_HI@; }
 QLineEdit:focus { border-color: @FOCUS@; }
-QLineEdit:read-only { color: @TEXT_DIM@; background: @PRESSED@; }
+QLineEdit:read-only { color: @TEXT_DIM@; }
 QLineEdit:disabled { color: @TEXT_OFF@; background: @PRESSED@; }
 QLineEdit#hotkey {
-    font-family: @FONT_MONO@; font-size: 12px; padding: 7px 10px; color: @TEXT@;
-    background: @RAISED@; border: 1px solid @LINE_STRONG@; border-radius: 3px;
+    font-family: @FONT_MONO@; font-size: 12px; color: @TEXT@;
+    background: @RAISED@; border: 1px solid @LINE_STRONG@;
 }
 QLineEdit#hotkey:hover { border-color: @LINE_HI@; }
 QLineEdit#hotkey[recording="true"] {
@@ -306,58 +226,45 @@ QLineEdit#hotkey[recording="true"] {
 }
 QLineEdit#hotkey[conflict="true"] { border-color: @DANGER@; color: @DANGER@; }
 
-/* ---- block `.cmd`: header, prompt, lệnh và nút copy thực ---- */
+/* ---- ô giá trị kỹ thuật (endpoint, repo) + nút copy ---- */
 QFrame#codeBlock {
-    background: @CODE_BG@; border: 1px solid @CODE_BORDER@; border-radius: 0px;
-}
-QFrame#codeHeader {
-    background: @CODE_HEADER@; border: none; border-bottom: 1px solid @CODE_BORDER@;
-}
-QLabel#codeTitle {
-    color: @TEXT_MUTED@; font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-}
-QLabel#codePrompt {
-    color: @CODE_PROMPT@; font-family: @FONT_MONO@; font-size: 12px; font-weight: 600;
+    background: @SUNKEN@; border: 1px solid @LINE_STRONG@;
+    border-radius: @RADIUS@;
 }
 QLineEdit#codeField {
-    font-family: @FONT_MONO@; font-size: 12px; color: @CODE_TEXT@;
-    background: transparent; border: none; border-radius: 0px; padding: 8px 8px 9px 0;
+    font-family: @FONT_MONO@; font-size: 12px; color: @TEXT_DIM@;
+    background: transparent; border: none; border-radius: 0px; padding: 6px 0 6px 10px;
 }
-QLineEdit#codeField:focus { color: @CODE_TEXT@; }
 QPushButton#codeCopyBtn {
-    font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-    color: @CODE_BTN_TEXT@; background: @CODE_BTN_BG@;
-    border: none; border-left: 1px solid @CODE_BORDER@;
-    border-radius: 0px; padding: 6px 12px;
+    font-size: 12px; color: @TEXT_MUTED@; background: transparent;
+    border: none; border-radius: @RADIUS@; padding: 6px 10px;
 }
-QPushButton#codeCopyBtn:hover {
-    background: @CODE_BTN_HOVER_BG@; color: @CODE_BTN_HOVER_TEXT@;
-}
-QPushButton#codeCopyBtn:pressed { background: @CODE_BTN_PRESSED_BG@; }
+QPushButton#codeCopyBtn:hover { color: @TEXT@; background: @HOVER@; }
+QPushButton#codeCopyBtn:pressed { background: @PRESSED@; }
 
 QComboBox {
-    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: 3px;
-    padding: 7px 11px; min-height: 20px; color: @TEXT@;
+    background: @SUNKEN@; border: 1px solid @LINE_STRONG@; border-radius: @RADIUS@;
+    padding: 6px 10px; min-height: 20px; color: @TEXT@;
 }
-QComboBox:hover { border-color: @LINE_STRONG@; }
+QComboBox:hover { border-color: @LINE_HI@; }
 QComboBox:focus, QComboBox:on { border-color: @FOCUS@; }
 QComboBox:disabled { color: @TEXT_OFF@; background: @PRESSED@; }
-QComboBox::drop-down { border: none; width: 26px; }
+QComboBox::drop-down { border: none; width: 24px; }
 QComboBox::down-arrow { image: url("@CHEVRON@"); width: 12px; height: 12px; }
 QComboBox::down-arrow:disabled { image: url("@CHEVRON_OFF@"); }
 
 QSpinBox, QDoubleSpinBox {
-    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: 3px;
-    padding: 7px 30px 7px 11px; min-height: 20px; color: @TEXT@;
+    background: @SUNKEN@; border: 1px solid @LINE_STRONG@; border-radius: @RADIUS@;
+    padding: 6px 28px 6px 10px; min-height: 20px; color: @TEXT@;
     selection-background-color: @FOCUS@; selection-color: @FOCUS_INK@;
 }
-QSpinBox:hover, QDoubleSpinBox:hover { border-color: @LINE_STRONG@; }
+QSpinBox:hover, QDoubleSpinBox:hover { border-color: @LINE_HI@; }
 QSpinBox:focus, QDoubleSpinBox:focus { border-color: @FOCUS@; }
 QSpinBox:disabled, QDoubleSpinBox:disabled { color: @TEXT_OFF@; background: @PRESSED@; }
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-    background: transparent; border: none; width: 22px; border-radius: 0px;
-    margin: 2px 3px 2px 0;
+    background: transparent; border: none; width: 20px;
+    border-radius: @RADIUS@; margin: 2px 3px 2px 0;
 }
 QSpinBox::up-button:hover, QSpinBox::down-button:hover,
 QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
@@ -376,10 +283,10 @@ QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
     image: url("@CHEVRON_OFF@");
 }
 
-QCheckBox { color: @TEXT@; spacing: 9px; }
+QCheckBox { color: @TEXT@; spacing: 8px; }
 QCheckBox::indicator {
-    width: 17px; height: 17px; border: 1px solid @LINE_HI@;
-    border-radius: 2px; background: @SUNKEN@;
+    width: 16px; height: 16px; border: 1px solid @LINE_HI@;
+    border-radius: @RADIUS@; background: @SUNKEN@;
 }
 QCheckBox::indicator:hover { border-color: @FOCUS@; }
 QCheckBox::indicator:checked {
@@ -393,8 +300,8 @@ QCheckBox::indicator:checked:disabled {
 
 /* ---- nút ---- */
 QPushButton {
-    background: @RAISED@; border: 1px solid @LINE_STRONG@; border-radius: 3px;
-    padding: 8px 14px; color: @TEXT@; font-weight: 500;
+    background: @RAISED@; border: 1px solid @LINE_STRONG@; border-radius: @RADIUS@;
+    padding: 7px 13px; color: @TEXT@;
 }
 QPushButton:hover { background: @HOVER@; border-color: @LINE_HI@; }
 QPushButton:pressed { background: @PRESSED@; }
@@ -402,7 +309,6 @@ QPushButton:focus { border-color: @FOCUS@; }
 QPushButton:disabled { color: @TEXT_OFF@; background: @PRESSED@; border-color: @LINE@; }
 QPushButton#primary {
     background: @FOCUS@; border-color: @FOCUS@; color: @FOCUS_INK@; font-weight: 600;
-    padding: 8px 16px;
 }
 QPushButton#primary:hover { background: @FOCUS_HOVER@; border-color: @FOCUS_HOVER@; }
 QPushButton#primary:pressed { background: @FOCUS_PRESSED@; border-color: @FOCUS_PRESSED@; }
@@ -416,73 +322,62 @@ QPushButton#ghost:hover { background: @RAISED@; color: @TEXT@; }
 QPushButton#ghost:disabled { background: transparent; border-color: transparent; }
 QPushButton#danger { color: @DANGER@; }
 QPushButton#danger:hover {
-    background: @DANGER_SOFT@; border-color: @DANGER@; color: @DANGER_HOVER_TEXT@;
+    background: @DANGER_SOFT@; border-color: @DANGER@; color: @DANGER@;
 }
-QPushButton#modelDownload { padding: 7px 13px; }
 
-/* ---- badge/tag: semantic và categorical là hai bảng màu riêng ---- */
-QLabel#engineBadge, QLabel#stateBadge, QLabel#categoryBadge {
-    font-family: @FONT_MONO@; font-size: 10px; font-weight: 600;
-    border-radius: 2px; padding: 3px 8px; border: 1px solid transparent;
+/* ---- badge trạng thái ---- */
+QLabel#engineBadge, QLabel#stateBadge, QLabel#statusBadge {
+    font-size: 12px; border-radius: @RADIUS@; padding: 3px 8px;
+    border: 1px solid transparent;
 }
-QLabel#engineBadge[state="ready"], QLabel#stateBadge[state="ready"] {
-    color: @OK@; background: @OK_SOFT@;
+QLabel#engineBadge[state="ready"], QLabel#stateBadge[state="ready"],
+QLabel#statusBadge[state="ready"] { color: @OK@; background: @OK_SOFT@; }
+QLabel#engineBadge[state="fallback"], QLabel#stateBadge[state="fallback"],
+QLabel#statusBadge[state="fallback"] { color: @INFO@; background: @INFO_SOFT@; }
+QLabel#engineBadge[state="busy"], QLabel#stateBadge[state="busy"],
+QLabel#statusBadge[state="busy"] { color: @BUSY@; background: @BUSY_SOFT@; }
+QLabel#engineBadge[state="missing"], QLabel#stateBadge[state="missing"],
+QLabel#statusBadge[state="missing"] { color: @DANGER@; background: @DANGER_SOFT@; }
+QLabel#statusBadge[state="active"] {
+    color: @FOCUS@; background: @FOCUS_SOFT@; border-color: @FOCUS_LINE@;
 }
-QLabel#engineBadge[state="fallback"], QLabel#stateBadge[state="fallback"] {
-    color: @INFO@; background: @INFO_SOFT@;
-}
-QLabel#engineBadge[state="busy"], QLabel#stateBadge[state="busy"] {
-    color: @BUSY@; background: @BUSY_SOFT@;
-}
-QLabel#engineBadge[state="missing"], QLabel#stateBadge[state="missing"] {
-    color: @DANGER@; background: @DANGER_SOFT@;
-}
-QLabel#categoryBadge[category="1"] { color: @CAT_1@; background: @CAT_1_SOFT@; }
-QLabel#categoryBadge[category="2"] { color: @CAT_2@; background: @CAT_2_SOFT@; }
-QLabel#categoryBadge[category="3"] { color: @CAT_3@; background: @CAT_3_SOFT@; }
-QLabel#categoryBadge[category="4"] { color: @CAT_4@; background: @CAT_4_SOFT@; }
-QLabel#categoryBadge[category="5"] { color: @CAT_5@; background: @CAT_5_SOFT@; }
-QLabel#categoryBadge[category="6"] { color: @CAT_6@; background: @CAT_6_SOFT@; }
-QLabel#statChip {
-    font-family: @FONT_MONO@; font-size: 11px; color: @TEXT_DIM@;
-    background: @RAISED@; border: 1px solid @LINE@; border-radius: 2px;
-    padding: 4px 8px;
+QLabel#statusBadge[state="inactive"] {
+    color: @TEXT_MUTED@; background: @RAISED@; border-color: @LINE@;
 }
 QLabel#kbd {
     font-family: @FONT_MONO@; font-size: 11px; color: @TEXT_DIM@;
-    background: @RAISED@; border: 1px solid @LINE_STRONG@; border-radius: 2px;
-    padding: 2px 7px;
+    background: @RAISED@; border: 1px solid @LINE_STRONG@; border-radius: @RADIUS@;
+    padding: 2px 6px;
 }
 QLabel#modelTitle { color: @TEXT@; font-size: 13px; font-weight: 600; }
 QLabel#modelDownloadStatus { color: @TEXT_DIM@; font-size: 12px; }
 QLabel#modelDownloadStatus[state="ready"] { color: @OK@; }
 QLabel#modelDownloadStatus[state="busy"] { color: @BUSY@; }
 QLabel#modelDownloadStatus[state="error"] { color: @DANGER@; }
-QLabel#modelMetrics { color: @TEXT_DIM@; font-size: 11px; font-family: @FONT_MONO@; }
+QLabel#modelMetrics { color: @TEXT_MUTED@; font-size: 12px; }
 QLabel#modelLanguages { color: @TEXT_MUTED@; font-size: 12px; }
-QLabel#link, QLabel#llmRegistration {
-    color: @FOCUS@; font-size: 12px;
-}
+QLabel#link, QLabel#llmRegistration { font-size: 12px; }
+
 /* ---- danh sách (dialog provider) ---- */
 QListWidget {
-    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: 0px;
+    background: @SUNKEN@; border: 1px solid @LINE@; border-radius: @RADIUS@;
     padding: 4px; outline: none; color: @TEXT_DIM@;
 }
-QListWidget::item { padding: 6px 8px; border-radius: 2px; }
+QListWidget::item { padding: 6px 8px; border-radius: @RADIUS@; }
 QListWidget::item:hover { background: @RAISED@; color: @TEXT@; }
-QListWidget::item:selected { background: @FOCUS@; color: @FOCUS_INK@; }
+QListWidget::item:selected { background: @RAISED@; color: @TEXT@; }
 
 /* ---- vùng cuộn ---- */
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar::handle:vertical {
-    background: @LINE_STRONG@; border-radius: 0px; min-height: 32px;
+    background: @LINE_STRONG@; border-radius: 3px; min-height: 32px;
 }
 QScrollBar::handle:vertical:hover { background: @LINE_HI@; }
 QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
 QScrollBar::handle:horizontal {
-    background: @LINE_STRONG@; border-radius: 0px; min-width: 32px;
+    background: @LINE_STRONG@; border-radius: 3px; min-width: 32px;
 }
 QScrollBar::handle:horizontal:hover { background: @LINE_HI@; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }

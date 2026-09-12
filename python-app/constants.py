@@ -38,7 +38,6 @@ OCR_LANGUAGES = [
     ("Đông Slav", "eslav"),
 ]
 HOTKEY_ACTIONS = [
-    ("Dịch văn bản chọn", "selected_text"),
     ("Dịch & thay thế tại chỗ", "selected_text_replace"),
     ("Dịch ảnh clipboard", "clipboard_image_replace"),
     ("Ảnh clipboard → Khung dịch", "clipboard_image_to_text"),
@@ -224,12 +223,6 @@ BAR_GROUP_FRAME = [
         "Live → khung",
         "region_to_live_frame",
         "OCR liên tục một vùng, đổ bản dịch vào khung (bấm lại để dừng)",
-    ),
-    (
-        "text",
-        "Dịch văn bản chọn",
-        "selected_text",
-        "Copy văn bản đang bôi đen rồi dịch",
     ),
     (
         "replace",

@@ -6,6 +6,7 @@ import ctypes
 import os
 from ctypes import wintypes
 from dataclasses import dataclass
+from functools import lru_cache
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -31,20 +32,19 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from theme import TOKENS
-from ui_utils import alpha_text_layer
+from ui_utils import AlphaLayerCache
 
-# Tactical overlay: cùng substrate gần đen và accent lime của shell.
-DIM = QColor(10, 10, 11, 172)
+# Overlay dùng chung substrate tối và accent duy nhất của shell.
+DIM = QColor(15, 15, 17, 168)
 ACCENT = QColor(TOKENS["FOCUS"])
-ACCENT_SOFT = QColor(200, 255, 77, 22)
-CROSSHAIR = QColor(200, 255, 77, 54)
-HINT_BG = QColor(10, 10, 11, 246)
+ACCENT_SOFT = QColor(200, 255, 77, 20)
+CROSSHAIR = QColor(200, 255, 77, 46)
+HINT_BG = QColor(15, 15, 17, 242)
 HINT_LINE = QColor(TOKENS["LINE_STRONG"])
 HINT_FG = QColor(TOKENS["TEXT"])
 HINT_MUTED = QColor(TOKENS["TEXT_MUTED"])
-SIZE_BG = QColor(10, 10, 11, 246)
-SIZE_FG = QColor(TOKENS["FOCUS"])
-CORNER = 14
+BADGE_FG = QColor(TOKENS["TEXT"])
+RADIUS = 4.0
 
 # Windows 10 2004+: cửa sổ vẫn hiện với người dùng nhưng bị loại khỏi ảnh chụp.
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -87,6 +87,9 @@ class PaintedLine:
     font: QFont
     image: QImage | None
     source_lines: int = 1
+    # Hộp vẽ chữ và cờ word-wrap tính một lần khi build, dùng lại ở mọi paint.
+    text_rect: QRect | None = None
+    text_flags: int = 0
 
 
 # Chuỗi tham chiếu để quy đổi "chiều cao ink" ↔ "cỡ em" của font: có cả chữ hoa
@@ -109,6 +112,41 @@ def _ink_to_em_ratio(family: str, weight: QFont.Weight) -> float:
     ratio = height / _REFERENCE_EM if height > 0 else 0.9
     _ink_ratio_cache[key] = ratio
     return ratio
+
+
+def _probe_font(family: str, weight: int, pixel_size: int) -> QFont:
+    font = QFont(family)
+    font.setWeight(QFont.Weight(weight))
+    font.setPixelSize(pixel_size)
+    return font
+
+
+# Ba phép đo dưới đây bị gọi lặp trong lúc dò cỡ chữ VÀ lại lặp cho mỗi frame
+# live với cùng đối số. `tightBoundingRect` phải đọc outline của glyph nên là
+# phép đắt nhất của QFontMetrics — cache theo (text, family, weight, size).
+@lru_cache(maxsize=4096)
+def _ink_height(text: str, family: str, weight: int, pixel_size: int) -> float:
+    metrics = QFontMetricsF(_probe_font(family, weight, pixel_size))
+    return metrics.tightBoundingRect(text).height()
+
+
+@lru_cache(maxsize=4096)
+def _text_advance(text: str, family: str, weight: int, pixel_size: int) -> int:
+    metrics = QFontMetricsF(_probe_font(family, weight, pixel_size))
+    return round(metrics.horizontalAdvance(text))
+
+
+@lru_cache(maxsize=4096)
+def _wrapped_fits(
+    text: str, family: str, weight: int, pixel_size: int, width: int, height: int
+) -> bool:
+    metrics = QFontMetrics(_probe_font(family, weight, pixel_size))
+    measured = metrics.boundingRect(
+        QRect(0, 0, width, height * 4),
+        Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignVCenter,
+        text,
+    )
+    return measured.width() <= width and measured.height() <= height
 
 
 def _exclude_from_capture(widget: QWidget) -> bool:
@@ -168,10 +206,9 @@ class _RegionOverlay(QWidget):
         self.setMouseTracking(True)
 
         self._hint_font = QFont("Segoe UI", 11)
-        self._hint_font.setWeight(QFont.Medium)
-        self._key_font = QFont("IBM Plex Mono", 10)
-        self._key_font.setWeight(QFont.DemiBold)
-        self._size_font = QFont("IBM Plex Mono", 11)
+        self._badge_font = QFont("Segoe UI", 10)
+        self._hint_metrics = QFontMetrics(self._hint_font)
+        self._badge_metrics = QFontMetrics(self._badge_font)
 
     # ----- vòng đời -----
     def run(self) -> tuple[int, int, int, int] | None:
@@ -205,17 +242,30 @@ class _RegionOverlay(QWidget):
             self._current = self._origin
             self.update()
 
+    def _selection_rect(self) -> QRect | None:
+        if self._origin is None or self._current is None:
+            return None
+        return QRect(self._origin, self._current).normalized()
+
     def mouseMoveEvent(self, event) -> None:
         position = event.position().toPoint()
         if self._selecting:
+            # Chỉ vẽ lại hợp của khung cũ và khung mới (đã nới cho viền + badge)
+            # thay vì cả desktop ảo — với hai màn hình đó là ~6 Mpx mỗi lần di.
+            previous = self._selection_rect()
             self._current = position
-            self.update()
+            current = self._selection_rect()
+            if previous is None or current is None:
+                self.update()
+                return
+            dirty = previous.united(current).adjusted(-4, -4, 4, 4)
+            badge_height = self._badge_metrics.height() + 22
+            self.update(dirty.adjusted(0, -badge_height, 0, badge_height))
             return
-        # Chưa kéo: chỉ vẽ lại hai dải mảnh của crosshair (cũ + mới) thay vì cả
-        # desktop ảo — tránh nặng máy trên nhiều màn hình.
-        previous = self._cursor
+        # Chưa kéo: chỉ vẽ lại hai dải mảnh của crosshair (cũ + mới).
+        previous_point = self._cursor
         self._cursor = position
-        for point in (previous, position):
+        for point in (previous_point, position):
             if point is None:
                 continue
             self.update(0, point.y() - 1, self.width(), 3)
@@ -264,141 +314,70 @@ class _RegionOverlay(QWidget):
         painter.drawLine(0, self._cursor.y(), self.width(), self._cursor.y())
         painter.drawLine(self._cursor.x(), 0, self._cursor.x(), self.height())
 
-    def _draw_hint_pill(self, painter: QPainter) -> None:
-        label = "// KÉO ĐỂ CHỌN VÙNG"
-        key = "ESC"
-        suffix = "để huỷ"
-        metrics = QFontMetrics(self._hint_font)
-        key_metrics = QFontMetrics(self._key_font)
-        gap = 9
-        key_w = key_metrics.horizontalAdvance(key) + 14
-        key_h = key_metrics.height() + 4
-        pad_x, pad_y = 16, 10
-        text_h = metrics.height()
-        pill_w = (
-            pad_x * 2
-            + metrics.horizontalAdvance(label)
-            + gap * 3
-            + 1
-            + key_w
-            + 6
-            + metrics.horizontalAdvance(suffix)
-        )
-        pill_h = max(text_h, key_h) + pad_y * 2
+    def _draw_hint(self, painter: QPainter) -> None:
+        """Một dòng hướng dẫn duy nhất, không chip phím hay vạch ngăn."""
+        label = "Kéo để chọn vùng · Esc để huỷ"
+        metrics = self._hint_metrics
+        pad_x, pad_y = 14, 9
+        pill_w = metrics.horizontalAdvance(label) + pad_x * 2
+        pill_h = metrics.height() + pad_y * 2
         anchor = self._hint_anchor(pill_w)
         rect = QRectF(anchor.x(), anchor.y(), pill_w, pill_h)
-        painter.fillRect(rect, HINT_BG)
-        painter.setPen(QPen(HINT_LINE, 1))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(rect)
-
-        center_y = rect.center().y()
-        cursor_x = rect.left() + pad_x
+        painter.setPen(QPen(HINT_LINE, 1.0))
+        painter.setBrush(HINT_BG)
+        painter.drawRoundedRect(rect, RADIUS, RADIUS)
         painter.setFont(self._hint_font)
         painter.setPen(HINT_FG)
-        label_w = metrics.horizontalAdvance(label)
-        painter.drawText(
-            QRectF(cursor_x, rect.top(), label_w, pill_h),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            label,
-        )
-        cursor_x += label_w + gap
-        painter.setPen(QPen(HINT_LINE, 1))
-        painter.drawLine(
-            int(cursor_x),
-            int(center_y - text_h / 2),
-            int(cursor_x),
-            int(center_y + text_h / 2),
-        )
-        cursor_x += 1 + gap
-
-        key_rect = QRectF(cursor_x, center_y - key_h / 2, key_w, key_h)
-        painter.setBrush(QColor(TOKENS["RAISED"]))
-        painter.setPen(QPen(HINT_LINE, 1))
-        painter.drawRoundedRect(key_rect, 2, 2)
-        painter.setFont(self._key_font)
-        painter.setPen(SIZE_FG)
-        painter.drawText(key_rect, Qt.AlignCenter, key)
-        cursor_x += key_w + 6
-
-        painter.setFont(self._hint_font)
-        painter.setPen(HINT_MUTED)
-        painter.drawText(
-            QRectF(cursor_x, rect.top(), metrics.horizontalAdvance(suffix) + 2, pill_h),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            suffix,
-        )
-
-    def _draw_corners(self, painter: QPainter, rect: QRect) -> None:
-        pen = QPen(ACCENT, 2.5, Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin)
-        painter.setPen(pen)
-        left, top = rect.left(), rect.top()
-        right, bottom = rect.right(), rect.bottom()
-        corner = CORNER
-        # top-left
-        painter.drawLine(left, top, left + corner, top)
-        painter.drawLine(left, top, left, top + corner)
-        # top-right
-        painter.drawLine(right, top, right - corner, top)
-        painter.drawLine(right, top, right, top + corner)
-        # bottom-left
-        painter.drawLine(left, bottom, left + corner, bottom)
-        painter.drawLine(left, bottom, left, bottom - corner)
-        # bottom-right
-        painter.drawLine(right, bottom, right - corner, bottom)
-        painter.drawLine(right, bottom, right, bottom - corner)
+        painter.drawText(rect, Qt.AlignCenter, label)
 
     def _draw_size_badge(self, painter: QPainter, rect: QRect) -> None:
         label = f"{rect.width()} × {rect.height()}"
-        painter.setFont(self._size_font)
-        metrics = QFontMetrics(self._size_font)
-        tw = metrics.horizontalAdvance(label)
-        th = metrics.height()
-        pad_x, pad_y = 11, 6
-        bw = tw + pad_x * 2
-        bh = th + pad_y * 2
+        metrics = self._badge_metrics
+        pad_x, pad_y = 9, 5
+        bw = metrics.horizontalAdvance(label) + pad_x * 2
+        bh = metrics.height() + pad_y * 2
         # Ưu tiên dưới khung; nếu sát đáy màn hình thì đưa lên trên.
         bx = rect.center().x() - bw // 2
-        by = rect.bottom() + 10
+        by = rect.bottom() + 8
         if by + bh > self.height() - 8:
-            by = rect.top() - bh - 10
+            by = rect.top() - bh - 8
         if by < 8:
             by = rect.top() + 8
         bx = max(8, min(bx, self.width() - bw - 8))
 
         badge_rect = QRectF(bx, by, bw, bh)
-        painter.fillRect(badge_rect, SIZE_BG)
-        painter.setPen(QPen(HINT_LINE, 1))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(badge_rect)
-        painter.setPen(SIZE_FG)
-        painter.drawText(QRect(bx, by, bw, bh), Qt.AlignCenter, label)
+        painter.setPen(QPen(HINT_LINE, 1.0))
+        painter.setBrush(HINT_BG)
+        painter.drawRoundedRect(badge_rect, RADIUS, RADIUS)
+        painter.setFont(self._badge_font)
+        painter.setPen(BADGE_FG)
+        painter.drawText(badge_rect, Qt.AlignCenter, label)
 
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.fillRect(self.rect(), DIM)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        # Chỉ tô lớp mờ trong vùng Qt yêu cầu vẽ lại.
+        painter.fillRect(event.rect(), DIM)
 
-        if self._origin and self._current:
-            rect = QRect(self._origin, self._current).normalized()
+        rect = self._selection_rect()
+        if rect is not None:
             # Khoét trong suốt đúng vùng chọn (thấy rõ nội dung bên dưới).
             painter.setCompositionMode(QPainter.CompositionMode_Clear)
             painter.fillRect(rect, Qt.transparent)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
-            # Viền mỏng + fill accent rất nhạt
             painter.fillRect(rect, ACCENT_SOFT)
             painter.setPen(QPen(ACCENT, 1.0))
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
-            self._draw_corners(painter, rect)
 
             if rect.width() >= 24 and rect.height() >= 16:
                 self._draw_size_badge(painter, rect)
         else:
             # Chưa kéo: crosshair + gợi ý; khi đã kéo thì bỏ để không che nội dung.
             self._draw_crosshair(painter)
-            self._draw_hint_pill(painter)
+            self._draw_hint(painter)
         painter.end()
 
 
@@ -474,6 +453,8 @@ class TranslationOverlay(QWidget):
         self.setGeometry(left, top, self._w, self._h)
         self._live = False
         self._paint_regions = []
+        self._layer_cache = AlphaLayerCache()
+        self._mask_key: tuple | None = None
         self._build_paint_regions(regions, image_size)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Chuột trái: đóng ô này · Chuột phải (bất kỳ đâu): xoá hết")
@@ -550,7 +531,7 @@ class TranslationOverlay(QWidget):
                 bottom_rect.setTop(mid + 1)
 
         # Bước 3: cỡ chữ suy từ ink CHỮ GỐC rồi co cho vừa bề rộng (như Google
-        # Dịch ảnh) — xem `_line_font`.
+        # Dịch ảnh) — xem `_line_fonts`.
         self._paint_regions = [
             PaintedLine(
                 patch=item["rect"],
@@ -564,9 +545,18 @@ class TranslationOverlay(QWidget):
             )
             for item, font in zip(built, self._line_fonts(built))
         ]
+        # Hộp vẽ chữ và cờ align cố định theo layout → tính sẵn, khỏi tính lại ở
+        # mỗi paintEvent lẫn mỗi lần dựng input mask.
+        for line in self._paint_regions:
+            line.text_rect = self._compute_text_rect(line)
+            line.text_flags = (
+                Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignVCenter
+                if line.source_lines > 1
+                else Qt.AlignLeft | Qt.AlignVCenter
+            )
         self._apply_input_mask()
 
-    def _line_text_rect(self, line: PaintedLine) -> QRect:
+    def _compute_text_rect(self, line: PaintedLine) -> QRect:
         """Hộp vẽ chữ: canh theo ink gốc, cao hơn ink để dấu/đuôi chữ không bị cắt."""
         if line.source_lines > 1:
             margin_x = max(1, min(4, line.patch.width() // 20))
@@ -584,27 +574,41 @@ class TranslationOverlay(QWidget):
         """Chỉ vùng thật sự có vẽ mới nhận chuột.
 
         Phần còn lại của vùng chọn trong suốt và phải tiếp tục cho click xuyên
-        xuống ứng dụng bên dưới.
+        xuống ứng dụng bên dưới. `setMask` đổi window region ở tầng compositor —
+        thao tác đắt trên Windows — nên bỏ qua khi hình dạng không đổi (live
+        thường vẽ lại đúng cùng một layout).
         """
         if not self._paint_regions:
-            self.clearMask()
+            if self._mask_key is not None:
+                self._mask_key = None
+                self.clearMask()
             return
-        region = QRegion()
+        rects: list[QRect] = []
         for line in self._paint_regions:
-            region = region.united(line.patch.adjusted(-1, -1, 1, 1))
-            text_rect = self._line_text_rect(line)
+            rects.append(line.patch.adjusted(-1, -1, 1, 1))
+            text_rect = line.text_rect or self._compute_text_rect(line)
             if line.source_lines > 1:
-                region = region.united(text_rect)
+                rects.append(text_rect)
                 continue
-            advance = round(QFontMetricsF(line.font).horizontalAdvance(line.text)) + 6
-            region = region.united(
+            advance = _text_advance(
+                line.text, line.font.family(), int(line.font.weight()),
+                line.font.pixelSize(),
+            )
+            rects.append(
                 QRect(
                     text_rect.left(),
                     text_rect.top(),
-                    min(advance, text_rect.width()),
+                    min(advance + 6, text_rect.width()),
                     text_rect.height(),
                 )
             )
+        key = tuple((r.left(), r.top(), r.width(), r.height()) for r in rects)
+        if key == self._mask_key:
+            return
+        self._mask_key = key
+        region = QRegion()
+        for rect in rects:
+            region = region.united(rect)
         self.setMask(region)
 
     def _line_fonts(self, built: list[dict]) -> list[QFont]:
@@ -668,39 +672,54 @@ class TranslationOverlay(QWidget):
 
     def _block_size(self, items: list[dict], target_ink: float) -> int:
         """Cỡ chữ dùng chung cho cả khối: vừa chiều cao ink, vừa bề rộng chỗ trống."""
-        ratio = _ink_to_em_ratio(self.FONT_FAMILY, QFont.Normal)
+        family = self.FONT_FAMILY
+        ratio = _ink_to_em_ratio(family, QFont.Normal)
         size = max(self.MIN_FONT_PX, min(self.MAX_FONT_PX, round(target_ink / ratio)))
         max_ink = target_ink * self.INK_OVERFLOW
-        probe = QFont(self.FONT_FAMILY)
+        weight = int(QFont.Normal)
         for item in items:
-            probe.setPixelSize(size)
-            size = min(size, self._fit_ink_height(probe, item["text"], max_ink, size))
-            probe.setPixelSize(size)
+            size = min(size, self._fit_ink_height(item["text"], max_ink, size, weight))
             if item["source_lines"] > 1:
-                size = min(size, self._wrapped_size(probe, item, size))
+                size = min(size, self._wrapped_size(item, size, weight))
             else:
-                size = min(size, self._width_size(probe, item, size))
+                size = min(size, self._width_size(item, size, weight))
         return max(self.MIN_FONT_PX, size)
 
-    def _wrapped_size(self, font: QFont, item: dict, size: int) -> int:
+    def _largest_fitting(self, upper: int, fits) -> int:
+        """Cỡ chữ lớn nhất trong [MIN_FONT_PX, upper] còn thoả `fits`.
+
+        Bản trước dò tuyến tính 1px mỗi bước và mỗi bước lại layout/đo lại toàn
+        bộ chuỗi — từ 64px xuống 8px là tới 56 lần đo cho MỘT khối. Phép đo đơn
+        điệu theo cỡ chữ nên nhị phân chỉ cần ~6 lần.
+        """
+        low = self.MIN_FONT_PX
+        if upper <= low:
+            return low
+        if fits(upper):
+            return upper
+        high = upper
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(middle):
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def _wrapped_size(self, item: dict, size: int, weight: int) -> int:
         """Co khối dịch cho vừa speech bubble, có word-wrap và khoảng thở."""
         box = item["rect"]
         margin_x = max(1, min(4, box.width() // 20))
         margin_y = max(1, min(3, box.height() // 20))
         width = max(1, box.width() - margin_x * 2)
         height = max(1, box.height() - margin_y * 2)
-        flags = Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignVCenter
-        candidate = size
-        while candidate > self.MIN_FONT_PX:
-            probe = QFont(font)
-            probe.setPixelSize(candidate)
-            measured = QFontMetrics(probe).boundingRect(
-                QRect(0, 0, width, height * 4), flags, item["text"]
-            )
-            if measured.width() <= width and measured.height() <= height:
-                break
-            candidate -= 1
-        return candidate
+        text = item["text"]
+        return self._largest_fitting(
+            size,
+            lambda candidate: _wrapped_fits(
+                text, self.FONT_FAMILY, weight, candidate, width, height
+            ),
+        )
 
     @staticmethod
     def _is_bold(item: dict, target_ink: float) -> bool:
@@ -713,7 +732,9 @@ class TranslationOverlay(QWidget):
         thickness = item.get("thickness") or 0.0
         return thickness > 0 and thickness >= 0.14 * target_ink + 0.7
 
-    def _fit_ink_height(self, font: QFont, text: str, max_ink: float, size: int) -> int:
+    def _fit_ink_height(
+        self, text: str, max_ink: float, size: int, weight: int
+    ) -> int:
         """Co cỡ chữ khi ink bản dịch cao QUÁ mức cho phép so với chữ gốc.
 
         Chỉ CO chứ không nới — dòng nào bản dịch toàn chữ thấp (không dấu, không
@@ -721,39 +742,34 @@ class TranslationOverlay(QWidget):
         """
         if not text or max_ink <= 0:
             return size
-        metrics = QFontMetricsF(font)
-        ink = metrics.tightBoundingRect(text).height()
+        ink = _ink_height(text, self.FONT_FAMILY, weight, size)
         if ink <= max_ink or ink <= 0:
             return size
-        # Nhảy theo tỉ lệ (thường hụt vì hinting) rồi nới lại tới mức lớn nhất vừa.
-        shrunk = max(self.MIN_FONT_PX, min(size, int(size * max_ink / ink)))
-        while shrunk < size:
-            probe = QFont(font)
-            probe.setPixelSize(shrunk + 1)
-            if QFontMetricsF(probe).tightBoundingRect(text).height() > max_ink:
-                break
-            shrunk += 1
-        font.setPixelSize(shrunk)
-        return shrunk
+        return self._largest_fitting(
+            size,
+            lambda candidate: _ink_height(
+                text, self.FONT_FAMILY, weight, candidate
+            )
+            <= max_ink,
+        )
 
-    def _width_size(self, font: QFont, item: dict, size: int) -> int:
+    def _width_size(self, item: dict, size: int, weight: int) -> int:
         """Cỡ chữ lớn nhất vừa footprint gốc và phần còn lại của vùng chọn."""
         ink = item["ink"]
         wanted = max(round(ink.width() * self.WIDTH_SLACK), 28)
         available = max(1, self._w - ink.left() - 2)
         budget = min(wanted, available)
-        advance = QFontMetricsF(font).horizontalAdvance(item["text"])
+        text = item["text"]
+        advance = _text_advance(text, self.FONT_FAMILY, weight, size)
         if advance <= budget or advance <= 0:
             return size
-
-        shrunk = max(self.MIN_FONT_PX, min(size, int(size * budget / advance)))
-        while shrunk > self.MIN_FONT_PX:
-            probe = QFont(font)
-            probe.setPixelSize(shrunk)
-            if QFontMetricsF(probe).horizontalAdvance(item["text"]) <= budget:
-                break
-            shrunk -= 1
-        return shrunk
+        return self._largest_fitting(
+            size,
+            lambda candidate: _text_advance(
+                text, self.FONT_FAMILY, weight, candidate
+            )
+            <= budget,
+        )
 
     def update_content(
         self, regions: list[OverlayRegion], image_size: tuple[int, int]
@@ -766,7 +782,7 @@ class TranslationOverlay(QWidget):
         self._live = on
         if on:
             self.setToolTip(
-                "Đang LIVE dịch · Dừng bằng nút Live trên thanh bar hoặc phím tắt"
+                "Đang dịch trực tiếp · Dừng bằng nút Màn hình trên bar hoặc phím tắt"
             )
         else:
             self.setToolTip("Trái: đóng ô này · Phải: đóng tất cả")
@@ -797,7 +813,7 @@ class TranslationOverlay(QWidget):
         """
         if not self._paint_regions:
             return
-        layer = alpha_text_layer(self.size())
+        layer = self._layer_cache.acquire(self.size())
         target = QPainter(layer) if layer is not None else painter
         target.setRenderHint(QPainter.TextAntialiasing, True)
         for line in self._paint_regions:
@@ -805,47 +821,21 @@ class TranslationOverlay(QWidget):
             # Chỉ vẽ chữ, không halo/viền: nền đã dựng lại (inpaint) và màu chữ
             # lấy theo bản gốc nên đã đủ tương phản — halo chỉ tạo riềm màu thừa.
             target.setPen(line.fg)
-            flags = (
-                Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignVCenter
-                if line.source_lines > 1
-                else Qt.AlignLeft | Qt.AlignVCenter
+            target.drawText(
+                line.text_rect or self._compute_text_rect(line),
+                line.text_flags,
+                line.text,
             )
-            target.drawText(self._line_text_rect(line), flags, line.text)
         if layer is not None:
             target.end()
             painter.drawImage(0, 0, layer)
 
     def _draw_live_badge(self, painter: QPainter) -> None:
-        """Khối LIVE kỹ thuật, báo overlay đang tự cập nhật."""
+        """Chấm accent nhỏ ở góc, báo overlay đang tự cập nhật."""
         painter.setRenderHint(QPainter.Antialiasing, True)
-        font = QFont("IBM Plex Mono", 9)
-        font.setWeight(QFont.DemiBold)
-        painter.setFont(font)
-        metrics = QFontMetrics(font)
-        label = "[LIVE]"
-        dot_d = 6
-        gap = 6
-        pad_x, pad_y = 9, 5
-        tw = metrics.horizontalAdvance(label)
-        th = metrics.height()
-        badge_w = pad_x * 2 + dot_d + gap + tw
-        badge_h = pad_y * 2 + max(th, dot_d)
-        x, y = 6, 6
-        rect = QRectF(x, y, badge_w, badge_h)
-        painter.fillRect(rect, QColor(10, 10, 11, 242))
-        painter.setPen(QPen(QColor(TOKENS["FOCUS_LINE"]), 1.0))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(rect)
-        cy = y + badge_h / 2
         painter.setBrush(QColor(TOKENS["FOCUS"]))
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(QRectF(x + pad_x, cy - dot_d / 2, dot_d, dot_d))
-        painter.setPen(QColor(TOKENS["FOCUS"]))
-        painter.drawText(
-            QRectF(x + pad_x + dot_d + gap, y, tw + 4, badge_h),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            label,
-        )
+        painter.setPen(QPen(QColor(15, 15, 17, 200), 1.0))
+        painter.drawEllipse(QRectF(7.0, 7.0, 7.0, 7.0))
 
     def mousePressEvent(self, event) -> None:
         if self._live:

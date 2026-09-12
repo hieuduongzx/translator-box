@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from config import config_path
@@ -106,7 +107,9 @@ def model_spec(model_id: str) -> OCRModelSpec:
     return OCR_MODEL_BY_ID.get(model_id, OCR_MODEL_BY_ID["ppocrv5_mobile"])
 
 
+@lru_cache(maxsize=None)
 def _rapidocr_package_models() -> Path | None:
+    """`find_spec` quét sys.path nên chỉ tra một lần: gói không tự mọc thêm."""
     spec = importlib.util.find_spec("rapidocr")
     if spec is None or spec.origin is None:
         return None
@@ -127,13 +130,24 @@ def model_installed(model_id: str) -> bool:
     )
 
 
+@lru_cache(maxsize=1)
 def available_onnx_providers() -> tuple[str, ...]:
+    """Provider của ONNX Runtime — hằng số trong một process nên cache.
+
+    `import onnxruntime` nạp DLL native (hàng trăm ms lần đầu) và `backend_status`
+    lại gọi hàm này nhiều lần cho mỗi lần kiểm tra engine.
+    """
     try:
         import onnxruntime as ort
 
         return tuple(ort.get_available_providers())
     except (ImportError, OSError):
         return ()
+
+
+@lru_cache(maxsize=1)
+def _openvino_available() -> bool:
+    return importlib.util.find_spec("openvino") is not None
 
 
 def backend_status(backend: str) -> tuple[bool, str]:
@@ -164,7 +178,7 @@ def backend_status(backend: str) -> tuple[bool, str]:
             else "Thiếu CUDA provider · cài onnxruntime-gpu và CUDA/cuDNN tương thích."
         )
     if backend == "openvino":
-        ready = importlib.util.find_spec("openvino") is not None
+        ready = _openvino_available()
         return ready, (
             "OpenVINO sẵn sàng cho thiết bị Intel."
             if ready
@@ -181,7 +195,7 @@ def resolve_backend(backend: str) -> str:
         return "cuda"
     if "DmlExecutionProvider" in providers:
         return "directml"
-    if importlib.util.find_spec("openvino") is not None:
+    if _openvino_available():
         return "openvino"
     return "cpu"
 
@@ -231,22 +245,28 @@ def get_rapid_engine(model_id: str, backend: str):
 
     model = model_spec(model_id)
     resolved = resolve_backend(backend)
+    # Engine đã dựng thì trả ngay: kiểm tra lại backend + file model là I/O đĩa
+    # và truy vấn provider native, mà OCR live gọi hàm này mỗi frame.
+    engine = _engine_cache.get((model.id, resolved))
+    if engine is not None:
+        return engine
     ready, detail = backend_status(resolved)
     if not ready:
         raise RuntimeError(detail)
-    cache_key = (model.id, resolved)
-    if not model_installed(model.id):
-        _engine_cache.pop(cache_key, None)
-    engine = _engine_cache.get(cache_key)
-    if engine is None:
-        model_root().mkdir(parents=True, exist_ok=True)
-        engine = RapidOCR(params=_engine_params(model, resolved))
-        _engine_cache[cache_key] = engine
+    model_root().mkdir(parents=True, exist_ok=True)
+    engine = RapidOCR(params=_engine_params(model, resolved))
+    _engine_cache[(model.id, resolved)] = engine
     return engine
+
+
+def forget_engines() -> None:
+    """Bỏ engine đã cache (sau khi tải model mới) để lần sau dựng lại."""
+    _engine_cache.clear()
 
 
 def download_model(model_id: str, backend: str = "cpu") -> None:
     """Tải và kiểm tra model bằng chính loader có checksum của RapidOCR."""
+    forget_engines()
     get_rapid_engine(model_id, backend)
     if not model_installed(model_id):
         paths = ", ".join(str(path) for path in model_files(model_id))

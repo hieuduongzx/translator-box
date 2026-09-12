@@ -24,6 +24,10 @@ datas += collect_data_files("onnxruntime")
 binaries = collect_dynamic_libs("onnxruntime")
 
 # App chỉ dùng backend ONNX Runtime; engine được nạp động nên phải khai hiddenimport.
+# `pyperclip` được nạp qua importlib.import_module (services._require) và
+# `keyboard`/`mouse` nằm trong try/except — phân tích tĩnh của PyInstaller không
+# thấy chắc chắn cả ba, nên khai báo tường minh. Thiếu chúng thì bản đóng gói vẫn
+# chạy nhưng dịch văn bản chọn / phím tắt / chuột phải sẽ hỏng khi người dùng bấm.
 hiddenimports = [
     "rapidocr",
     "rapidocr.inference_engine.onnxruntime",
@@ -33,7 +37,24 @@ hiddenimports = [
     "cv2",
     "numpy",
     "PIL",
-] + (["winsdk"] if os.name == "nt" else [])
+    "pyperclip",
+    "keyboard",
+    "mouse",
+] + (
+    [
+        # Windows OCR nạp bốn namespace này bằng `import` bên trong hàm; khai báo
+        # tường minh vì phân tích tĩnh không lần được qua namespace package.
+        "winsdk",
+        "winsdk.windows.globalization",
+        "winsdk.windows.graphics.imaging",
+        "winsdk.windows.media.ocr",
+        "winsdk.windows.storage",
+        # Thu âm thanh hệ thống (WASAPI loopback) — import lười trong soniox.
+        "pyaudiowpatch",
+    ]
+    if os.name == "nt"
+    else []
+)
 
 a = Analysis(
     [os.path.join(APP, "main.py")],

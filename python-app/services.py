@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
@@ -24,14 +26,80 @@ import ocr_runtime
 
 _UA = "ScreenTranslator2K-Py/0.1"
 
-# Số request dịch chạy song song khi phải dịch từng dòng riêng.
+# Số request dịch chạy song song khi phải dịch từng dòng riêng. Pool được tạo
+# một lần: dựng ThreadPoolExecutor mới cho mỗi lần dịch (như bản trước) nghĩa là
+# spawn rồi hủy tới 6 thread OS cho mỗi frame live.
 _TRANSLATE_WORKERS = 6
+_translate_pool: ThreadPoolExecutor | None = None
+_translate_pool_lock = threading.Lock()
+
+
+def _translate_executor() -> ThreadPoolExecutor:
+    global _translate_pool
+    with _translate_pool_lock:
+        if _translate_pool is None:
+            _translate_pool = ThreadPoolExecutor(
+                max_workers=_TRANSLATE_WORKERS,
+                thread_name_prefix="translate",
+            )
+        return _translate_pool
 
 
 @lru_cache(maxsize=None)
 def _package_available(name: str) -> bool:
     """`find_spec` quét sys.path nên không gọi lại mỗi lần OCR (gói không tự mọc)."""
     return importlib.util.find_spec(name) is not None
+
+
+# Tên gói pip của các module import lười, để câu lỗi nói đúng thứ cần cài.
+_MODULE_PACKAGES = {
+    "keyboard": "keyboard",
+    "pyperclip": "pyperclip",
+    "PIL": "Pillow",
+}
+
+
+def _require(name: str):
+    """Nạp module chỉ cần khi dùng; thiếu gói thì báo cách cài bằng tiếng Việt.
+
+    Những thư viện này được import lười (chỉ khi người dùng bấm đúng chức năng)
+    nên môi trường thiếu gói không lộ ra lúc khởi động. Nếu để ModuleNotFoundError
+    tự nổi lên thì khung dịch hiện đúng chuỗi thô của Python — "No module named
+    'pyperclip'" — không nói được phải làm gì để sửa.
+    """
+    try:
+        return importlib.import_module(name)
+    except ImportError as exc:
+        package = _MODULE_PACKAGES.get(name, name)
+        raise RuntimeError(_missing_packages_message([package])) from exc
+
+
+def _missing_packages_message(packages: list[str]) -> str:
+    names = ", ".join(f"'{package}'" for package in packages)
+    plural = "thư viện" if len(packages) == 1 else "các thư viện"
+    return (
+        f"Thiếu {plural} {names}. Cài đầy đủ phụ thuộc bằng: "
+        "pip install -r python-app/requirements.txt"
+    )
+
+
+def missing_runtime_packages() -> str:
+    """Cảnh báo khi thiếu gói mà chức năng cốt lõi cần, kiểm ngay lúc khởi động.
+
+    `keyboard`/`pyperclip`/`Pillow` được import lười nên môi trường thiếu gói chỉ
+    lộ ra khi người dùng đã bấm phím tắt và chờ — muộn và khó hiểu. Trả về chuỗi
+    rỗng khi đủ gói.
+    """
+    missing = [
+        package
+        for module, package in (
+            ("keyboard", "keyboard"),
+            ("pyperclip", "pyperclip"),
+            ("PIL", "Pillow"),
+        )
+        if not _package_available(module)
+    ]
+    return _missing_packages_message(missing) if missing else ""
 
 
 @dataclass(frozen=True)
@@ -58,7 +126,7 @@ def ocr(
     errors: list[str] = []
     ran = False
     for candidate in _ocr_candidates(engine):
-        available, detail = ocr_engine_status(candidate)
+        available, detail = ocr_engine_status(candidate, model, backend)
         if not available:
             errors.append(detail)
             continue
@@ -91,7 +159,7 @@ def ocr_layout(
     errors: list[str] = []
     ran = False
     for candidate in _ocr_candidates(engine):
-        available, detail = ocr_engine_status(candidate)
+        available, detail = ocr_engine_status(candidate, model, backend)
         if not available:
             errors.append(detail)
             continue
@@ -135,6 +203,13 @@ def _is_cjk(ch: str) -> bool:
     )
 
 
+def _is_vertical_cjk(region: "TextRegion") -> bool:
+    """True nếu box là một cột chữ dọc CJK (cao hơn rộng rõ rệt)."""
+    width = max(1, region.bbox[2] - region.bbox[0])
+    height = max(1, region.bbox[3] - region.bbox[1])
+    return height > width * 1.35 and any(_is_cjk(ch) for ch in region.text)
+
+
 def _join_wrapped(prev: str, nxt: str) -> str:
     """Nối hai dòng bị wrap: bỏ dấu cách với CJK, gộp gạch nối cuối dòng."""
     prev = prev.rstrip()
@@ -156,7 +231,7 @@ def _horizontal_gap(a: TextRegion, b: TextRegion) -> int:
     return max(0, max(a.bbox[0], b.bbox[0]) - min(a.bbox[2], b.bbox[2]))
 
 
-def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:
+def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:  # noqa: C901
     """Gom các ô OCR có cùng tâm dọc thành từng *dòng*, sắp trái→phải.
 
     OCR (nhất là PP-OCR) hay tách một dòng hiển thị thành nhiều ô cỡ từ/cụm,
@@ -174,19 +249,32 @@ def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:
 
     items.sort(key=lambda region: (y_center(region), region.bbox[0]))
     lines: list[dict] = []
+    # Dung sai dọc lớn nhất có thể (nhánh gap > 0). Dòng lệch tâm hơn mức này thì
+    # chắc chắn bị loại, nên không cần đo khoảng trống ngang với từng ô của nó —
+    # phép đo đó là O(số ô) và trước đây chạy cho MỌI cặp (ô, dòng).
+    center_cutoff = median_h * 0.78
     for region in items:
         center = y_center(region)
+        # Cột chữ dọc CJK không được gộp vào "dòng ngang": các cột cạnh nhau sẽ
+        # được nhóm và sắp phải→trái ở bước khối, còn gộp ngang sẽ đảo thứ tự đọc.
+        region_vertical = _is_vertical_cjk(region)
         candidates = []
-        for line in lines:
-            center_delta = abs(center - line["center"])
-            gap = min(_horizontal_gap(region, item) for item in line["regions"])
-            center_limit = median_h * (0.78 if gap > 0 else 0.55)
-            if center_delta > center_limit:
-                continue
-            # Chữ trong cùng một dòng chỉ cách nhau vài lần chiều cao glyph.
-            # Giới hạn này ngăn hai speech bubble/panel ngang hàng bị ghép chung.
-            if gap <= max(12.0, median_h * 1.8):
-                candidates.append((gap, center_delta, line))
+        # Mỗi cột dọc là một đơn vị riêng: gộp ngang các cột sẽ đảo thứ tự đọc.
+        if not region_vertical:
+            for line in lines:
+                if line["vertical"]:
+                    continue
+                center_delta = abs(center - line["center"])
+                if center_delta > center_cutoff:
+                    continue
+                gap = min(_horizontal_gap(region, item) for item in line["regions"])
+                center_limit = median_h * (0.78 if gap > 0 else 0.55)
+                if center_delta > center_limit:
+                    continue
+                # Chữ trong cùng một dòng chỉ cách nhau vài lần chiều cao glyph.
+                # Giới hạn này ngăn hai speech bubble/panel ngang hàng bị ghép chung.
+                if gap <= max(12.0, median_h * 1.8):
+                    candidates.append((gap, center_delta, line))
         if candidates:
             line = min(candidates, key=lambda value: (value[0], value[1]))[2]
             line["regions"].append(region)
@@ -200,6 +288,7 @@ def _group_into_lines(regions: list[TextRegion]) -> tuple[list[dict], float]:
                     "top": region.bbox[1],
                     "bottom": region.bbox[3],
                     "center": center,
+                    "vertical": region_vertical,
                 }
             )
     for line in lines:
@@ -264,15 +353,19 @@ def _same_text_block(a: TextRegion, b: TextRegion) -> bool:
     # Dòng ngang xếp trên/dưới trong cùng speech bubble. Cho phép dòng ngắn
     # được căn giữa so với dòng dài, nhưng không bắc cầu sang panel bên cạnh.
     centers_close = abs((al + ar) - (bl + br)) / 2 <= max(aw, bw) * 0.58
+    # Khe hở dọc giữa hai dòng liền kề của cùng một đoạn hiếm khi vượt quá chiều
+    # cao glyph, kể cả khi giãn dòng 2.0. Ngưỡng cũ quá chặt nên đoạn 2 dòng bị
+    # tách thành hai khối và bị dịch rời từng dòng → mất liền mạch. Cho phép tới
+    # 1,1 lần chiều cao nhưng vẫn chặn hai bubble cách xa nhau.
     stacked = (
-        vertical_gap <= max(8.0, min(ah, bh) * 0.35)
+        vertical_gap <= max(12.0, min(ah, bh) * 1.1)
         and (x_overlap >= min(aw, bw) * 0.18 or centers_close)
     )
 
     # Manga Nhật có thể trả mỗi cột dọc thành một box. Ghép các cột sát nhau
     # nếu chúng chồng phần lớn theo trục dọc; thứ tự đọc sẽ được xử lý bên dưới.
-    a_vertical = ah > aw * 1.35 and any(_is_cjk(ch) for ch in a.text)
-    b_vertical = bh > bw * 1.35 and any(_is_cjk(ch) for ch in b.text)
+    a_vertical = _is_vertical_cjk(a)
+    b_vertical = _is_vertical_cjk(b)
     adjacent_columns = (
         a_vertical
         and b_vertical
@@ -311,12 +404,7 @@ def _connected_text_groups(
 
 
 def _merge_text_block(items: list[TextRegion]) -> TextRegion:
-    vertical = all(
-        region.bbox[3] - region.bbox[1]
-        > (region.bbox[2] - region.bbox[0]) * 1.35
-        and any(_is_cjk(ch) for ch in region.text)
-        for region in items
-    )
+    vertical = all(_is_vertical_cjk(region) for region in items)
     if vertical:
         items.sort(key=lambda region: (-region.bbox[0], region.bbox[1]))
     else:
@@ -504,8 +592,18 @@ def _prepare_rapidocr_input(
             if width < 24 or height < 24:
                 return source_path, 1.0, None
 
-            sample = rgb.copy()
-            sample.thumbnail((128, 128))
+            # Chỉ cần một ảnh nhỏ để đoán ảnh có gần đơn sắc hay không: resize
+            # bilinear rẻ hơn `copy()` + `thumbnail()` (mặc định là bicubic) và
+            # không phải cấp phát thêm một bản đầy đủ của ảnh nguồn.
+            longest = max(width, height)
+            sample_scale = min(1.0, 128 / longest)
+            sample = rgb.resize(
+                (
+                    max(1, round(width * sample_scale)),
+                    max(1, round(height * sample_scale)),
+                ),
+                Image.Resampling.BILINEAR,
+            )
             saturation = sample.convert("HSV").getchannel("S").histogram()
             pixel_count = max(1, sample.width * sample.height)
             grayscale_fraction = sum(saturation[:28]) / pixel_count
@@ -513,7 +611,6 @@ def _prepare_rapidocr_input(
             if grayscale_fraction < 0.82:
                 return source_path, 1.0, None
 
-            longest = max(width, height)
             scale = min(1.6, 2400.0 / longest)
             if scale < 1.15:
                 return source_path, 1.0, None
@@ -526,7 +623,8 @@ def _prepare_rapidocr_input(
             temporary_path = handle.name
             handle.close()
             try:
-                resized.save(temporary_path, "PNG")
+                # File chỉ sống tới khi engine đọc xong → nén nhẹ nhất.
+                resized.save(temporary_path, "PNG", compress_level=1)
             except Exception:
                 try:
                     os.unlink(temporary_path)
@@ -635,18 +733,33 @@ def _ocr_windows_data(
     return asyncio.run(_run())
 
 
-def capture(bbox: tuple[int, int, int, int], path: str | Path) -> None:
-    """Chụp vùng bbox=(left, top, right, bottom) và lưu PNG."""
+def _grab_screen(bbox: tuple[int, int, int, int]):
+    """Chụp vùng bbox trên toàn bộ desktop ảo (tách ra để test thay được)."""
     from PIL import ImageGrab
 
-    image = ImageGrab.grab(bbox=bbox, all_screens=True)
+    return ImageGrab.grab(bbox=bbox, all_screens=True)
+
+
+def capture(bbox: tuple[int, int, int, int], path: str | Path) -> bytes:
+    """Chụp vùng bbox=(left, top, right, bottom), lưu PNG và trả về chữ ký ảnh.
+
+    Chữ ký (ảnh xám 48×48) được tính TỪ ẢNH ĐANG TRONG RAM. Trước đây vòng lặp
+    live phải mở và giải nén lại đúng file PNG vừa ghi chỉ để so sánh hai frame —
+    tốn 13–40 ms mỗi frame cho một phép chỉ mất ~2 ms nếu làm ngay tại đây.
+    PNG cũng ghi ở mức nén 1: file tạm sống vài trăm ms nên nén sâu là vô nghĩa.
+    """
+    from PIL import Image
+
+    image = _grab_screen(bbox)
     longest = max(image.size)
     if longest > 1800:
         scale = 1800 / longest
         image = image.resize(
-            (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+            (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+            Image.Resampling.BILINEAR,
         )
-    image.save(path)
+    image.save(path, compress_level=1)
+    return image.convert("L").resize((48, 48), Image.Resampling.BILINEAR).tobytes()
 
 
 def _dominant_ring_color(image) -> tuple[int, int, int] | None:
@@ -820,6 +933,79 @@ def _cv2_available() -> bool:
     return _package_available("cv2") and _package_available("numpy")
 
 
+# Nền đã xoá chữ của một miếng ảnh: `cv2.inpaint` là phần tốn CPU nhất của
+# pipeline (24 ms cho một dòng, ~230 ms cho một speech bubble) và live chụp lại
+# gần như cùng một vùng mỗi frame. Khoá theo nội dung miếng ảnh nên chỉ frame nào
+# thật sự đổi pixel mới phải inpaint lại. Có lock vì overlay và live dùng chung
+# cache từ nhiều worker thread.
+_INPAINT_CACHE_LIMIT = 96
+_inpaint_cache: "OrderedDict[bytes, tuple]" = OrderedDict()
+_inpaint_cache_lock = threading.Lock()
+
+
+def _inpaint_cache_get(key: bytes):
+    with _inpaint_cache_lock:
+        payload = _inpaint_cache.get(key)
+        if payload is not None:
+            _inpaint_cache.move_to_end(key)
+        return payload
+
+
+def _inpaint_cache_put(key: bytes, payload: tuple) -> None:
+    with _inpaint_cache_lock:
+        _inpaint_cache[key] = payload
+        _inpaint_cache.move_to_end(key)
+        while len(_inpaint_cache) > _INPAINT_CACHE_LIMIT:
+            _inpaint_cache.popitem(last=False)
+
+
+def _region_payload(cv2, np, patch, inner: tuple[int, int, int, int]):
+    """(bg, fg, rgb nền đã xoá chữ, hộp ink trong patch, độ dày nét) của một miếng."""
+    ph, pw = patch.shape[:2]
+    inner_left, inner_top, inner_right, inner_bottom = inner
+
+    bg = _bg_from_patch(np, patch, inner_left, inner_top, inner_right, inner_bottom)
+    lum_bg = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+    fg = (24, 24, 24) if lum_bg > 140 else (240, 240, 240)
+    if ph < 2 or pw < 2:
+        return bg, fg, None, None, 0.0
+
+    # Mặt nạ nét chữ: chỉ trong vùng chữ gốc, pixel lệch xa màu nền.
+    bg_arr = np.array(bg, dtype=np.int16)
+    diff = np.abs(patch.astype(np.int16) - bg_arr).max(axis=2)
+    mask = np.zeros((ph, pw), dtype=np.uint8)
+    if inner_right > inner_left and inner_bottom > inner_top:
+        region_diff = diff[inner_top:inner_bottom, inner_left:inner_right]
+        mask[inner_top:inner_bottom, inner_left:inner_right] = np.where(
+            region_diff > 55, 255, 0
+        ).astype(np.uint8)
+
+    stroke = mask > 0
+    stroke_count = int(stroke.sum())
+    # Mặt nạ bất thường (bg sai → xoá gần hết) → không inpaint, tô đặc.
+    if stroke_count < 4 or stroke_count > 0.7 * ph * pw:
+        return bg, fg, None, None, 0.0
+
+    # Màu chữ dịch = màu chữ gốc (median pixel lõi nét) để trông giống bản gốc;
+    # chỉ thay bằng đen/trắng khi màu gốc quá sát nền (mất tương phản).
+    text_color = _core_text_color(np, patch, stroke, diff) or fg
+    lum_text = 0.299 * text_color[0] + 0.587 * text_color[1] + 0.114 * text_color[2]
+    chosen_fg = text_color if abs(lum_text - lum_bg) >= 70 else fg
+
+    # Hộp ink + độ đậm đo TRƯỚC khi dilate (dilate làm nét phình ra).
+    outline = np.zeros((ph, pw), dtype=bool)
+    if inner_right > inner_left and inner_bottom > inner_top:
+        outline[inner_top:inner_bottom, inner_left:inner_right] = (
+            diff[inner_top:inner_bottom, inner_left:inner_right] > 26
+        )
+    ink_box, thickness = _ink_metrics(np, stroke, outline)
+
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    clean = cv2.inpaint(np.ascontiguousarray(patch), mask, 3, cv2.INPAINT_TELEA)
+    rgb = np.ascontiguousarray(clean, dtype=np.uint8).tobytes()
+    return bg, chosen_fg, rgb, ink_box, thickness
+
+
 def reconstruct_layout(
     image_path: str | Path, regions: list[TextRegion]
 ) -> tuple[tuple[int, int], list[RegionVisual]]:
@@ -854,53 +1040,30 @@ def reconstruct_layout(
             region.bbox, width, height
         )
         rect = (outer_left, outer_top, outer_right, outer_bottom)
-        patch = arr[outer_top:outer_bottom, outer_left:outer_right]
+        patch = np.ascontiguousarray(
+            arr[outer_top:outer_bottom, outer_left:outer_right]
+        )
         ph, pw = patch.shape[:2]
 
-        inner_left = max(0, min(region.bbox[0], width) - outer_left)
-        inner_top = max(0, min(region.bbox[1], height) - outer_top)
-        inner_right = min(pw, max(0, min(region.bbox[2], width) - outer_left))
-        inner_bottom = min(ph, max(0, min(region.bbox[3], height) - outer_top))
+        inner = (
+            max(0, min(region.bbox[0], width) - outer_left),
+            max(0, min(region.bbox[1], height) - outer_top),
+            min(pw, max(0, min(region.bbox[2], width) - outer_left)),
+            min(ph, max(0, min(region.bbox[3], height) - outer_top)),
+        )
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(f"{pw}x{ph}:{inner}\n".encode())
+        digest.update(patch.tobytes())
+        key = digest.digest()
+        payload = _inpaint_cache_get(key)
+        if payload is None:
+            payload = _region_payload(cv2, np, patch, inner)
+            _inpaint_cache_put(key, payload)
+        bg, fg, rgb, ink_box, thickness = payload
 
-        bg = _bg_from_patch(np, patch, inner_left, inner_top, inner_right, inner_bottom)
-        lum_bg0 = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-        fg = (24, 24, 24) if lum_bg0 > 140 else (240, 240, 240)
-
-        if ph < 2 or pw < 2:
+        if rgb is None:
             visuals.append(RegionVisual(rect, None, None, bg, fg))
             continue
-
-        # Mặt nạ nét chữ: chỉ trong vùng chữ gốc, pixel lệch xa màu nền.
-        bg_arr = np.array(bg, dtype=np.int16)
-        diff = np.abs(patch.astype(np.int16) - bg_arr).max(axis=2)
-        mask = np.zeros((ph, pw), dtype=np.uint8)
-        if inner_right > inner_left and inner_bottom > inner_top:
-            region_diff = diff[inner_top:inner_bottom, inner_left:inner_right]
-            mask[inner_top:inner_bottom, inner_left:inner_right] = np.where(
-                region_diff > 55, 255, 0
-            ).astype(np.uint8)
-
-        stroke = mask > 0
-        stroke_count = int(stroke.sum())
-        # Mặt nạ bất thường (bg sai → xoá gần hết) → không inpaint, tô đặc.
-        if stroke_count < 4 or stroke_count > 0.7 * ph * pw:
-            visuals.append(RegionVisual(rect, None, None, bg, fg))
-            continue
-
-        # Màu chữ dịch = màu chữ gốc (median pixel lõi nét) để trông giống bản
-        # gốc; chỉ thay bằng đen/trắng khi màu gốc quá sát nền (mất tương phản).
-        text_color = _core_text_color(np, patch, stroke, diff) or fg
-        lum_bg = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-        lum_text = 0.299 * text_color[0] + 0.587 * text_color[1] + 0.114 * text_color[2]
-        chosen_fg = text_color if abs(lum_text - lum_bg) >= 70 else fg
-
-        # Hộp ink + độ đậm đo TRƯỚC khi dilate (dilate làm nét phình ra).
-        outline = np.zeros((ph, pw), dtype=bool)
-        if inner_right > inner_left and inner_bottom > inner_top:
-            outline[inner_top:inner_bottom, inner_left:inner_right] = (
-                diff[inner_top:inner_bottom, inner_left:inner_right] > 26
-            )
-        ink_box, thickness = _ink_metrics(np, stroke, outline)
         ink_rect = None
         if ink_box is not None:
             ink_rect = (
@@ -909,12 +1072,8 @@ def reconstruct_layout(
                 outer_left + ink_box[2],
                 outer_top + ink_box[3],
             )
-
-        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
-        clean = cv2.inpaint(np.ascontiguousarray(patch), mask, 3, cv2.INPAINT_TELEA)
-        rgb = np.ascontiguousarray(clean, dtype=np.uint8).tobytes()
         visuals.append(
-            RegionVisual(rect, rgb, (pw, ph), bg, chosen_fg, ink_rect, thickness)
+            RegionVisual(rect, rgb, (pw, ph), bg, fg, ink_rect, thickness)
         )
 
     return (width, height), visuals
@@ -1051,13 +1210,10 @@ def translate_regions(
         return lines
 
     # Một số dịch vụ gộp dòng; khi đó ưu tiên đúng layout hơn một request duy nhất.
-    # Các request còn lại chạy SONG SONG — trước đây nối tiếp nên overlay nhiều
-    # dòng phải chờ cộng dồn độ trễ mạng của từng dòng.
+    # Các request còn lại chạy SONG SONG trên pool dùng chung — trước đây nối tiếp
+    # nên overlay nhiều dòng phải chờ cộng dồn độ trễ mạng của từng dòng.
     texts = [region.text for region in regions]
-    with ThreadPoolExecutor(
-        max_workers=min(_TRANSLATE_WORKERS, len(texts))
-    ) as pool:
-        return list(pool.map(translate_one, texts))
+    return list(_translate_executor().map(translate_one, texts))
 
 
 def translate(
@@ -1257,28 +1413,34 @@ _BING_TARGET = {"zh-CN": "zh-Hans"}
 # Token JWT của Edge translate (hết hạn ~10 phút) — cache để đỡ gọi lại.
 _bing_token: dict = {"value": None, "ts": 0.0}
 # Nhiều dòng dịch song song → khoá để chỉ một thread đi lấy token.
-_bing_token_lock = threading.Lock()
+_bing_token_fetch_lock = threading.Lock()
 
 
 def _bing_get_token(force: bool = False) -> str:
+    """Token JWT của Edge translate; chỉ một thread đi lấy, các thread khác chờ.
+
+    Lock KHÔNG bao trùm lời gọi mạng: nếu endpoint treo tới hết timeout thì cả
+    sáu worker dịch song song sẽ bị chặn theo, dù chúng chỉ cần đọc token.
+    """
+
     def fresh(now: float) -> bool:
         return bool(_bing_token["value"]) and now - _bing_token["ts"] <= 480
 
     if not force and fresh(time.time()):
         return _bing_token["value"]
-    with _bing_token_lock:
-        now = time.time()
+    with _bing_token_fetch_lock:
         # Thread khác có thể đã làm mới trong lúc mình chờ khoá.
-        if not force and fresh(now):
+        if not force and fresh(time.time()):
             return _bing_token["value"]
-        req = urllib.request.Request(
+        request = urllib.request.Request(
             "https://edge.microsoft.com/translate/auth",
             headers={"User-Agent": _UA},
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            _bing_token["value"] = resp.read().decode("utf-8").strip()
-            _bing_token["ts"] = now
-        return _bing_token["value"]
+        with urllib.request.urlopen(request, timeout=15) as response:
+            token = response.read().decode("utf-8").strip()
+        _bing_token["value"] = token
+        _bing_token["ts"] = time.time()
+        return token
 
 
 def _translate_bing(text: str, target: str) -> str:
@@ -1327,7 +1489,7 @@ def _wait_modifiers_released(timeout: float = 1.0) -> None:
     `keyboard.release()` khi phím đang giữ vật lý sẽ làm lệch state của thư viện
     và gây kẹt Ctrl toàn hệ thống. Hết `timeout` thì tiếp tục (best-effort).
     """
-    import keyboard
+    keyboard = _require("keyboard")
 
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1350,7 +1512,7 @@ def _wait_clipboard_text(timeout: float = 0.6) -> str:
     Trước đây code ngủ cứng 0,22 s cho mọi trường hợp — vừa chậm ở app phản hồi
     nhanh, vừa thiếu với app chậm. Poll ngắn nhanh hơn và bền hơn.
     """
-    import pyperclip
+    pyperclip = _require("pyperclip")
 
     deadline = time.time() + timeout
     while True:
@@ -1365,8 +1527,8 @@ def _wait_clipboard_text(timeout: float = 0.6) -> str:
 
 def copy_selected_text() -> str:
     """Mô phỏng Ctrl+C rồi đọc clipboard để lấy văn bản đang bôi đen."""
-    import keyboard
-    import pyperclip
+    keyboard = _require("keyboard")
+    pyperclip = _require("pyperclip")
 
     _wait_modifiers_released()
     previous = ""
@@ -1392,9 +1554,8 @@ def copy_selected_text() -> str:
 
 def read_clipboard() -> str:
     """Đọc nội dung clipboard hiện tại (rỗng nếu lỗi) — để khôi phục sau khi dán."""
-    import pyperclip
-
     try:
+        pyperclip = _require("pyperclip")
         return pyperclip.paste() or ""
     except Exception:  # noqa: BLE001
         return ""
@@ -1406,8 +1567,8 @@ def paste_replacement(text: str, restore: str | None = None) -> None:
     Ứng dụng đích vẫn đang giữ focus (HUD không cướp focus), nên Ctrl+V rơi vào
     đúng ô nhập của họ. `restore` là nội dung clipboard cần trả lại sau khi dán.
     """
-    import keyboard
-    import pyperclip
+    keyboard = _require("keyboard")
+    pyperclip = _require("pyperclip")
 
     try:
         pyperclip.copy(text)

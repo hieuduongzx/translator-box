@@ -50,7 +50,6 @@ _LEGACY_HUD_STYLE_DEFAULTS: dict[str, Any] = {
 }
 
 DEFAULT_HOTKEYS = {
-    "selected_text": "ctrl+b",
     "selected_text_replace": "alt+b",
     "clipboard_image_replace": "ctrl+alt+v",
     "clipboard_image_to_text": "ctrl+alt+t",
@@ -298,6 +297,11 @@ class AppConfig:
             backend if isinstance(backend, str) and backend in _OCR_BACKENDS else "auto"
         )
         self.ocr_acceleration = _boolean(source.get("ocr_acceleration"), False)
+        # Bật: mỗi lần người dùng Ctrl+C ở bất kỳ ứng dụng nào thì văn bản copy
+        # được tự dịch vào khung, không cần phím tắt riêng cho chức năng này.
+        self.auto_translate_clipboard = _boolean(
+            source.get("auto_translate_clipboard"), False
+        )
         self.custom_providers = _custom_providers(source.get("custom_providers"))
         custom_ids = {provider["id"] for provider in self.custom_providers}
         translator = source.get("translator")
@@ -403,6 +407,10 @@ class AppConfig:
         )
         self.hud_shadow_color = _argb_color(
             style_source.get("hud_shadow_color"), defaults["hud_shadow_color"]
+        )
+        # Buộc nền khung dịch trong suốt bất kể cài đặt nền/màu bên dưới.
+        self.hud_frame_transparent = _boolean(
+            source.get("hud_frame_transparent"), False
         )
         self.hud_pinned = _boolean(source.get("hud_pinned"), True)
 
@@ -560,6 +568,7 @@ class AppConfig:
             "ocr_model": self.ocr_model,
             "ocr_backend": self.ocr_backend,
             "ocr_acceleration": self.ocr_acceleration,
+            "auto_translate_clipboard": self.auto_translate_clipboard,
             "translator": self.translator,
             "llm_endpoint": self.llm_endpoint,
             "llm_api_key": self.llm_api_key,
@@ -580,6 +589,7 @@ class AppConfig:
             "hud_border_color": self.hud_border_color,
             "hud_background_color": self.hud_background_color,
             "hud_background_enabled": self.hud_background_enabled,
+            "hud_frame_transparent": self.hud_frame_transparent,
             "hud_shadow_radius": self.hud_shadow_radius,
             "hud_shadow_color": self.hud_shadow_color,
             "hud_pinned": self.hud_pinned,

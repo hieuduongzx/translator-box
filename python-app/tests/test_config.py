@@ -56,10 +56,9 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_api_key, "")
         self.assertEqual(settings.llm_model, "deepseek-v4-flash")
         self.assertTrue(settings.hud_pinned)
-        self.assertEqual(
-            settings.hotkeys["selected_text"],
-            config.DEFAULT_HOTKEYS["selected_text"],
-        )
+        self.assertNotIn("selected_text", settings.hotkeys)
+        self.assertFalse(settings.auto_translate_clipboard)
+        self.assertFalse(settings.hud_frame_transparent)
         self.assertEqual(settings.hotkeys["clipboard_image_replace"], "ctrl+alt+v")
         self.assertEqual(settings.hotkeys["clipboard_image_to_text"], "ctrl+alt+t")
 
@@ -70,6 +69,20 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.hotkeys["clipboard_image_replace"], "ctrl+alt+v")
         self.assertEqual(settings.hotkeys["clipboard_image_to_text"], "ctrl+alt+t")
+
+    def test_auto_clipboard_and_transparent_frame_persist(self) -> None:
+        settings = config.AppConfig(
+            {
+                "auto_translate_clipboard": True,
+                "hud_frame_transparent": True,
+            }
+        )
+
+        self.assertTrue(settings.auto_translate_clipboard)
+        self.assertTrue(settings.hud_frame_transparent)
+        payload = settings.to_dict()
+        self.assertTrue(payload["auto_translate_clipboard"])
+        self.assertTrue(payload["hud_frame_transparent"])
 
     def test_removed_ocr_model_falls_back_to_v5_mobile(self) -> None:
         settings = config.AppConfig({"ocr_model": "ppocrv5_server"})

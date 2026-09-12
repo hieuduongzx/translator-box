@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 import overlay
 import services
 from desktop_apps import foreground_application_id
-from ui_utils import _image_signature, _sig_differs
+from ui_utils import _sig_differs
 
 if TYPE_CHECKING:
     from hud_window import HUDWindow
@@ -52,6 +52,14 @@ class LiveSession:
     stop_event: threading.Event = field(default_factory=threading.Event)
     token: object = field(default_factory=object)
     thread: threading.Thread | None = None
+    # Bản dịch đã lấy trong phiên này, theo đúng chuỗi gốc. Live chụp lại cùng
+    # một vùng nên phần lớn dòng không đổi giữa các frame; không có memo thì mỗi
+    # frame lại bắn một request mạng cho đúng câu vừa dịch xong.
+    translations: dict[str, str] = field(default_factory=dict)
+
+
+# Giới hạn memo của một phiên live để phiên dài không phình bộ nhớ.
+_LIVE_TRANSLATION_MEMO_LIMIT = 512
 
 
 class TranslationWorkflowController:
@@ -174,7 +182,6 @@ class TranslationWorkflowController:
         if self.busy:
             return
         actions = {
-            "selected_text": self._translate_selected_text,
             "clipboard_image_replace": self._translate_clipboard_image_replace,
             "clipboard_image_to_text": self._translate_clipboard_image_to_text,
             "selected_text_replace": self._translate_selected_text_replace,
@@ -185,15 +192,22 @@ class TranslationWorkflowController:
         if handler is not None:
             handler()
 
-    def _translate_selected_text(self) -> None:
+    def translate_clipboard_text(self, text: str) -> None:
+        """Dịch văn bản vừa được copy vào khung (chế độ tự dịch clipboard).
+
+        Được gọi từ HUD khi clipboard đổi nội dung dạng văn bản; không cần phím
+        tắt riêng vì Ctrl+C của người dùng chính là thao tác kích hoạt.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
         self._set_busy(True)
-        self.hud.set_status("Đang lấy văn bản chọn…", "busy")
+        self.hud.set_status("Đang dịch văn bản vừa copy…", "busy")
         options = self._options()
 
         def job() -> tuple[str, str]:
-            source = services.copy_selected_text()
-            self._emit(lambda: self._show_source_pending())
-            return source, self._translate_text(source, options)
+            self._emit(self._show_source_pending)
+            return text, self._translate_text(text, options)
 
         self._run_text_worker(job)
 
@@ -489,8 +503,7 @@ class TranslationWorkflowController:
                     )
                 started_at = time.perf_counter()
                 try:
-                    services.capture(session.bbox, image_path)
-                    signature = _image_signature(image_path)
+                    signature = services.capture(session.bbox, image_path)
                     if _sig_differs(previous_signature, signature):
                         previous_signature = signature
                         self._live_process(session, image_path)
@@ -500,22 +513,26 @@ class TranslationWorkflowController:
                         lambda: self._live_error_if_current(session.token, message)
                     )
                 elapsed = time.perf_counter() - started_at
-                session.stop_event.wait(max(0.05, session.interval_seconds - elapsed))
+                # Một frame nặng (OCR + dịch qua mạng + inpaint) dễ vượt cả chu kỳ.
+                # Sàn cũ 0,05 s khiến vòng lặp chạy gần như liên tục và ghim CPU
+                # suốt phiên; luôn nghỉ ít nhất một phần tư chu kỳ để máy thở.
+                idle = max(
+                    session.interval_seconds - elapsed, session.interval_seconds * 0.25
+                )
+                session.stop_event.wait(idle)
         finally:
             self._remove_temp_image(image_path)
 
     def _live_process(self, session: LiveSession, image_path: str) -> None:
         options = session.options
-        if session.mode == "frame":
-            regions = self._ocr_lines(image_path, options)
-            if regions:
-                translated = "\n".join(self._translate_regions(regions, options))
-                self._emit(lambda: self._live_apply_frame(session.token, translated))
-            return
         regions = self._ocr_lines(image_path, options)
         if not regions:
             return
-        translated_lines = self._translate_regions(regions, options)
+        translated_lines = self._live_translate(session, regions)
+        if session.mode == "frame":
+            translated = "\n".join(translated_lines)
+            self._emit(lambda: self._live_apply_frame(session.token, translated))
+            return
         image_size, visuals = services.reconstruct_layout(image_path, regions)
         paint_regions = self._paint_regions(regions, translated_lines, visuals)
         self._emit(
@@ -523,6 +540,18 @@ class TranslationWorkflowController:
                 session.token, session.bbox, paint_regions, image_size
             )
         )
+
+    def _live_translate(self, session: LiveSession, regions) -> list[str]:
+        """Dịch các dòng của một frame live, tái dùng bản dịch đã có."""
+        memo = session.translations
+        pending = [region for region in regions if region.text not in memo]
+        if pending:
+            fresh = self._translate_regions(pending, session.options)
+            if len(memo) > _LIVE_TRANSLATION_MEMO_LIMIT:
+                memo.clear()
+            for region, translated in zip(pending, fresh):
+                memo[region.text] = translated
+        return [memo.get(region.text, region.text) for region in regions]
 
     def _is_current(self, token: object) -> bool:
         return self._live is not None and self._live.token is token

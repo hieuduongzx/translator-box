@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
-from PySide6.QtGui import QAction, QGuiApplication, QImage
+from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
     QSystemTrayIcon,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 import overlay
+import services
 from config import AppConfig
 from constants import (
     BAR_ACTIONS,
@@ -56,7 +55,7 @@ from widgets import (
     DragBar,
     HudBar,
     HudTextView,
-    StatusPill,
+    StatusStrip,
 )
 
 
@@ -75,8 +74,10 @@ class HUDWindow(QWidget):
         self._capture_excluded = False
         self._settings_win: SettingsWindow | None = None
         self._mouse = None
-        self._status_text = "Sẵn sàng"
-        self._status_state = "ready"
+        # Rỗng để lần `set_status` đầu tiên luôn được áp dụng (hàm đó bỏ qua khi
+        # trạng thái không đổi, nên không thể khởi tạo bằng chính chuỗi mặc định).
+        self._status_text = ""
+        self._status_state = ""
 
         self.bridge = Bridge()
         self.bridge.run.connect(lambda callback: callback())
@@ -106,12 +107,24 @@ class HUDWindow(QWidget):
         self._restore_geometry()
 
         self.workflow = TranslationWorkflowController(self)
+        # Theo dõi clipboard để tự dịch văn bản khi người dùng Ctrl+C (chế độ bật
+        # trong Cài đặt). Marker giữ nội dung đã xử lý để không dịch lại chính
+        # bản dịch mà app vừa ghi vào clipboard.
+        self._clipboard_watch_text = ""
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.dataChanged.connect(self._on_clipboard_changed)
+        self.sync_clipboard_auto_state()
         self.hotkeys = HotkeyManager(
             lambda action: self.bridge.run.emit(
                 lambda: self.workflow.handle_action(action)
             )
         )
         warning = self.hotkeys.apply(self.config.hotkeys)
+        if not warning:
+            # Gói import lười (pyperclip, keyboard, Pillow) chỉ lộ ra khi người
+            # dùng đã bấm phím tắt; nói ngay ở trạng thái để khỏi phải đoán.
+            warning = services.missing_runtime_packages()
         self.set_status(warning or "Sẵn sàng", "error" if warning else "ready")
         self._setup_tray()
         self._setup_mouse_hook()
@@ -122,7 +135,6 @@ class HUDWindow(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        # Chừa lề quanh bar để bóng đổ không bị cắt ở mép cửa sổ.
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
         self._bar = self._build_bar()
@@ -132,6 +144,13 @@ class HUDWindow(QWidget):
         self._sync_output_actions()
 
     def _build_bar(self) -> QWidget:
+        """Thanh công cụ một hàng: nhóm lệnh bên trái, cấu hình và cửa sổ bên phải.
+
+        Bản trước đổi toàn bộ nội dung bar khi bật "Audio mode" (hai bộ widget
+        song song, ẩn/hiện lẫn nhau) và chèn 6 vạch ngăn dọc — mỗi vạch là một
+        widget bọc thêm layout. Ở đây mọi lệnh nằm trong menu của đúng một nút,
+        phân nhóm bằng khoảng trắng, nên bar không bao giờ nhảy layout.
+        """
         bar = HudBar(self)
         bar.setObjectName("hudBar")
         shell = QVBoxLayout(bar)
@@ -139,182 +158,38 @@ class HUDWindow(QWidget):
         shell.setSpacing(0)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(8, 5, 8, 3)
+        layout.setContentsMargins(9, 6, 7, 6)
         layout.setSpacing(2)
-        self._standard_mode_widgets: list[QWidget] = []
-        self._audio_mode_widgets: list[QWidget] = []
-        self._audio_mode = False
-
-        def add_standard(widget: QWidget) -> None:
-            layout.addWidget(widget)
-            self._standard_mode_widgets.append(widget)
-
-        def add_audio(widget: QWidget) -> None:
-            layout.addWidget(widget)
-            self._audio_mode_widgets.append(widget)
 
         logo = QLabel()
-        logo.setPixmap(_brand_pixmap(19))
-        logo.setFixedSize(19, 19)
+        logo.setPixmap(_brand_pixmap(18))
+        logo.setFixedSize(18, 18)
         logo.setToolTip(
             "Kéo để di chuyển · Kéo gần cạnh màn hình để tự hít · "
             "Nhấp đúp để ẩn/hiện thanh công cụ."
         )
         layout.addWidget(logo)
-        layout.addSpacing(6)
-
-        # Audio mode là một workspace riêng trên cùng thanh HUD. Các control
-        # được tạo sẵn để chuyển mode không làm layout nhảy hoặc tạo lại widget.
-        self.audio_mode_back_button = QPushButton("← AUDIO")
-        self.audio_mode_back_button.setObjectName("barModeButton")
-        self.audio_mode_back_button.setAccessibleName("Thoát chế độ dịch audio")
-        self.audio_mode_back_button.setToolTip(
-            "Quay lại các công cụ dịch ảnh và văn bản"
-        )
-        self.audio_mode_back_button.setFixedHeight(30)
-        self.audio_mode_back_button.clicked.connect(self._exit_audio_mode)
-        add_audio(self.audio_mode_back_button)
-        add_audio(self._bar_separator())
-
-        self.audio_button = BarButton("audio")
-        self.audio_button.setAccessibleName("Bắt đầu dịch audio realtime")
-        self.audio_button.setToolTip(
-            "Bắt đầu/dừng phiên dịch audio với cấu hình đang chọn"
-        )
-        self.audio_button.setCheckable(True)
-        self.audio_button.clicked.connect(self.toggle_audio_realtime)
-        add_audio(self.audio_button)
-
-        self.audio_source_combo = BarComboBox()
-        self.audio_source_combo.setObjectName("barCombo")
-        self.audio_source_combo.setAccessibleName("Nguồn audio Soniox")
-        self.audio_source_combo.setToolTip(
-            "Chọn âm thanh đang phát trên máy hoặc microphone"
-        )
-        self.audio_source_combo.setMinimumWidth(104)
-        self.audio_source_combo.setMaximumWidth(132)
-        self.audio_source_combo.addItem("HỆ THỐNG", "system")
-        self.audio_source_combo.addItem("MICROPHONE", "microphone")
-        add_audio(self.audio_source_combo)
-
-        self.audio_display_combo = BarComboBox()
-        self.audio_display_combo.setObjectName("barCombo")
-        self.audio_display_combo.setAccessibleName("Chế độ hiển thị transcript")
-        self.audio_display_combo.setToolTip(
-            "Hiện song ngữ hoặc chỉ hiện bản dịch trong HUD"
-        )
-        self.audio_display_combo.setMinimumWidth(96)
-        self.audio_display_combo.setMaximumWidth(112)
-        self.audio_display_combo.addItem("SONG NGỮ", "bilingual")
-        self.audio_display_combo.addItem("CHỈ DỊCH", "translation")
-        add_audio(self.audio_display_combo)
-
-        self.audio_target_combo = BarComboBox()
-        self.audio_target_combo.setObjectName("barCombo")
-        self.audio_target_combo.setAccessibleName("Ngôn ngữ đích audio")
-        self.audio_target_combo.setToolTip(
-            "Chọn ngôn ngữ đích cho dịch audio một chiều"
-        )
-        self.audio_target_combo.setMinimumWidth(94)
-        self.audio_target_combo.setMaximumWidth(132)
-        for label, code in SONIOX_LANGUAGES:
-            self.audio_target_combo.addItem(f"→ {label}", code)
-        add_audio(self.audio_target_combo)
-
-        self.audio_alignment_combo = BarComboBox()
-        self.audio_alignment_combo.setObjectName("barCombo")
-        self.audio_alignment_combo.setAccessibleName("Căn lề transcript")
-        self.audio_alignment_combo.setToolTip("Căn trái, giữa hoặc phải transcript")
-        self.audio_alignment_combo.setMinimumWidth(82)
-        self.audio_alignment_combo.setMaximumWidth(104)
-        self.audio_alignment_combo.addItem("CĂN TRÁI", "left")
-        self.audio_alignment_combo.addItem("CĂN GIỮA", "center")
-        self.audio_alignment_combo.addItem("CĂN PHẢI", "right")
-        add_audio(self.audio_alignment_combo)
-        add_audio(self._bar_separator())
-
-        for combo in (
-            self.audio_source_combo,
-            self.audio_display_combo,
-            self.audio_target_combo,
-            self.audio_alignment_combo,
-        ):
-            self._fit_popup(combo)
-        self.sync_audio_controls()
-        self.audio_source_combo.currentIndexChanged.connect(self._audio_source_changed)
-        self.audio_display_combo.currentIndexChanged.connect(
-            self._audio_display_changed
-        )
-        self.audio_target_combo.currentIndexChanged.connect(self._audio_target_changed)
-        self.audio_alignment_combo.currentIndexChanged.connect(
-            self._audio_alignment_changed
-        )
-
-        self.pin_button = BarButton("pin")
-        self.pin_button.setAccessibleName("Ghim khung dịch")
-        self.pin_button.setCheckable(True)
-        self.pin_button.setChecked(self.config.hud_pinned)
-        self.pin_button.toggled.connect(self._set_pinned)
-        add_standard(self.pin_button)
-
-        self.background_toggle_button = BarButton("bgtoggle")
-        self.background_toggle_button.setAccessibleName("Nền khung dịch")
-        self.background_toggle_button.setCheckable(True)
-        self.background_toggle_button.setChecked(self.config.hud_background_enabled)
-        self.background_toggle_button.toggled.connect(self._toggle_hud_background)
-        add_standard(self.background_toggle_button)
-        add_standard(self._bar_separator())
+        layout.addSpacing(10)
 
         self._translation_actions: dict[str, QAction] = {}
         self._action_group_buttons: dict[str, BarMenuButton] = {}
         self._action_group_menus: dict[str, QMenu] = {}
         self._action_group_for_action: dict[str, str] = {}
         self._group_actions: dict[str, tuple[str, ...]] = {}
-        action_groups = (
-            (
-                "screen",
-                BAR_GROUP_OVERLAY + BAR_GROUP_FRAME[:2],
-                "scan",
-                "MÀN HÌNH",
-            ),
-            ("clipboard", BAR_GROUP_CLIPBOARD, "image", "ẢNH"),
-            ("text", BAR_GROUP_FRAME[2:], "text", "VĂN BẢN"),
-        )
-        for group_id, actions, kind, label in action_groups:
-            add_standard(self._build_action_menu(group_id, actions, kind, label))
-        add_standard(self._bar_separator())
-
-        self.audio_mode_button = QPushButton("Audio")
-        self.audio_mode_button.setIcon(_make_icon("audio", ICON_IDLE, 18))
-        self.audio_mode_button.setObjectName("barGroupToggle")
-        self.audio_mode_button.setAccessibleName("Mở điều khiển dịch audio")
-        self.audio_mode_button.setToolTip(
-            "Mở Audio mode để chọn nguồn, ngôn ngữ và cách hiển thị"
-        )
-        self.audio_mode_button.setCheckable(True)
-        self.audio_mode_button.setFixedHeight(30)
-        self.audio_mode_button.setCursor(Qt.PointingHandCursor)
-        self.audio_mode_button.clicked.connect(self._enter_audio_mode)
-        add_standard(self.audio_mode_button)
-        add_standard(self._bar_separator())
-
-        self.copy_button = BarButton("copy")
-        self.copy_button.setAccessibleName("Copy bản dịch")
-        self.copy_button.setToolTip("Copy bản dịch trong khung vào clipboard")
-        self.copy_button.clicked.connect(self._copy_output)
-        layout.addWidget(self.copy_button)
-        self.clear_button = BarButton("clear")
-        self.clear_button.setAccessibleName("Xoá khung dịch")
-        self.clear_button.setToolTip("Xoá nội dung đang hiện trong khung dịch")
-        self.clear_button.clicked.connect(self._clear_output)
-        layout.addWidget(self.clear_button)
+        for group_id, actions, kind, label in (
+            ("screen", BAR_GROUP_OVERLAY + BAR_GROUP_FRAME[:2], "scan", "Màn hình"),
+            ("clipboard", BAR_GROUP_CLIPBOARD, "image", "Ảnh"),
+            ("text", BAR_GROUP_FRAME[2:], "text", "Văn bản"),
+        ):
+            layout.addWidget(self._build_action_menu(group_id, actions, kind, label))
+        self.audio_button = self._build_audio_menu()
+        layout.addWidget(self.audio_button)
         layout.addStretch(1)
 
-        self.status_pill = StatusPill()
-        self.status_pill.setAccessibleName("Trạng thái")
-        layout.addWidget(self.status_pill)
-        layout.addSpacing(4)
-        layout.addWidget(self._bar_separator())
+        self.status_strip = StatusStrip()
+        self.status_strip.setAccessibleName("Trạng thái")
+        layout.addWidget(self.status_strip)
+        layout.addSpacing(8)
 
         self.service_combo = BarComboBox()
         self.service_combo.setObjectName("barCombo")
@@ -329,7 +204,7 @@ class HUDWindow(QWidget):
         self.target_combo.setObjectName("barCombo")
         self.target_combo.setAccessibleName("Ngôn ngữ đích")
         self.target_combo.setToolTip("Chọn ngôn ngữ đích của bản dịch")
-        self.target_combo.setMinimumWidth(88)
+        self.target_combo.setMinimumWidth(84)
         self.target_combo.setMaximumWidth(132)
         for label, code in LANGUAGES:
             self.target_combo.addItem(label, code)
@@ -338,9 +213,42 @@ class HUDWindow(QWidget):
         self._fit_popup(self.target_combo)
         self.service_combo.currentIndexChanged.connect(self._service_changed)
         self.target_combo.currentIndexChanged.connect(self._target_changed)
-        add_standard(self.service_combo)
-        add_standard(self.target_combo)
-        add_standard(self._bar_separator())
+        layout.addWidget(self.service_combo)
+        layout.addSpacing(3)
+        layout.addWidget(self.target_combo)
+        layout.addSpacing(8)
+
+        self.copy_button = BarButton("copy")
+        self.copy_button.setAccessibleName("Copy bản dịch")
+        self.copy_button.setToolTip("Copy bản dịch trong khung vào clipboard")
+        self.copy_button.clicked.connect(self._copy_output)
+        layout.addWidget(self.copy_button)
+        self.clear_button = BarButton("clear")
+        self.clear_button.setAccessibleName("Xoá khung dịch")
+        self.clear_button.setToolTip("Xoá nội dung đang hiện trong khung dịch")
+        self.clear_button.clicked.connect(self._clear_output)
+        layout.addWidget(self.clear_button)
+
+        self.pin_button = BarButton("pin")
+        self.pin_button.setAccessibleName("Ghim khung dịch")
+        self.pin_button.setCheckable(True)
+        self.pin_button.setChecked(self.config.hud_pinned)
+        self.pin_button.toggled.connect(self._set_pinned)
+        layout.addWidget(self.pin_button)
+
+        self.background_toggle_button = BarButton("bgtoggle")
+        self.background_toggle_button.setAccessibleName("Nền khung dịch")
+        self.background_toggle_button.setCheckable(True)
+        self.background_toggle_button.setChecked(self.config.hud_background_enabled)
+        self.background_toggle_button.toggled.connect(self._toggle_hud_background)
+        layout.addWidget(self.background_toggle_button)
+
+        self.transparent_button = BarButton("transparent")
+        self.transparent_button.setAccessibleName("Khung dịch trong suốt")
+        self.transparent_button.setCheckable(True)
+        self.transparent_button.setChecked(self.config.hud_frame_transparent)
+        self.transparent_button.toggled.connect(self._toggle_frame_transparent)
+        layout.addWidget(self.transparent_button)
 
         settings_button = BarButton("settings")
         settings_button.setAccessibleName("Cài đặt")
@@ -354,115 +262,129 @@ class HUDWindow(QWidget):
         layout.addWidget(hide_button)
         shell.addLayout(layout)
 
-        # Vạch tiến trình mảnh sát mép dưới bar, chỉ chạy khi đang xử lý.
+        # Vạch tiến trình mảnh sát mép dưới bar, chỉ hiện khi đang xử lý.
         busy_row = QHBoxLayout()
-        busy_row.setContentsMargins(10, 0, 10, 4)
+        busy_row.setContentsMargins(9, 0, 9, 4)
         self.busy_bar = BusyBar()
+        self.busy_bar.hide()
         busy_row.addWidget(self.busy_bar)
         shell.addLayout(busy_row)
 
-        self._set_audio_mode(False)
         self.refresh_bar_tooltips()
         self._sync_pin_tooltip()
         self._sync_background_toggle_tooltip()
+        self._sync_transparent_tooltip()
         self._sync_output_actions()
         return bar
 
-    @staticmethod
-    def _set_combo_value(combo: QComboBox, value: str) -> None:
-        index = combo.findData(value)
-        if index < 0 or index == combo.currentIndex():
-            return
-        combo.blockSignals(True)
-        combo.setCurrentIndex(index)
-        combo.blockSignals(False)
+    def _build_audio_menu(self) -> BarMenuButton:
+        """Một nút mở toàn bộ điều khiển audio realtime (thay cho Audio mode).
+
+        Nguồn/ngôn ngữ/hiển thị/căn lề là bốn lựa chọn rời rạc nên submenu tick
+        chọn diễn đạt chúng đủ rõ, khỏi cần bốn combo box thường trực trên bar.
+        """
+        button = BarMenuButton("audio", "Âm thanh")
+        button.setAccessibleName("Dịch audio realtime")
+        button.setToolTip("Bắt đầu/dừng dịch audio và chọn nguồn, ngôn ngữ, hiển thị")
+        menu = QMenu(button)
+        menu.setAccessibleName("Điều khiển dịch audio")
+
+        self.audio_toggle_action = QAction("Bắt đầu dịch audio", menu)
+        self.audio_toggle_action.setIcon(_make_icon("audio", ICON_IDLE, 18))
+        self.audio_toggle_action.triggered.connect(self.toggle_audio_realtime)
+        menu.addAction(self.audio_toggle_action)
+        menu.addSeparator()
+
+        self._audio_option_actions: dict[str, dict[str, QAction]] = {}
+        for setting, title, options in (
+            (
+                "soniox_audio_source",
+                "Nguồn âm thanh",
+                (("Âm thanh hệ thống", "system"), ("Microphone", "microphone")),
+            ),
+            (
+                "soniox_target_language",
+                "Ngôn ngữ đích",
+                tuple(SONIOX_LANGUAGES),
+            ),
+            (
+                "soniox_display_mode",
+                "Hiển thị",
+                (("Song ngữ", "bilingual"), ("Chỉ bản dịch", "translation")),
+            ),
+            (
+                "soniox_text_alignment",
+                "Căn lề",
+                (("Căn trái", "left"), ("Căn giữa", "center"), ("Căn phải", "right")),
+            ),
+        ):
+            submenu = QMenu(title, menu)
+            group = QActionGroup(submenu)
+            group.setExclusive(True)
+            actions: dict[str, QAction] = {}
+            for label, value in options:
+                action = QAction(label, submenu)
+                action.setCheckable(True)
+                action.setActionGroup(group)
+                action.triggered.connect(
+                    lambda _checked=False, key=setting, chosen=value: (
+                        self._set_audio_option(key, chosen)
+                    )
+                )
+                submenu.addAction(action)
+                actions[value] = action
+            self._audio_option_actions[setting] = actions
+            menu.addMenu(submenu)
+
+        button.attach_menu(menu)
+        self._audio_menu = menu
+        self.sync_audio_controls()
+        return button
 
     def sync_audio_controls(self) -> None:
-        """Đồng bộ Audio mode với cấu hình dùng chung của cửa sổ Cài đặt."""
-        if not hasattr(self, "audio_source_combo"):
+        """Đồng bộ menu audio với cấu hình dùng chung của cửa sổ Cài đặt."""
+        actions = getattr(self, "_audio_option_actions", None)
+        if not actions:
             return
-        self._set_combo_value(self.audio_source_combo, self.config.soniox_audio_source)
-        self._set_combo_value(self.audio_display_combo, self.config.soniox_display_mode)
-        self._set_combo_value(
-            self.audio_target_combo, self.config.soniox_target_language
-        )
-        self._set_combo_value(
-            self.audio_alignment_combo, self.config.soniox_text_alignment
-        )
+        for setting, options in actions.items():
+            current = getattr(self.config, setting, None)
+            for value, action in options.items():
+                action.setChecked(value == current)
 
-    def _set_audio_mode(self, enabled: bool) -> None:
-        self._audio_mode = enabled
-        self.audio_mode_button.setChecked(enabled)
-        for widget in self._standard_mode_widgets:
-            widget.setVisible(not enabled)
-        for widget in self._audio_mode_widgets:
-            widget.setVisible(enabled)
-        active = bool(getattr(getattr(self, "audio_session", None), "is_active", False))
-        self.audio_mode_back_button.setEnabled(not active)
-        self._sync_bar_density()
-
-    def _sync_bar_density(self) -> None:
-        if not hasattr(self, "status_pill"):
+    def _set_audio_option(self, setting: str, value: str) -> None:
+        """Ghi một lựa chọn audio; chỉ lưu và làm mới khi giá trị thật sự đổi."""
+        if getattr(self.config, setting, None) == value:
             return
-        width = self.width()
-        if self._audio_mode:
-            show_output = width >= 820
-            self.copy_button.setVisible(show_output)
-            self.clear_button.setVisible(show_output)
-            self.status_pill.setVisible(show_output)
-            return
-        show_output = width >= 720
-        self.copy_button.setVisible(show_output)
-        self.clear_button.setVisible(show_output)
-        self.status_pill.setVisible(width >= 900)
-        self.service_combo.setVisible(width >= 700)
-
-    def _enter_audio_mode(self) -> None:
-        self.sync_audio_controls()
-        self._set_audio_mode(True)
-
-    def _exit_audio_mode(self) -> None:
-        if self.audio_session.is_active:
-            return
-        self._set_audio_mode(False)
-
-    def _sync_open_soniox_controls(self) -> None:
+        setattr(self.config, setting, value)
+        self.config.save()
+        if setting in ("soniox_display_mode", "soniox_text_alignment"):
+            self.refresh_audio_transcript_display()
         if self._settings_win is not None:
             self._settings_win.sync_soniox_controls()
 
-    def _audio_source_changed(self) -> None:
-        source = self.audio_source_combo.currentData()
-        if not isinstance(source, str):
-            return
-        self.config.soniox_audio_source = source
-        self.config.save()
-        self._sync_open_soniox_controls()
+    def _sync_bar_density(self) -> None:
+        """Ẩn dần các control ít quan trọng khi HUD bị thu hẹp.
 
-    def _audio_display_changed(self) -> None:
-        display_mode = self.audio_display_combo.currentData()
-        if not isinstance(display_mode, str):
+        Ngưỡng lấy từ bề rộng tối thiểu thật của bar ở từng mức, nên không mức
+        nào làm nhãn bị cắt. Hẹp nhất thì bốn nút nhóm rút về chỉ còn icon —
+        tooltip vẫn nói rõ nhóm nào, và mọi lệnh vẫn bấm được.
+        """
+        if not hasattr(self, "status_strip"):
             return
-        self.config.soniox_display_mode = display_mode
-        self.config.save()
-        self.refresh_audio_transcript_display()
-        self._sync_open_soniox_controls()
-
-    def _audio_target_changed(self) -> None:
-        language = self.audio_target_combo.currentData()
-        if not isinstance(language, str):
-            return
-        self.config.soniox_target_language = language
-        self.config.save()
-        self._sync_open_soniox_controls()
-
-    def _audio_alignment_changed(self) -> None:
-        alignment = self.audio_alignment_combo.currentData()
-        if not isinstance(alignment, str):
-            return
-        self.config.soniox_text_alignment = alignment
-        self.config.save()
-        self.refresh_audio_transcript_display()
-        self._sync_open_soniox_controls()
+        width = self.width()
+        self.status_strip.setVisible(width >= 870)
+        self.service_combo.setVisible(width >= 850)
+        show_output = width >= 750
+        self.copy_button.setVisible(show_output)
+        self.clear_button.setVisible(show_output)
+        show_window_toggles = width >= 690
+        self.pin_button.setVisible(show_window_toggles)
+        self.background_toggle_button.setVisible(show_window_toggles)
+        self.transparent_button.setVisible(show_window_toggles)
+        compact = width < 640
+        for button in self._action_group_buttons.values():
+            button.set_compact(compact)
+        self.audio_button.set_compact(compact)
 
     def _service_entries(self) -> list[tuple[str, str]]:
         models = {
@@ -497,9 +419,8 @@ class HUDWindow(QWidget):
     ) -> BarMenuButton:
         button = BarMenuButton(kind, label)
         button.setAccessibleName(f"Nhóm dịch {label}")
-        button.setToolTip(f"Nhấn để mở nhóm dịch {label.lower()} ở phía trên")
+        button.setToolTip(f"Các lệnh dịch cho {label.lower()}")
         menu = QMenu(button)
-        menu.setObjectName("barActionMenu")
         menu.setAccessibleName(f"Chức năng dịch {label}")
         action_ids: list[str] = []
         for icon_kind, accessible_name, action, _tooltip in actions:
@@ -520,12 +441,10 @@ class HUDWindow(QWidget):
             action_ids.append(action)
         if group_id == "screen":
             menu.addSeparator()
-            self._application_menu = QMenu("Chọn ứng dụng", menu)
-            self._application_menu.setObjectName("applicationFocusMenu")
+            self._application_menu = QMenu("Chỉ dịch khi focus", menu)
             self._application_menu.setAccessibleName(
                 "Chọn ứng dụng được phép dịch Live"
             )
-            self._application_menu.setIcon(_make_icon("scan", ICON_IDLE, 18))
             self._application_menu.aboutToShow.connect(self._populate_application_menu)
             menu.addMenu(self._application_menu)
         button.attach_menu(menu)
@@ -586,17 +505,6 @@ class HUDWindow(QWidget):
     ) -> None:
         self.workflow.set_live_focus_application(application_id, application_label)
 
-    def _bar_separator(self) -> QFrame:
-        separator = QFrame()
-        separator.setObjectName("barSep")
-        separator.setFixedSize(1, 18)
-        wrapper = QWidget(self)
-        wrapper_layout = QHBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(5, 0, 5, 0)
-        wrapper_layout.addWidget(separator)
-        wrapper.setFixedWidth(11)
-        return wrapper
-
     def _build_display(self) -> QWidget:
         display = DragBar(self)
         display.setObjectName("hudDisplay")
@@ -627,6 +535,9 @@ class HUDWindow(QWidget):
             clipboard.setImage(image)
             self.set_status("Đã copy ảnh dịch vào clipboard.", "ok")
         else:
+            # Ghi marker trước khi đặt clipboard để watcher không dịch lại chính
+            # bản dịch vừa copy khi chế độ tự dịch clipboard đang bật.
+            self._clipboard_watch_text = text
             clipboard.setText(text)
             self.set_status("Đã copy bản dịch vào clipboard.", "ok")
 
@@ -641,8 +552,6 @@ class HUDWindow(QWidget):
         if self.audio_session.is_active:
             self.audio_session.stop()
             return
-        if not self.audio_session.is_active:
-            self._enter_audio_mode()
         started = self.audio_session.start(
             api_key=self.config.soniox_api_key,
             audio_source=self.config.soniox_audio_source,
@@ -660,21 +569,16 @@ class HUDWindow(QWidget):
 
     def _on_audio_state_changed(self, state: str) -> None:
         active = state != "idle"
-        if active:
-            self._set_audio_mode(True)
-        self.audio_button.blockSignals(True)
-        self.audio_button.setChecked(active)
-        self.audio_button.blockSignals(False)
         self.set_busy(active)
-        self.audio_button.setEnabled(state != "stopping")
-        self.audio_mode_back_button.setEnabled(not active)
-        self.audio_button.setAccessibleName(
-            "Dừng dịch audio realtime" if active else "Bắt đầu dịch audio realtime"
+        self.audio_button.set_live(active)
+        self.audio_toggle_action.setText(
+            "Dừng dịch audio" if active else "Bắt đầu dịch audio"
         )
+        self.audio_toggle_action.setEnabled(state != "stopping")
         self.audio_button.setToolTip(
             "Dừng và hoàn tất transcript đang nghe"
             if active
-            else "Bắt đầu phiên dịch audio với cấu hình đang chọn"
+            else "Bắt đầu/dừng dịch audio và chọn nguồn, ngôn ngữ, hiển thị"
         )
         source_label = (
             "audio hệ thống" if self.audio_session.source == "system" else "microphone"
@@ -689,16 +593,15 @@ class HUDWindow(QWidget):
             self._settings_win.sync_soniox_state(state)
             self._settings_win.sync_soniox_controls()
 
-    def _on_audio_transcript(self, text: str) -> None:
-        self.refresh_audio_transcript_display(fallback=text)
-        self.ensure_visible()
+    def _on_audio_transcript(self) -> None:
+        self.refresh_audio_transcript_display()
+        if not self.isVisible() or self.isMinimized():
+            self.ensure_visible()
 
-    def refresh_audio_transcript_display(self, fallback: str = "") -> None:
+    def refresh_audio_transcript_display(self) -> None:
         """Áp dụng chế độ/căn lề mới mà không cần khởi động lại phiên."""
         blocks = self.audio_session.transcript_blocks
         if not blocks:
-            if fallback:
-                self.set_output(fallback)
             return
         self.output.set_transcript(
             blocks,
@@ -751,6 +654,9 @@ class HUDWindow(QWidget):
         shadow_color: str = "#00000000",
         background_enabled: bool = True,
     ) -> None:
+        # Nút "trong suốt" thắng mọi cài đặt nền: khi bật, luôn bỏ màu nền.
+        if self.config.hud_frame_transparent:
+            background_enabled = False
         self.output.apply_style(
             font_family,
             font_size,
@@ -809,6 +715,60 @@ class HUDWindow(QWidget):
         self.set_status(
             "Đã bật nền khung dịch." if enabled else "Đã tắt nền khung dịch.", "ready"
         )
+
+    def _sync_transparent_tooltip(self) -> None:
+        if self.transparent_button.isChecked():
+            self.transparent_button.setToolTip(
+                "Khung dịch trong suốt: BẬT · Bỏ mọi màu nền bất kể cài đặt"
+            )
+        else:
+            self.transparent_button.setToolTip(
+                "Khung dịch trong suốt: TẮT · Buộc khung dịch trong suốt"
+            )
+
+    def _toggle_frame_transparent(self, transparent: bool) -> None:
+        """Buộc khung dịch trong suốt, bỏ qua cài đặt nền/màu đang có."""
+        self._sync_transparent_tooltip()
+        if self.config.hud_frame_transparent == transparent:
+            return
+        self.config.hud_frame_transparent = transparent
+        self.config.save()
+        self.apply_hud_text_style()
+        if self._settings_win is not None:
+            self._settings_win.sync_frame_transparent_state()
+        self.set_status(
+            "Khung dịch đang trong suốt."
+            if transparent
+            else "Đã trả nền khung dịch theo cài đặt.",
+            "ready",
+        )
+
+    @staticmethod
+    def _current_clipboard_text() -> str:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return ""
+        return (clipboard.text() or "").strip()
+
+    def sync_clipboard_auto_state(self) -> None:
+        """Đánh dấu nội dung clipboard hiện tại để không dịch lại thứ đã có."""
+        self._clipboard_watch_text = self._current_clipboard_text()
+
+    def _on_clipboard_changed(self) -> None:
+        """Tự dịch văn bản vừa copy khi chế độ được bật trong Cài đặt."""
+        if not self.config.auto_translate_clipboard:
+            return
+        clipboard = QGuiApplication.clipboard()
+        mime = clipboard.mimeData() if clipboard is not None else None
+        if mime is None or mime.hasImage() or not mime.hasText():
+            return
+        text = (clipboard.text() or "").strip()
+        if not text or text == self._clipboard_watch_text:
+            return
+        self._clipboard_watch_text = text
+        if self.workflow.busy or self.workflow.live_running:
+            return
+        self.workflow.translate_clipboard_text(text)
 
     def _active_window_belongs_to_settings(self) -> bool:
         active = QApplication.activeWindow()
@@ -1115,11 +1075,15 @@ class HUDWindow(QWidget):
             self._mouse = None
 
     def set_status(self, text: str, state: str = "ready") -> None:
+        # Live gọi lại đúng chuỗi này mỗi frame; bỏ qua sớm để không invalidate
+        # layout của bar và không gọi lại shell API của tray vô ích.
+        if text == self._status_text and state == self._status_state:
+            return
         self._status_text = text
         self._status_state = state
-        if hasattr(self, "status_pill"):
-            self.status_pill.set_state(text, state)
-            self.status_pill.setToolTip(text)
+        if hasattr(self, "status_strip"):
+            self.status_strip.set_state(text, state)
+            self.status_strip.setToolTip(text)
         if hasattr(self, "tray"):
             self.tray.setToolTip(f"{APP_NAME} — {text}")
 
@@ -1138,9 +1102,6 @@ class HUDWindow(QWidget):
             )
         self.target_combo.setEnabled(not busy)
         self.service_combo.setEnabled(not busy)
-        self.audio_mode_button.setEnabled(not busy)
-        self.audio_source_combo.setEnabled(not busy)
-        self.audio_target_combo.setEnabled(not busy)
         if hasattr(self, "audio_button"):
             self.audio_button.setEnabled(self.audio_session.is_active or not busy)
         if self._settings_win is not None:
@@ -1189,15 +1150,12 @@ class HUDWindow(QWidget):
         if menu_action is None or group_id is None:
             return
         menu_action.setChecked(checked)
-        group_button = self._action_group_buttons[group_id]
-        group_live = any(
-            self._translation_actions[group_action].isChecked()
-            for group_action in self._group_actions[group_id]
+        self._action_group_buttons[group_id].set_live(
+            any(
+                self._translation_actions[group_action].isChecked()
+                for group_action in self._group_actions[group_id]
+            )
         )
-        group_button.setProperty("live", group_live)
-        group_button.style().unpolish(group_button)
-        group_button.style().polish(group_button)
-        group_button.update()
 
     def event(self, event) -> bool:
         result = super().event(event)

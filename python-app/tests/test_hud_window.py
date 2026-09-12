@@ -73,6 +73,47 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertFalse(self.window._settings_win.background_enabled_check.isChecked())
         self.assertFalse(self.window._settings_win.background_color_btn.isEnabled())
 
+    def test_transparent_button_forces_background_off_regardless_of_config(self) -> None:
+        self.assertTrue(self.window.output._background_enabled)
+
+        self.window.transparent_button.setChecked(True)
+
+        self.assertTrue(self.config.hud_frame_transparent)
+        self.assertFalse(self.window.output._background_enabled)
+        self.config.save.assert_called()
+
+        self.window.transparent_button.setChecked(False)
+
+        self.assertFalse(self.config.hud_frame_transparent)
+        self.assertTrue(self.window.output._background_enabled)
+
+    def test_clipboard_change_translates_when_auto_enabled(self) -> None:
+        self.app.clipboard().setText("Hello")
+        self.config.auto_translate_clipboard = True
+        self.window._clipboard_watch_text = ""
+
+        with mock.patch.object(
+            self.window.workflow, "translate_clipboard_text"
+        ) as translate:
+            self.window._on_clipboard_changed()
+
+        translate.assert_called_once_with("Hello")
+        self.config.auto_translate_clipboard = False
+        self.app.clipboard().clear()
+
+    def test_clipboard_change_is_ignored_when_auto_disabled(self) -> None:
+        self.app.clipboard().setText("Hello")
+        self.config.auto_translate_clipboard = False
+        self.window._clipboard_watch_text = ""
+
+        with mock.patch.object(
+            self.window.workflow, "translate_clipboard_text"
+        ) as translate:
+            self.window._on_clipboard_changed()
+
+        translate.assert_not_called()
+        self.app.clipboard().clear()
+
     def test_bar_service_dropdown_updates_translator(self) -> None:
         self.window.service_combo.setCurrentIndex(
             self.window.service_combo.findData("bing")
@@ -108,51 +149,37 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(self.config.translator, "llm")
         self.assertEqual(self.config.llm_model, "deepseek-v4-pro")
 
-    def test_audio_mode_replaces_unrelated_bar_controls_and_can_exit(self) -> None:
-        self.assertFalse(self.window.audio_mode_button.isHidden())
-        self.assertTrue(self.window.audio_mode_back_button.isHidden())
-        self.assertEqual(self.window.audio_mode_button.text(), "Audio")
-        self.assertFalse(self.window.audio_mode_button.icon().isNull())
-        self.assertEqual(self.window.audio_mode_button.objectName(), "barGroupToggle")
-        self.assertFalse(self.window.audio_mode_button.isChecked())
+    def test_audio_controls_live_in_one_bar_menu(self) -> None:
+        self.assertEqual(self.window.audio_button.text(), "Âm thanh")
+        self.assertFalse(self.window.audio_button.icon().isNull())
+        self.assertEqual(self.window.audio_button.objectName(), "barAction")
+        self.assertEqual(
+            set(self.window._audio_option_actions),
+            {
+                "soniox_audio_source",
+                "soniox_target_language",
+                "soniox_display_mode",
+                "soniox_text_alignment",
+            },
+        )
+        self.assertEqual(
+            self.window.audio_toggle_action.text(), "Bắt đầu dịch audio"
+        )
+        checked = {
+            setting: [value for value, action in options.items() if action.isChecked()]
+            for setting, options in self.window._audio_option_actions.items()
+        }
+        self.assertEqual(checked["soniox_audio_source"], ["system"])
+        self.assertEqual(checked["soniox_display_mode"], ["bilingual"])
+        self.assertEqual(checked["soniox_text_alignment"], ["center"])
 
-        self.window.audio_mode_button.click()
+    def test_audio_menu_options_update_shared_soniox_config(self) -> None:
+        options = self.window._audio_option_actions
 
-        self.assertTrue(self.window._audio_mode)
-        self.assertTrue(self.window.audio_mode_button.isChecked())
-        self.assertTrue(
-            all(widget.isHidden() for widget in self.window._standard_mode_widgets)
-        )
-        self.assertTrue(
-            all(not widget.isHidden() for widget in self.window._audio_mode_widgets)
-        )
-
-        self.window.audio_mode_back_button.click()
-
-        self.assertFalse(self.window._audio_mode)
-        self.assertFalse(self.window.audio_mode_button.isChecked())
-        self.assertTrue(
-            all(not widget.isHidden() for widget in self.window._standard_mode_widgets)
-        )
-        self.assertTrue(
-            all(widget.isHidden() for widget in self.window._audio_mode_widgets)
-        )
-
-    def test_audio_mode_controls_update_shared_soniox_config(self) -> None:
-        self.window.audio_mode_button.click()
-
-        self.window.audio_source_combo.setCurrentIndex(
-            self.window.audio_source_combo.findData("microphone")
-        )
-        self.window.audio_display_combo.setCurrentIndex(
-            self.window.audio_display_combo.findData("translation")
-        )
-        self.window.audio_target_combo.setCurrentIndex(
-            self.window.audio_target_combo.findData("ja")
-        )
-        self.window.audio_alignment_combo.setCurrentIndex(
-            self.window.audio_alignment_combo.findData("right")
-        )
+        options["soniox_audio_source"]["microphone"].trigger()
+        options["soniox_display_mode"]["translation"].trigger()
+        options["soniox_target_language"]["ja"].trigger()
+        options["soniox_text_alignment"]["right"].trigger()
 
         self.assertEqual(self.config.soniox_audio_source, "microphone")
         self.assertEqual(self.config.soniox_display_mode, "translation")
@@ -160,30 +187,39 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(self.config.soniox_text_alignment, "right")
         self.assertGreaterEqual(self.config.save.call_count, 4)
 
-    def test_active_audio_locks_session_contract_but_keeps_display_controls(
-        self,
-    ) -> None:
+        # Chọn lại đúng giá trị hiện tại không được ghi đĩa thêm lần nữa.
+        saves = self.config.save.call_count
+        options["soniox_text_alignment"]["right"].trigger()
+        self.assertEqual(self.config.save.call_count, saves)
+
+    def test_audio_menu_reflects_config_changed_elsewhere(self) -> None:
+        self.config.soniox_audio_source = "microphone"
+        self.config.soniox_target_language = "ko"
+
+        self.window.sync_audio_controls()
+
+        options = self.window._audio_option_actions
+        self.assertTrue(options["soniox_audio_source"]["microphone"].isChecked())
+        self.assertFalse(options["soniox_audio_source"]["system"].isChecked())
+        self.assertTrue(options["soniox_target_language"]["ko"].isChecked())
+
+    def test_active_audio_marks_bar_button_and_updates_toggle_label(self) -> None:
         self.window.audio_session._source = "system"
         self.window.audio_session._state = "listening"
 
         self.window._on_audio_state_changed("listening")
 
-        self.assertTrue(self.window._audio_mode)
-        self.assertTrue(self.window.audio_button.isChecked())
-        self.assertFalse(self.window.audio_mode_back_button.isEnabled())
-        self.assertFalse(self.window.audio_source_combo.isEnabled())
-        self.assertFalse(self.window.audio_target_combo.isEnabled())
-        self.assertTrue(self.window.audio_display_combo.isEnabled())
-        self.assertTrue(self.window.audio_alignment_combo.isEnabled())
+        self.assertTrue(self.window.audio_button.property("live"))
+        self.assertEqual(self.window.audio_toggle_action.text(), "Dừng dịch audio")
+        self.assertTrue(self.window.audio_button.isEnabled())
 
         self.window.audio_session._state = "idle"
         self.window._on_audio_state_changed("idle")
 
-        self.assertTrue(self.window._audio_mode)
-        self.assertFalse(self.window.audio_button.isChecked())
-        self.assertTrue(self.window.audio_mode_back_button.isEnabled())
-        self.assertTrue(self.window.audio_source_combo.isEnabled())
-        self.assertTrue(self.window.audio_target_combo.isEnabled())
+        self.assertFalse(self.window.audio_button.property("live"))
+        self.assertEqual(
+            self.window.audio_toggle_action.text(), "Bắt đầu dịch audio"
+        )
 
     def test_drag_position_snaps_to_each_edge_of_pointer_screen(self) -> None:
         screen = mock.Mock()
@@ -203,18 +239,18 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.assertEqual(free, QPoint(-1240, 40))
         screen_at.assert_any_call(pointer)
 
-    def test_bar_uses_three_group_toggles_and_compacts_low_priority_controls(
+    def test_bar_groups_commands_and_compacts_low_priority_controls(
         self,
     ) -> None:
         group_buttons = self.window._action_group_buttons
         self.assertEqual(list(group_buttons), ["screen", "clipboard", "text"])
         self.assertEqual(
             [button.text() for button in group_buttons.values()],
-            ["MÀN HÌNH  ↑", "ẢNH  ↑", "VĂN BẢN  ↑"],
+            ["Màn hình", "Ảnh", "Văn bản"],
         )
         self.assertTrue(
             all(
-                button.objectName() == "barGroupToggle"
+                button.objectName() == "barAction"
                 for button in group_buttons.values()
             )
         )
@@ -222,20 +258,38 @@ class HUDWindowBehaviorTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
 
-        self.window.resize(680, 200)
+        self.window.resize(640, 200)
         self.app.processEvents()
         self.assertTrue(self.window.service_combo.isHidden())
         self.assertTrue(self.window.copy_button.isHidden())
         self.assertTrue(self.window.clear_button.isHidden())
-        self.assertTrue(self.window.status_pill.isHidden())
+        self.assertTrue(self.window.status_strip.isHidden())
+        self.assertTrue(self.window.pin_button.isHidden())
         self.assertTrue(all(not button.isHidden() for button in group_buttons.values()))
+        self.assertFalse(self.window.audio_button.isHidden())
 
-        self.window.resize(920, 200)
+        # Hẹp nhất: nhóm lệnh rút về chỉ còn icon, tooltip vẫn mô tả đủ.
+        self.window.resize(self.window.minimumWidth(), 200)
+        self.app.processEvents()
+        self.assertEqual(
+            [button.text() for button in group_buttons.values()], ["", "", ""]
+        )
+        self.assertEqual(self.window.audio_button.text(), "")
+        self.assertTrue(
+            all(button.toolTip() for button in group_buttons.values())
+        )
+
+        self.window.resize(980, 200)
         self.app.processEvents()
         self.assertFalse(self.window.service_combo.isHidden())
         self.assertFalse(self.window.copy_button.isHidden())
         self.assertFalse(self.window.clear_button.isHidden())
-        self.assertFalse(self.window.status_pill.isHidden())
+        self.assertFalse(self.window.status_strip.isHidden())
+        self.assertFalse(self.window.pin_button.isHidden())
+        self.assertEqual(
+            [button.text() for button in group_buttons.values()],
+            ["Màn hình", "Ảnh", "Văn bản"],
+        )
 
     def test_bar_exposes_every_translation_action_inside_group_menus(self) -> None:
         expected = {action for _label, action in HOTKEY_ACTIONS if action != "quit"}
@@ -291,7 +345,7 @@ class HUDWindowBehaviorTests(unittest.TestCase):
 
         screen_menu = self.window._action_group_menus["screen"]
         self.assertIn(self.window._application_menu.menuAction(), screen_menu.actions())
-        self.assertEqual(self.window._application_menu.title(), "Chọn ứng dụng")
+        self.assertEqual(self.window._application_menu.title(), "Chỉ dịch khi focus")
         actions = [
             action
             for action in self.window._application_menu.actions()
@@ -359,6 +413,35 @@ class HUDWindowBehaviorTests(unittest.TestCase):
 
         self.assertEqual(self.window.output._text, "Nội dung dịch")
         self.assertEqual(self.window._status_text, "Đã dịch.")
+        self.assertEqual(self.window.status_strip._dot.property("state"), "ok")
+
+    def test_missing_dependency_is_reported_at_startup(self) -> None:
+        """Thiếu gói import lười phải hiện ngay ở trạng thái, không đợi phím tắt."""
+        with mock.patch(
+            "hud_window.services.missing_runtime_packages",
+            return_value="Thiếu thư viện 'pyperclip'.",
+        ):
+            window = HUDWindow()
+
+        try:
+            self.assertEqual(window._status_state, "error")
+            self.assertIn("pyperclip", window._status_text)
+            self.assertEqual(window.status_strip._dot.property("state"), "error")
+        finally:
+            window._quitting = True
+            window.close()
+
+    def test_repeated_status_updates_are_ignored(self) -> None:
+        """Live gọi lại đúng chuỗi này mỗi frame; không được làm gì thêm."""
+        self.window.set_status("● Đang dịch trực tiếp.", "busy")
+        strip = self.window.status_strip
+        before = strip._label.text()
+
+        with mock.patch.object(strip, "set_state") as set_state:
+            self.window.set_status("● Đang dịch trực tiếp.", "busy")
+
+        set_state.assert_not_called()
+        self.assertEqual(strip._label.text(), before)
 
     def test_hud_style_preview_applies_font_and_argb_background(self) -> None:
         self.window.preview_hud_text_style(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -62,7 +62,6 @@ from ui_utils import (
     _enable_dark_titlebar,
     _fmt_hotkey,
     _nav_icon,
-    _tracked,
 )
 from version import APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO
 from widgets import Card, CheckerFrame, CodeField, ColorButton, HotkeyEdit, HudTextView
@@ -86,6 +85,10 @@ NAV_SECTIONS = (
 )
 
 PREVIEW_SAMPLE = "Xin chào · Hello · こんにちは"
+
+# Đổi kiểu chữ khung dịch bằng spinbox phát signal mỗi nhịp mũi tên; gom lại rồi
+# mới ghi config một lần để giữ phím mũi tên/lăn chuột mượt và không đập ổ đĩa.
+_STYLE_SAVE_DELAY_MS = 260
 
 
 def available_hud_font_options(
@@ -147,9 +150,8 @@ class ProviderDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(14)
-        heading = QLabel("// PROVIDER OPENAI-COMPATIBLE")
+        heading = QLabel("Provider OpenAI-compatible")
         heading.setObjectName("pageTitle")
-        _tracked(heading, 102.0)
         subtitle = QLabel(
             "Bất kỳ endpoint chuẩn OpenAI nào cũng dùng được: OpenRouter, "
             "LM Studio, Ollama hoặc proxy nội bộ."
@@ -261,12 +263,17 @@ class SettingsWindow(QWidget):
         self._quitting = False
         self._model_download_running = False
         self.setObjectName("settingsRoot")
-        self.setWindowTitle(f"Cài đặt // {APP_NAME}")
+        self.setWindowTitle(f"Cài đặt — {APP_NAME}")
         self.setWindowIcon(hud.app_icon)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.resize(960, 740)
-        self.setMinimumSize(820, 620)
+        self.resize(940, 720)
+        self.setMinimumSize(820, 600)
+        # Gom nhiều lần đổi kiểu chữ liền nhau thành một lần ghi config.
+        self._style_save_timer = QTimer(self)
+        self._style_save_timer.setSingleShot(True)
+        self._style_save_timer.setInterval(_STYLE_SAVE_DELAY_MS)
+        self._style_save_timer.timeout.connect(self._flush_hud_style)
         self._build_ui()
         _enable_dark_titlebar(self)
 
@@ -283,16 +290,6 @@ class SettingsWindow(QWidget):
         combo.currentIndexChanged.connect(on_change)
         return combo
 
-    @staticmethod
-    def _divider(vertical: bool = False) -> QFrame:
-        line = QFrame()
-        line.setObjectName("vDivider" if vertical else "divider")
-        if vertical:
-            line.setFixedWidth(1)
-        else:
-            line.setFixedHeight(1)
-        return line
-
     # -------------------------------------------------------------------- shell
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
@@ -301,17 +298,12 @@ class SettingsWindow(QWidget):
 
         sidebar = QFrame()
         sidebar.setObjectName("settingsSidebar")
-        sidebar.setFixedWidth(212)
+        sidebar.setFixedWidth(206)
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(16, 18, 14, 16)
+        sidebar_layout.setContentsMargins(14, 18, 12, 16)
         sidebar_layout.setSpacing(0)
         sidebar_layout.addWidget(self._build_header())
-        sidebar_layout.addSpacing(26)
-        section_label = QLabel("// CẤU HÌNH")
-        section_label.setObjectName("sidebarLabel")
-        _tracked(section_label, 130.0)
-        sidebar_layout.addWidget(section_label)
-        sidebar_layout.addSpacing(8)
+        sidebar_layout.addSpacing(22)
 
         self.navigation = QListWidget()
         self.navigation.setObjectName("settingsNav")
@@ -319,10 +311,8 @@ class SettingsWindow(QWidget):
         self.navigation.setIconSize(QSize(17, 17))
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for index, (label, icon_kind, description) in enumerate(NAV_SECTIONS, start=1):
-            item = QListWidgetItem(
-                _nav_icon(icon_kind), f"[{index:02d}]  {label.upper()}"
-            )
+        for label, icon_kind, description in NAV_SECTIONS:
+            item = QListWidgetItem(_nav_icon(icon_kind), label)
             item.setToolTip(description)
             self.navigation.addItem(item)
         navigation_height = sum(
@@ -352,35 +342,31 @@ class SettingsWindow(QWidget):
         self.navigation.setCurrentRow(0)
 
         content = QVBoxLayout()
-        content.setContentsMargins(26, 22, 24, 18)
+        content.setContentsMargins(24, 22, 22, 18)
         content.addWidget(self.pages)
         root.addWidget(sidebar)
         root.addLayout(content, 1)
-        self._update_engine_info()
+        # `ocr_engine_status` nạp onnxruntime (DLL native, hàng trăm ms) — hoãn
+        # sang sau khi cửa sổ đã hiện để lần bấm "Cài đặt" đầu tiên không đứng.
+        QTimer.singleShot(0, self._update_engine_info)
 
     def _build_header(self) -> QWidget:
         header = QWidget()
-        layout = QVBoxLayout(header)
+        layout = QHBoxLayout(header)
         layout.setContentsMargins(2, 0, 0, 0)
-        layout.setSpacing(7)
-        brand = QWidget()
-        brand_layout = QHBoxLayout(brand)
-        brand_layout.setContentsMargins(0, 0, 0, 0)
-        brand_layout.setSpacing(9)
+        layout.setSpacing(9)
         mark = QLabel()
-        mark.setPixmap(_brand_pixmap(28))
-        mark.setFixedSize(28, 28)
-        wordmark = QLabel(APP_NAME.upper())
+        mark.setPixmap(_brand_pixmap(24))
+        mark.setFixedSize(24, 24)
+        wordmark = QLabel(APP_NAME)
         wordmark.setObjectName("brandWordmark")
-        _tracked(wordmark, 108.0)
-        brand_layout.addWidget(mark)
-        brand_layout.addWidget(wordmark)
-        brand_layout.addStretch(1)
         version_tag = QLabel(APP_VERSION)
         version_tag.setObjectName("brandVersion")
         version_tag.setToolTip("Phiên bản đang chạy")
-        layout.addWidget(brand)
-        layout.addWidget(version_tag, 0, Qt.AlignLeft)
+        layout.addWidget(mark)
+        layout.addWidget(wordmark)
+        layout.addStretch(1)
+        layout.addWidget(version_tag, 0, Qt.AlignVCenter)
         return header
 
     def _build_footer(self) -> QWidget:
@@ -388,10 +374,10 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(footer)
         layout.setContentsMargins(2, 0, 0, 0)
         layout.setSpacing(10)
-        hint = QLabel("Tự động lưu\nPhím tắt: bấm Lưu")
+        hint = QLabel("Thay đổi được lưu tự động.")
         hint.setObjectName("sidebarHint")
         hint.setWordWrap(True)
-        close_button = QPushButton("Đóng cửa sổ")
+        close_button = QPushButton("Đóng")
         close_button.clicked.connect(self.hide)
         close_button.setCursor(Qt.PointingHandCursor)
         layout.addWidget(hint)
@@ -401,7 +387,6 @@ class SettingsWindow(QWidget):
     @staticmethod
     def _page(title: str, description: str) -> tuple[QScrollArea, QVBoxLayout]:
         scroll = QScrollArea()
-        scroll.setObjectName("settingsPage")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -409,9 +394,8 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 10, 18)
         layout.setSpacing(12)
-        heading = QLabel(f"// {title.upper()}")
+        heading = QLabel(title)
         heading.setObjectName("pageTitle")
-        _tracked(heading, 102.0)
         summary = QLabel(description)
         summary.setObjectName("pageSubtitle")
         summary.setWordWrap(True)
@@ -428,7 +412,6 @@ class SettingsWindow(QWidget):
         service_card = Card(
             "Model & ngôn ngữ",
             "Chọn trực tiếp model đã sẵn sàng; provider chưa có API key sẽ bị ẩn.",
-            featured=True,
         )
         self.service_box = QComboBox()
         self.service_box.setAccessibleName("Model hoặc dịch vụ dịch")
@@ -466,21 +449,50 @@ class SettingsWindow(QWidget):
         )
         layout.addWidget(replace_card)
 
+        clipboard_card = Card(
+            "Tự dịch khi copy",
+            "Bật: mỗi lần Ctrl+C, văn bản vừa copy tự dịch vào khung — "
+            "không cần phím tắt riêng cho chức năng này.",
+        )
+        self.auto_clipboard_check = QCheckBox()
+        self.auto_clipboard_check.setChecked(self.config.auto_translate_clipboard)
+        self.auto_clipboard_check.setAccessibleName("Tự dịch văn bản khi copy")
+        self.auto_clipboard_check.setToolTip(
+            "Bật để Ctrl+C ở bất kỳ ứng dụng nào cũng tự động dịch vào khung."
+        )
+        self.auto_clipboard_check.toggled.connect(self._on_auto_clipboard_toggled)
+        clipboard_card.add_row(
+            "Tự dịch clipboard",
+            self.auto_clipboard_check,
+            "Ảnh copy vào clipboard không bị ảnh hưởng; chỉ xử lý văn bản.",
+            control_width=0,
+        )
+        layout.addWidget(clipboard_card)
+
         layout.addStretch(1)
         return page
+
+    def _on_auto_clipboard_toggled(self, enabled: bool) -> None:
+        self.config.auto_translate_clipboard = bool(enabled)
+        self.config.save()
+        self.hud.sync_clipboard_auto_state()
+        self.hud.set_status(
+            "Đã bật tự dịch văn bản khi copy."
+            if enabled
+            else "Đã tắt tự dịch văn bản khi copy.",
+            "ready",
+        )
 
     # ---------------------------------------------------------- trang Dịch vụ AI
     def _build_ai_page(self) -> QScrollArea:
         page, layout = self._page("Dịch vụ AI", NAV_SECTIONS[1][2])
 
         self.ai_provider_state = QLabel()
-        self.ai_provider_state.setObjectName("aiProviderStatus")
-        _tracked(self.ai_provider_state, 106.0)
+        self.ai_provider_state.setObjectName("statusBadge")
         provider_card = Card(
             "Provider & API key",
             "Chỉ provider đã có API key mới hiện model trong tab Dịch.",
             trailing=self.ai_provider_state,
-            featured=True,
         )
         self.ai_provider_box = QComboBox()
         self.ai_provider_box.setAccessibleName("Provider AI cần cấu hình")
@@ -600,13 +612,12 @@ class SettingsWindow(QWidget):
         page, layout = self._page("Audio", NAV_SECTIONS[2][2])
 
         self.soniox_state = QLabel()
-        self.soniox_state.setObjectName("aiProviderStatus")
-        _tracked(self.soniox_state, 106.0)
+        self.soniox_state.setObjectName("statusBadge")
         connection_card = Card(
             "Soniox realtime",
-            "Stream PCM từ microphone hoặc âm thanh hệ thống; transcript và bản dịch về cùng một kết nối.",
+            "Stream PCM từ microphone hoặc âm thanh hệ thống; transcript và bản "
+            "dịch về cùng một kết nối.",
             trailing=self.soniox_state,
-            featured=True,
         )
         self.soniox_connection_card = connection_card
         self.soniox_key_edit = QLineEdit(self.config.soniox_api_key)
@@ -764,7 +775,6 @@ class SettingsWindow(QWidget):
         ocr_card = Card(
             "Nhận dạng ký tự",
             "Ảnh chụp vùng được xử lý ngay trên máy, không gửi lên dịch vụ nào.",
-            featured=True,
         )
         self.engine_box = self._combo(
             OCR_ENGINES, self.config.ocr_engine, self._on_ocr_changed
@@ -808,7 +818,6 @@ class SettingsWindow(QWidget):
         info_layout.setSpacing(12)
         self.engine_badge = QLabel()
         self.engine_badge.setObjectName("engineBadge")
-        _tracked(self.engine_badge, 106.0)
         self.engine_hint = QLabel()
         self.engine_hint.setObjectName("engineHint")
         self.engine_hint.setWordWrap(True)
@@ -830,7 +839,6 @@ class SettingsWindow(QWidget):
         self.model_languages.setObjectName("modelLanguages")
         self.model_languages.setWordWrap(True)
         self.model_download_button = QPushButton("Tải mô hình")
-        self.model_download_button.setObjectName("modelDownload")
         self.model_download_button.clicked.connect(self._download_selected_model)
         self.model_download_status = QLabel()
         self.model_download_status.setObjectName("modelDownloadStatus")
@@ -854,7 +862,6 @@ class SettingsWindow(QWidget):
             "Xem trước",
             "Nền bàn cờ chỉ minh hoạ phần trong suốt. Khi dùng thật, bạn sẽ "
             "thấy desktop phía sau.",
-            featured=True,
         )
         preview_surface = CheckerFrame()
         preview_surface.setMinimumHeight(96)
@@ -983,22 +990,20 @@ class SettingsWindow(QWidget):
         card = Card(
             "Tổ hợp phím toàn cục",
             "Bấm vào ô rồi nhấn tổ hợp phím · Del để tắt · Esc để huỷ.",
-            featured=True,
         )
         self.hotkey_edits: dict[str, HotkeyEdit] = {}
-        for index, (label, action) in enumerate(HOTKEY_ACTIONS, start=1):
+        for label, action in HOTKEY_ACTIONS:
             edit = HotkeyEdit(self.config.hotkeys.get(action, ""))
             edit.setFixedWidth(178)
             edit.changed.connect(self._mark_hotkey_conflicts)
             self.hotkey_edits[action] = edit
-            card.add_row(f"[{index:02d}] {label}", edit, control_width=0)
+            card.add_row(label, edit, control_width=0)
         layout.addWidget(card)
 
         self.hotkey_warning = QLabel("")
         self.hotkey_warning.setObjectName("stateBadge")
         self.hotkey_warning.setProperty("state", "missing")
         self.hotkey_warning.setVisible(False)
-        _tracked(self.hotkey_warning, 106.0)
         layout.addWidget(self.hotkey_warning)
 
         save_button = QPushButton("Lưu phím tắt")
@@ -1015,7 +1020,7 @@ class SettingsWindow(QWidget):
     def _build_about_page(self) -> QScrollArea:
         page, layout = self._page("Giới thiệu", NAV_SECTIONS[6][2])
 
-        about_card = Card(featured=True)
+        about_card = Card()
         identity = QWidget()
         identity_layout = QHBoxLayout(identity)
         identity_layout.setContentsMargins(0, 0, 0, 0)
@@ -1264,19 +1269,31 @@ class SettingsWindow(QWidget):
         if not hasattr(self, "soniox_state"):
             return
         labels = {
-            "connecting": "ĐANG KẾT NỐI",
-            "listening": "ĐANG NGHE",
-            "stopping": "ĐANG HOÀN TẤT",
+            "connecting": ("Đang kết nối", "busy"),
+            "listening": ("Đang nghe", "busy"),
+            "stopping": ("Đang hoàn tất", "busy"),
         }
         active = state != "idle"
         configured = bool(self.config.soniox_api_key)
-        self.soniox_state.setText(
-            labels.get(state, "SẴN SÀNG" if configured else "THIẾU API KEY")
+        text, badge_state = labels.get(
+            state,
+            ("Sẵn sàng", "ready") if configured else ("Thiếu API key", "missing"),
         )
+        self.soniox_state.setText(text)
+        self._set_badge_state(self.soniox_state, badge_state)
         self.soniox_toggle_button.setText(
             "Dừng phiên realtime" if active else "Bắt đầu dịch audio"
         )
         self.soniox_toggle_button.setEnabled(active or configured)
+
+    @staticmethod
+    def _set_badge_state(badge: QLabel, state: str) -> None:
+        """Đổi màu badge qua property `state`; bỏ qua khi không đổi."""
+        if badge.property("state") == state:
+            return
+        badge.setProperty("state", state)
+        badge.style().unpolish(badge)
+        badge.style().polish(badge)
 
     def _on_service_selected(self) -> None:
         key = self.service_box.currentData()
@@ -1422,15 +1439,15 @@ class SettingsWindow(QWidget):
         configured = self.config.ai_provider_configured(code)
         active = configured and code == self.config.translator
         if active:
-            label = "ĐANG DÙNG"
+            label = "Đang dùng"
         elif configured:
-            label = "SẴN SÀNG"
+            label = "Sẵn sàng"
         else:
-            label = "CHƯA CÓ API KEY"
+            label = "Chưa có API key"
         self.ai_provider_state.setText(label)
-        self.ai_provider_state.setProperty("state", "active" if active else "inactive")
-        self.ai_provider_state.style().unpolish(self.ai_provider_state)
-        self.ai_provider_state.style().polish(self.ai_provider_state)
+        self._set_badge_state(
+            self.ai_provider_state, "active" if active else "inactive"
+        )
         self.activate_ai_btn.setEnabled(configured and not active)
         if active:
             button_text = "Đang sử dụng"
@@ -1648,17 +1665,15 @@ class SettingsWindow(QWidget):
         backend = self._effective_backend()
         available, detail = services.ocr_engine_status(engine, model_id, backend)
         if engine == "auto":
-            badge, state = "TỰ ĐỘNG", "fallback"
+            badge, state = "Tự động", "fallback"
         elif engine == "rapidocr" and not model_installed(model_id):
-            badge, state = "CẦN TẢI", "missing"
+            badge, state = "Cần tải", "missing"
         elif available:
-            badge, state = "SẴN SÀNG", "ready"
+            badge, state = "Sẵn sàng", "ready"
         else:
-            badge, state = "CẦN CÀI", "missing"
+            badge, state = "Cần cài", "missing"
         self.engine_badge.setText(badge)
-        self.engine_badge.setProperty("state", state)
-        self.engine_badge.style().unpolish(self.engine_badge)
-        self.engine_badge.style().polish(self.engine_badge)
+        self._set_badge_state(self.engine_badge, state)
         description = OCR_ENGINE_DESCRIPTIONS.get(engine, "")
         self.engine_hint.setText(f"{description}\n{detail}" if detail else description)
         self._update_model_card(engine, model_id, backend)
@@ -1776,9 +1791,22 @@ class SettingsWindow(QWidget):
 
     def _sync_preview(self) -> None:
         if hasattr(self, "preview_view"):
-            self.preview_view.apply_style(*self._hud_style_values())
+            values = list(self._hud_style_values())
+            # Nút "trong suốt" thắng cài đặt nền, kể cả trong bản xem trước.
+            values[-1] = values[-1] and not self.config.hud_frame_transparent
+            self.preview_view.apply_style(*values)
+
+    def sync_frame_transparent_state(self) -> None:
+        """Cập nhật xem trước sau khi bật/tắt nhanh từ nút trên bar."""
+        self._sync_preview()
 
     def _on_hud_style_changed(self) -> None:
+        """Áp dụng ngay lên UI; việc ghi config để timer gom lại.
+
+        Spinbox cỡ chữ/độ dày viền/glow phát signal mỗi nhịp mũi tên, nên ghi đĩa
+        ngay tại đây sẽ thành hàng chục lần `json.dumps` + ghi file khi người dùng
+        chỉ giữ phím mũi tên.
+        """
         (
             self.config.hud_font_family,
             self.config.hud_font_size,
@@ -1790,10 +1818,13 @@ class SettingsWindow(QWidget):
             self.config.hud_shadow_color,
             self.config.hud_background_enabled,
         ) = self._hud_style_values()
-        self.config.save()
         self.hud.apply_hud_text_style()
         self._sync_preview()
         self._sync_bar_background_toggle()
+        self._style_save_timer.start()
+
+    def _flush_hud_style(self) -> None:
+        self.config.save()
 
     def _sync_bar_background_toggle(self) -> None:
         """Đồng bộ nút bật/tắt nền trên thanh HUD sau khi đổi ở Cài đặt."""
@@ -1868,7 +1899,7 @@ class SettingsWindow(QWidget):
             self.hotkey_warning.setVisible(bool(duplicates))
             if duplicates:
                 pretty = " · ".join(sorted(_fmt_hotkey(c) for c in duplicates))
-                self.hotkey_warning.setText(f"TRÙNG PHÍM: {pretty}")
+                self.hotkey_warning.setText(f"Trùng phím: {pretty}")
         return bool(duplicates)
 
     def _reset_hotkeys(self) -> None:
@@ -1898,7 +1929,17 @@ class SettingsWindow(QWidget):
             return
         super().keyPressEvent(event)
 
+    def hideEvent(self, event) -> None:
+        # Đóng cửa sổ giữa lúc timer debounce đang chờ thì vẫn phải ghi config.
+        if self._style_save_timer.isActive():
+            self._style_save_timer.stop()
+            self._flush_hud_style()
+        super().hideEvent(event)
+
     def closeEvent(self, event) -> None:
+        if self._style_save_timer.isActive():
+            self._style_save_timer.stop()
+            self._flush_hud_style()
         if self._quitting:
             event.accept()
         else:

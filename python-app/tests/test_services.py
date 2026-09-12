@@ -15,6 +15,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
 import services  # noqa: E402
+from ui_utils import _sig_differs as services_sig_differs  # noqa: E402
 
 
 class AnalyzeColorsTests(unittest.TestCase):
@@ -66,6 +67,92 @@ class AnalyzeColorsTests(unittest.TestCase):
 
         self.assertEqual(bg, background)
         self.assertEqual(fg, (240, 240, 240))
+
+
+class MissingDependencyTests(unittest.TestCase):
+    def test_missing_module_reports_install_command(self) -> None:
+        """Thiếu gói phải nói tên gói pip và câu lệnh, không phải lỗi thô."""
+        real_import = services.importlib.import_module
+
+        def fail_pyperclip(name: str):
+            if name == "pyperclip":
+                raise ImportError("No module named 'pyperclip'")
+            return real_import(name)
+
+        with mock.patch.object(
+            services.importlib, "import_module", side_effect=fail_pyperclip
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                services.paste_replacement("Xin chào")
+
+        message = str(caught.exception)
+        self.assertIn("pyperclip", message)
+        self.assertIn("requirements.txt", message)
+        self.assertNotIn("No module named", message)
+
+    def test_startup_warning_lists_every_missing_package(self) -> None:
+        services._package_available.cache_clear()
+        try:
+            with mock.patch.object(
+                services,
+                "_package_available",
+                side_effect=lambda name: name not in {"pyperclip", "PIL"},
+            ):
+                message = services.missing_runtime_packages()
+        finally:
+            services._package_available.cache_clear()
+
+        self.assertIn("pyperclip", message)
+        self.assertIn("Pillow", message)  # tên gói pip, không phải tên module
+        self.assertNotIn("keyboard", message)
+        self.assertIn("requirements.txt", message)
+
+    def test_startup_warning_is_empty_when_dependencies_present(self) -> None:
+        with mock.patch.object(services, "_package_available", return_value=True):
+            self.assertEqual(services.missing_runtime_packages(), "")
+
+
+class CaptureTests(unittest.TestCase):
+    def test_capture_writes_png_and_returns_signature_without_rereading_file(
+        self,
+    ) -> None:
+        """Chữ ký tính ngay từ ảnh trong RAM, không mở lại file vừa ghi."""
+        grabbed = Image.new("RGB", (120, 60), (20, 30, 40))
+        ImageDraw.Draw(grabbed).rectangle((10, 10, 60, 40), fill=(240, 240, 240))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frame.png"
+            with mock.patch.object(
+                services, "_grab_screen", return_value=grabbed
+            ) as grab:
+                signature = services.capture((0, 0, 120, 60), path)
+
+            self.assertEqual(grab.call_count, 1)
+            self.assertTrue(path.exists())
+            self.assertEqual(len(signature), 48 * 48)
+            expected = (
+                grabbed.convert("L")
+                .resize((48, 48), Image.Resampling.BILINEAR)
+                .tobytes()
+            )
+            self.assertEqual(signature, expected)
+
+    def test_capture_signature_tracks_visible_change(self) -> None:
+        first = Image.new("RGB", (120, 60), (250, 250, 250))
+        second = first.copy()
+        ImageDraw.Draw(second).rectangle((0, 0, 119, 59), fill=(10, 10, 10))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frame.png"
+            with mock.patch.object(services, "_grab_screen", return_value=first):
+                before = services.capture((0, 0, 120, 60), path)
+            with mock.patch.object(services, "_grab_screen", return_value=first.copy()):
+                same = services.capture((0, 0, 120, 60), path)
+            with mock.patch.object(services, "_grab_screen", return_value=second):
+                after = services.capture((0, 0, 120, 60), path)
+
+        self.assertFalse(services_sig_differs(before, same))
+        self.assertTrue(services_sig_differs(before, after))
 
 
 class LayoutOcrTests(unittest.TestCase):
@@ -142,6 +229,37 @@ class LayoutOcrTests(unittest.TestCase):
             llm_model="",
         )
 
+    def test_normal_line_spacing_stays_in_one_block(self) -> None:
+        """Đoạn 2+ dòng giãn cách tới ~2 lần chiều cao vẫn là một khối để dịch liền."""
+        regions = [
+            services.TextRegion("Wait, do you mean that the", (10, 100, 250, 120)),
+            services.TextRegion("whole plan was a secret from", (10, 140, 245, 160)),
+            services.TextRegion("the very beginning?!", (10, 180, 170, 200)),
+        ]
+
+        blocks = services.merge_regions_into_blocks(regions)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].line_count, 3)
+        self.assertEqual(
+            blocks[0].text,
+            "Wait, do you mean that the whole plan was a secret from "
+            "the very beginning?!",
+        )
+
+    def test_vertical_cjk_columns_read_right_to_left(self) -> None:
+        """Cột chữ dọc Nhật phải nối theo thứ tự phải→trái, không đảo ngược."""
+        regions = [
+            services.TextRegion("これは", (300, 40, 320, 140)),
+            services.TextRegion("テスト", (280, 40, 300, 140)),
+            services.TextRegion("です", (260, 40, 280, 140)),
+        ]
+
+        blocks = services.merge_regions_into_blocks(regions)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "これはテストです")
+
     def test_manga_blocks_do_not_merge_parallel_speech_bubbles(self) -> None:
         regions = [
             services.TextRegion("THIS IS", (100, 100, 160, 118)),
@@ -212,6 +330,35 @@ class LayoutOcrTests(unittest.TestCase):
         self.assertGreaterEqual(visual.ink_rect[1], box[1] - 2)
         self.assertLessEqual(visual.ink_rect[3], box[3] + 2)
         self.assertGreater(visual.stroke_thickness, 0)
+
+    def test_identical_region_reuses_inpainted_background(self) -> None:
+        """Live chụp lại cùng một vùng → không inpaint lại miếng nền không đổi."""
+        from PIL import ImageFont
+
+        image = Image.new("RGB", (320, 60), (255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(r"C:\Windows\Fonts\segoeui.ttf", 22)
+        draw.text((16, 16), "Sample gy", font=font, fill=(30, 30, 30))
+        box = draw.textbbox((16, 16), "Sample gy", font=font)
+        region = services.TextRegion("Sample gy", box)
+
+        services._inpaint_cache.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "line.png")
+            image.save(path)
+            import cv2  # type: ignore
+
+            with mock.patch.object(
+                cv2, "inpaint", wraps=cv2.inpaint
+            ) as inpaint:
+                first_size, first = services.reconstruct_layout(path, [region])
+                second_size, second = services.reconstruct_layout(path, [region])
+
+        self.assertEqual(inpaint.call_count, 1)
+        self.assertEqual(first_size, second_size)
+        self.assertEqual(first[0].patch_rgb, second[0].patch_rgb)
+        self.assertEqual(first[0].ink_rect, second[0].ink_rect)
+        self.assertEqual(first[0].fg, second[0].fg)
 
     def test_per_line_fallback_runs_in_parallel_and_keeps_order(self) -> None:
         """Dịch vụ gộp dòng → dịch lại từng dòng, song song nhưng đúng thứ tự."""

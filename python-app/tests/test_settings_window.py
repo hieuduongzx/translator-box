@@ -55,6 +55,9 @@ class FakeHud:
     def apply_hud_text_style(self) -> None:
         pass
 
+    def sync_clipboard_auto_state(self) -> None:
+        pass
+
     def preview_hud_text_style(self, *_args) -> None:
         pass
 
@@ -120,13 +123,13 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "[01]  DỊCH",
-                "[02]  DỊCH VỤ AI",
-                "[03]  AUDIO",
-                "[04]  OCR",
-                "[05]  KHUNG DỊCH",
-                "[06]  PHÍM TẮT",
-                "[07]  GIỚI THIỆU",
+                "Dịch",
+                "Dịch vụ AI",
+                "Audio",
+                "OCR",
+                "Khung dịch",
+                "Phím tắt",
+                "Giới thiệu",
             ],
         )
         self.assertEqual(self.window.pages.count(), 7)
@@ -148,9 +151,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.window.navigation.setCurrentRow(1)
 
         self.assertEqual(self.window.pages.currentIndex(), 1)
-        self.assertEqual(
-            self.window.navigation.currentItem().text(), "[02]  DỊCH VỤ AI"
-        )
+        self.assertEqual(self.window.navigation.currentItem().text(), "Dịch vụ AI")
 
     def test_ai_services_has_explicit_provider_management(self) -> None:
         service_entries = [
@@ -171,7 +172,7 @@ class SettingsWindowTests(unittest.TestCase):
             self.window.llm_endpoint_edit.text(), "https://api.openai.com/v1"
         )
         self.assertFalse(self.window.activate_ai_btn.isEnabled())
-        self.assertEqual(self.window.ai_provider_state.text(), "CHƯA CÓ API KEY")
+        self.assertEqual(self.window.ai_provider_state.text(), "Chưa có API key")
         self.assertEqual(self.window.service_box.findData("openai::gpt-4o"), -1)
 
         self.window.llm_key_edit.setText("sk-test")
@@ -183,7 +184,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(self.window.config.translator, "openai")
         self.assertEqual(self.window.service_box.currentData(), "openai::gpt-4o-mini")
         self.assertFalse(self.window.activate_ai_btn.isEnabled())
-        self.assertEqual(self.window.ai_provider_state.text(), "ĐANG DÙNG")
+        self.assertEqual(self.window.ai_provider_state.text(), "Đang dùng")
 
     def test_add_provider_registers_and_selects_custom_ai_service(self) -> None:
         payload = {
@@ -306,6 +307,37 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(values[7], HUD_STYLE_DEFAULTS["hud_shadow_color"])
         self.assertEqual(values[8], HUD_STYLE_DEFAULTS["hud_background_enabled"])
 
+    def test_hud_style_edits_are_batched_into_one_config_write(self) -> None:
+        """Spinbox phát signal mỗi nhịp mũi tên → chỉ ghi config một lần."""
+        self.window.config.save.reset_mock()
+
+        self.window.font_size_spin.setValue(24)
+        self.window.font_size_spin.setValue(25)
+        self.window.border_width_spin.setValue(1.2)
+
+        # Áp dụng ngay lên khung dịch, nhưng chưa chạm đĩa.
+        self.assertEqual(self.window.config.hud_font_size, 25)
+        self.assertEqual(self.window.config.hud_border_width, 1.2)
+        self.window.config.save.assert_not_called()
+        self.assertTrue(self.window._style_save_timer.isActive())
+
+        self.window._style_save_timer.stop()
+        self.window._flush_hud_style()
+        self.window.config.save.assert_called_once_with()
+
+    def test_hiding_settings_flushes_pending_style_write(self) -> None:
+        self.window.show()
+        self.app.processEvents()
+        self.window.config.save.reset_mock()
+        self.window.font_size_spin.setValue(30)
+        self.assertTrue(self.window._style_save_timer.isActive())
+
+        self.window.hide()
+        self.app.processEvents()
+
+        self.assertFalse(self.window._style_save_timer.isActive())
+        self.window.config.save.assert_called_once_with()
+
     def test_border_width_accepts_subpixel_values(self) -> None:
         self.window.border_width_spin.setValue(0.5)
 
@@ -321,6 +353,15 @@ class SettingsWindowTests(unittest.TestCase):
             self.window.hotkey_edits["clipboard_image_to_text"].combo(),
             "ctrl+alt+t",
         )
+
+    def test_auto_clipboard_toggle_persists_and_syncs_hud(self) -> None:
+        self.assertFalse(self.window.auto_clipboard_check.isChecked())
+        self.window.config.save.reset_mock()
+
+        self.window.auto_clipboard_check.setChecked(True)
+
+        self.assertTrue(self.window.config.auto_translate_clipboard)
+        self.window.config.save.assert_called_once_with()
 
     def test_ocr_model_dropdown_marks_download_state(self) -> None:
         with mock.patch(

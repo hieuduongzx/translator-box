@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
-import pyaudiowpatch as pyaudio
 
 from PySide6.QtCore import QByteArray, QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import (
@@ -22,6 +21,27 @@ SONIOX_MODEL = "stt-rt-v5"
 _MAX_PENDING_AUDIO_BYTES = 1_048_576
 
 
+def _pyaudio():
+    """Nạp PyAudioWPatch khi thật sự cần thu âm thanh hệ thống.
+
+    Import ở top-level làm mọi lần khởi động app phải nạp DLL PortAudio và
+    enumerate thiết bị audio, kể cả khi người dùng không dùng tính năng này.
+    """
+    module = globals().get("pyaudio")
+    if module is None:
+        import pyaudiowpatch as module
+
+        globals()["pyaudio"] = module
+    return module
+
+
+def __getattr__(name: str):
+    """Cho phép `soniox_realtime.pyaudio` truy cập được trước lần dùng đầu tiên."""
+    if name == "pyaudio":
+        return _pyaudio()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 @dataclass(frozen=True)
 class TranscriptBlock:
     """Một khối liên tiếp cùng speaker, ngôn ngữ và loại token."""
@@ -35,14 +55,26 @@ class TranscriptBlock:
 
 @dataclass
 class TranscriptBuffer:
-    """Tích lũy token final và thay thế toàn bộ token non-final mỗi response."""
+    """Tích lũy token final và thay thế toàn bộ token non-final mỗi response.
+
+    Phần token đã final không bao giờ đổi nữa, nên `blocks()` chỉ dựng lại đoạn
+    cuối: một phiên 10 phút có vài nghìn token và server gửi ~5 response/giây,
+    duyệt lại từ đầu mỗi lần sẽ tốn theo bình phương độ dài phiên.
+    """
 
     final_tokens: list[dict[str, Any]] = field(default_factory=list)
     non_final_tokens: list[dict[str, Any]] = field(default_factory=list)
+    # Ảnh chụp kết quả `blocks()` khi chỉ tính tới `_final_cursor` token final.
+    _final_blocks: tuple[TranscriptBlock, ...] = ()
+    _final_speaker: str | None = None
+    _final_cursor: int = 0
 
     def clear(self) -> None:
         self.final_tokens.clear()
         self.non_final_tokens.clear()
+        self._final_blocks = ()
+        self._final_speaker = None
+        self._final_cursor = 0
 
     def ingest(self, tokens: list[dict[str, Any]]) -> None:
         non_final: list[dict[str, Any]] = []
@@ -58,100 +90,78 @@ class TranscriptBuffer:
                 non_final.append(token)
         self.non_final_tokens = non_final
 
+    @staticmethod
+    def _append_token(
+        blocks: list[TranscriptBlock], token: dict[str, Any], speaker: str | None
+    ) -> str | None:
+        text = str(token.get("text") or "")
+        if not text:
+            return speaker
+        speaker_value = token.get("speaker")
+        if speaker_value is not None:
+            speaker = str(speaker_value)
+        kind = (
+            "translation"
+            if token.get("translation_status") == "translation"
+            else "speech"
+        )
+        language_value = token.get("language") or token.get("source_language")
+        language = str(language_value) if language_value else None
+        is_final = bool(token.get("is_final"))
+        if (
+            blocks
+            and blocks[-1].kind == kind
+            and blocks[-1].language == language
+            and blocks[-1].speaker == speaker
+        ):
+            previous = blocks[-1]
+            blocks[-1] = TranscriptBlock(
+                kind=kind,
+                text=previous.text + text,
+                language=language,
+                speaker=speaker,
+                is_final=previous.is_final and is_final,
+            )
+        else:
+            blocks.append(
+                TranscriptBlock(
+                    kind=kind,
+                    text=text.lstrip(),
+                    language=language,
+                    speaker=speaker,
+                    is_final=is_final,
+                )
+            )
+        return speaker
+
+    def _sync_final_blocks(self) -> None:
+        """Gộp các token final mới vào ảnh chụp đã có."""
+        if self._final_cursor > len(self.final_tokens):
+            self._final_blocks = ()
+            self._final_speaker = None
+            self._final_cursor = 0
+        if self._final_cursor == len(self.final_tokens):
+            return
+        blocks = list(self._final_blocks)
+        speaker = self._final_speaker
+        for token in self.final_tokens[self._final_cursor :]:
+            speaker = self._append_token(blocks, token, speaker)
+        self._final_blocks = tuple(blocks)
+        self._final_speaker = speaker
+        self._final_cursor = len(self.final_tokens)
+
     def blocks(self) -> tuple[TranscriptBlock, ...]:
         """Nhóm unified token stream mà không làm mất lời gốc hoặc bản dịch."""
-        blocks: list[TranscriptBlock] = []
-        current_speaker: str | None = None
-        for token in self.final_tokens + self.non_final_tokens:
-            text = str(token.get("text") or "")
-            if not text:
-                continue
-            speaker_value = token.get("speaker")
-            if speaker_value is not None:
-                current_speaker = str(speaker_value)
-            kind = (
-                "translation"
-                if token.get("translation_status") == "translation"
-                else "speech"
+        self._sync_final_blocks()
+        if not self.non_final_tokens:
+            return tuple(
+                block for block in self._final_blocks if block.text.strip()
             )
-            language_value = token.get("language") or token.get("source_language")
-            language = str(language_value) if language_value else None
-            is_final = bool(token.get("is_final"))
-            if (
-                blocks
-                and blocks[-1].kind == kind
-                and blocks[-1].language == language
-                and blocks[-1].speaker == current_speaker
-            ):
-                previous = blocks[-1]
-                blocks[-1] = TranscriptBlock(
-                    kind=kind,
-                    text=previous.text + text,
-                    language=language,
-                    speaker=current_speaker,
-                    is_final=previous.is_final and is_final,
-                )
-            else:
-                blocks.append(
-                    TranscriptBlock(
-                        kind=kind,
-                        text=text.lstrip(),
-                        language=language,
-                        speaker=current_speaker,
-                        is_final=is_final,
-                    )
-                )
+        blocks = list(self._final_blocks)
+        speaker = self._final_speaker
+        for token in self.non_final_tokens:
+            speaker = self._append_token(blocks, token, speaker)
         return tuple(block for block in blocks if block.text.strip())
-
-    def render(self) -> str:
-        """Hiển thị transcript và bản dịch, phân khối theo speaker/language."""
-        parts: list[str] = []
-        current_speaker: str | None = None
-        current_mode: str | None = None
-        current_language: str | None = None
-        at_line_start = True
-
-        for token in self.final_tokens + self.non_final_tokens:
-            text = str(token.get("text", ""))
-            speaker = token.get("speaker")
-            if speaker is not None:
-                speaker = str(speaker)
-            elif current_speaker is not None:
-                speaker = current_speaker
-            mode = (
-                "translation"
-                if token.get("translation_status") == "translation"
-                else "speech"
-            )
-            language = token.get("language") or token.get("source_language")
-            language = str(language) if language else None
-
-            if speaker is not None and speaker != current_speaker:
-                if parts:
-                    parts.append("\n\n")
-                parts.append(f"NGƯỜI NÓI {speaker}")
-                current_speaker = speaker
-                current_mode = None
-                current_language = None
-                at_line_start = False
-
-            if mode != current_mode or language != current_language:
-                if parts and not at_line_start:
-                    parts.append("\n")
-                label = "BẢN DỊCH" if mode == "translation" else "LỜI NÓI"
-                suffix = f" [{language}]" if language else ""
-                parts.append(f"{label}{suffix}: ")
-                current_mode = mode
-                current_language = language
-                text = text.lstrip()
-                at_line_start = False
-
-            parts.append(text)
-            at_line_start = text.endswith("\n")
-
-        if self.non_final_tokens and parts:
-            parts.append(" ▌")
-        return "".join(parts).strip()
 
 
 def build_session_config(
@@ -227,7 +237,7 @@ def system_audio_input_options() -> list[tuple[str, str]]:
     """Danh sách thiết bị phát có WASAPI loopback `(nhãn, tên thiết bị)`."""
     options = [("Mặc định Windows", "")]
     try:
-        manager = pyaudio.PyAudio()
+        manager = _pyaudio().PyAudio()
     except Exception:  # noqa: BLE001 - UI vẫn phải mở khi backend native lỗi.
         return [("WASAPI loopback không khả dụng", "")]
     try:
@@ -291,7 +301,7 @@ class SonioxRealtimeSession(QObject):
     """Vòng đời WebSocket và một nguồn audio realtime (mic hoặc WASAPI loopback)."""
 
     state_changed = Signal(str)
-    transcript_changed = Signal(str)
+    transcript_changed = Signal()
     failed = Signal(str)
     finished = Signal()
     audio_data_ready = Signal(bytes)
@@ -306,6 +316,8 @@ class SonioxRealtimeSession(QObject):
         self._loopback_manager = None
         self._loopback_device: dict[str, Any] | None = None
         self._loopback_stream = None
+        self._continue_flag = 0
+        self._complete_flag = 1
         self._config_message = ""
         self._transcript = TranscriptBuffer()
         self._finishing = False
@@ -325,10 +337,6 @@ class SonioxRealtimeSession(QObject):
     @property
     def is_active(self) -> bool:
         return self._state != "idle"
-
-    @property
-    def transcript(self) -> str:
-        return self._transcript.render()
 
     @property
     def transcript_blocks(self) -> tuple[TranscriptBlock, ...]:
@@ -397,7 +405,7 @@ class SonioxRealtimeSession(QObject):
             return audio_format
 
         try:
-            self._loopback_manager = pyaudio.PyAudio()
+            self._loopback_manager = _pyaudio().PyAudio()
             self._loopback_device = _find_loopback_device(
                 self._loopback_manager, system_device
             )
@@ -460,9 +468,12 @@ class SonioxRealtimeSession(QObject):
         rate = int(device["defaultSampleRate"])
         channels = min(2, max(1, int(device["maxInputChannels"])))
         frames_per_buffer = max(480, int(rate * 0.1))
+        audio = _pyaudio()
+        self._continue_flag = audio.paContinue
+        self._complete_flag = audio.paComplete
         try:
             self._loopback_stream = self._loopback_manager.open(
-                format=pyaudio.paInt16,
+                format=audio.paInt16,
                 channels=channels,
                 rate=rate,
                 input=True,
@@ -483,9 +494,9 @@ class SonioxRealtimeSession(QObject):
         if in_data:
             self.audio_data_ready.emit(bytes(in_data))
         flag = (
-            pyaudio.paContinue
+            self._continue_flag
             if self._state in {"connecting", "listening"}
-            else pyaudio.paComplete
+            else self._complete_flag
         )
         return (None, flag)
 
@@ -520,7 +531,10 @@ class SonioxRealtimeSession(QObject):
         tokens = response.get("tokens")
         if isinstance(tokens, list):
             self._transcript.ingest(tokens)
-            self.transcript_changed.emit(self._transcript.render())
+            # Chuỗi `render()` từng được gửi kèm signal nhưng phía HUD chỉ dùng
+            # `transcript_blocks`, nên bỏ hẳn: mỗi response tiết kiệm một lượt
+            # duyệt toàn bộ token của phiên.
+            self.transcript_changed.emit()
         if response.get("finished"):
             self._finish_normally()
 

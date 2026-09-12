@@ -114,15 +114,11 @@ class TranslationWorkflowTests(unittest.TestCase):
 
         self.assertEqual(options.backend, "cuda")
 
-    def test_selected_text_uses_snapshot_and_applies_result(self) -> None:
+    def test_clipboard_text_is_translated_and_applied(self) -> None:
         hud = FakeHud()
         controller = TranslationWorkflowController(hud)
 
         with (
-            mock.patch(
-                "translation_workflows.services.copy_selected_text",
-                return_value="Hello",
-            ),
             mock.patch(
                 "translation_workflows.services.translate",
                 return_value="Xin chào",
@@ -132,7 +128,7 @@ class TranslationWorkflowTests(unittest.TestCase):
             thread_type.return_value.start.side_effect = lambda: (
                 thread_type.call_args.kwargs["target"]()
             )
-            controller.handle_action("selected_text")
+            controller.translate_clipboard_text("Hello")
 
         translate.assert_called_once_with(
             "Hello",
@@ -146,6 +142,17 @@ class TranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(hud.output_history, ["Xin chào"])
         self.assertEqual(hud.busy_values, [True, False])
         self.assertGreaterEqual(hud.ensure_visible_calls, 2)
+
+    def test_clipboard_text_ignores_blank_input(self) -> None:
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+
+        with mock.patch("translation_workflows.threading.Thread") as thread_type:
+            controller.translate_clipboard_text("   ")
+
+        thread_type.assert_not_called()
+        self.assertFalse(controller.busy)
+        self.assertEqual(hud.statuses, [])
 
     def test_clipboard_image_is_saved_as_png(self) -> None:
         controller = TranslationWorkflowController(FakeHud())
@@ -360,6 +367,92 @@ class TranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(hud.output_history, [])
         # KHÔNG kéo HUD lên (giữ focus ở app đích để Ctrl+V dán đúng chỗ).
         self.assertEqual(hud.ensure_visible_calls, 0)
+
+    def test_live_reuses_translations_for_unchanged_lines(self) -> None:
+        """Frame sau chỉ dịch dòng mới; dòng cũ lấy lại bản dịch đã có."""
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        session = LiveSession(
+            (0, 0, 100, 50),
+            "frame",
+            controller._options(),
+            0.9,
+            "region_to_live_frame",
+        )
+        controller._live = session
+        first = [
+            SimpleNamespace(text="Hello", bbox=(0, 0, 40, 10)),
+            SimpleNamespace(text="World", bbox=(0, 12, 40, 22)),
+        ]
+        second = [
+            SimpleNamespace(text="Hello", bbox=(0, 0, 40, 10)),
+            SimpleNamespace(text="Again", bbox=(0, 12, 40, 22)),
+        ]
+
+        with mock.patch(
+            "translation_workflows.services.translate_regions",
+            side_effect=lambda regions, *_a, **_k: [
+                f"vi:{region.text}" for region in regions
+            ],
+        ) as translate_regions:
+            self.assertEqual(
+                controller._live_translate(session, first), ["vi:Hello", "vi:World"]
+            )
+            self.assertEqual(
+                controller._live_translate(session, second), ["vi:Hello", "vi:Again"]
+            )
+            # Frame giống hệt frame trước không gọi mạng lần nào.
+            self.assertEqual(
+                controller._live_translate(session, second), ["vi:Hello", "vi:Again"]
+            )
+
+        self.assertEqual(translate_regions.call_count, 2)
+        self.assertEqual(
+            [region.text for region in translate_regions.call_args_list[1].args[0]],
+            ["Again"],
+        )
+
+    def test_live_loop_always_yields_between_frames(self) -> None:
+        """Frame nặng hơn cả chu kỳ vẫn phải nghỉ, không ghim CPU."""
+        hud = FakeHud()
+        controller = TranslationWorkflowController(hud)
+        session = LiveSession(
+            (0, 0, 100, 50),
+            "frame",
+            controller._options(),
+            0.8,
+            "region_to_live_frame",
+        )
+        controller._live = session
+        waits: list[float] = []
+
+        def slow_capture(*_args, **_kwargs) -> bytes:
+            # Giả lập một frame mất gấp đôi chu kỳ.
+            controller_clock[0] += 1.6
+            return b""
+
+        controller_clock = [0.0]
+        original_wait = session.stop_event.wait
+
+        def record_wait(timeout=None):
+            waits.append(timeout)
+            session.stop_event.set()
+            return original_wait(0)
+
+        with (
+            mock.patch("translation_workflows.services.capture", slow_capture),
+            mock.patch(
+                "translation_workflows.time.perf_counter",
+                side_effect=lambda: controller_clock[0],
+            ),
+            mock.patch.object(controller, "_live_process"),
+            mock.patch.object(controller, "_new_temp_image", return_value="live.png"),
+            mock.patch.object(controller, "_remove_temp_image"),
+            mock.patch.object(session.stop_event, "wait", record_wait),
+        ):
+            controller._live_loop(session)
+
+        self.assertEqual(waits, [0.8 * 0.25])
 
     def test_live_focus_selection_persists_and_updates_running_session(self) -> None:
         hud = FakeHud()

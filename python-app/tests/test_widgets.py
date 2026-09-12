@@ -11,7 +11,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from soniox_realtime import TranscriptBlock  # noqa: E402
@@ -106,6 +106,70 @@ class HudTranscriptTests(unittest.TestCase):
             return max(sizes)
 
         self.assertLess(largest_font_size(original), largest_font_size(translation))
+
+
+class HudTextOutlineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _first_format(document):
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        return cursor.charFormat()
+
+    def test_outline_is_a_separate_layer_below_a_clean_fill(self) -> None:
+        """Viền phải ở lớp riêng để nét viền không ăn vào thân chữ (chữ khỏi 'vỡ')."""
+        view = HudTextView()
+        view.resize(400, 60)
+        view.apply_style(
+            "Segoe UI",
+            24,
+            "#fafafa",
+            3.0,
+            "#09090b",
+            "#00000000",
+            0.0,
+            "#00000000",
+            False,
+        )
+        view.setText("Xin chào")
+
+        main, _shadow, outline = view._documents(  # noqa: SLF001
+            QFont("Segoe UI", 24), 380, with_shadow=False
+        )
+
+        main_format = self._first_format(main)
+        self.assertEqual(main_format.textOutline().style(), Qt.NoPen)
+        self.assertEqual(main_format.foreground().color().alpha(), 255)
+
+        self.assertIsNotNone(outline)
+        outline_format = self._first_format(outline)
+        self.assertNotEqual(outline_format.textOutline().style(), Qt.NoPen)
+        self.assertEqual(outline_format.textOutline().widthF(), 3.0)
+        self.assertEqual(outline_format.foreground().color().alpha(), 0)
+
+    def test_no_outline_layer_when_border_disabled(self) -> None:
+        view = HudTextView()
+        view.apply_style(
+            "Segoe UI",
+            24,
+            "#fafafa",
+            0.0,
+            "#09090b",
+            "#00000000",
+            0.0,
+            "#00000000",
+            False,
+        )
+        view.setText("Xin chào")
+
+        _main, _shadow, outline = view._documents(  # noqa: SLF001
+            QFont("Segoe UI", 24), 380, with_shadow=False
+        )
+
+        self.assertIsNone(outline)
 
 
 if __name__ == "__main__":

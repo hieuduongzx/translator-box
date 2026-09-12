@@ -6,6 +6,7 @@ import ctypes
 import os
 import sys
 import tempfile
+from functools import lru_cache
 
 from PySide6.QtCore import (
     QEvent,
@@ -28,7 +29,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from theme import TOKENS
 
@@ -40,18 +41,6 @@ ICON_IDLE = QColor(TOKENS["TEXT_MUTED"])
 ICON_ACTIVE = QColor(TOKENS["FOCUS"])
 ICON_ON = QColor(TOKENS["FOCUS_INK"])
 ICON_OFF = QColor(TOKENS["TEXT_OFF"])
-
-
-def _tracked(label: QLabel, percent: float = 120.0) -> QLabel:
-    """Letter-spacing rộng cho nhãn hoa kiểu Swiss — QSS không có thuộc tính này.
-
-    Chỉ set một lần lúc tạo label: Qt lưu spacing trong QFont của chính label
-    nên setText() sau đó (đổi nội dung badge…) vẫn giữ nguyên tracking.
-    """
-    font = label.font()
-    font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, percent)
-    label.setFont(font)
-    return label
 
 
 class TranslatorApplication(QApplication):
@@ -74,19 +63,37 @@ class Bridge(QObject):
     run = Signal(object)
 
 
-def alpha_text_layer(size: QSize) -> QImage | None:
+class AlphaLayerCache:
     """Lớp ARGB trong suốt để vẽ chữ rồi dán lên — buộc Qt dùng AA xám.
 
     Trên Windows, chữ vẽ TRỰC TIẾP lên vùng đục luôn bị bật ClearType (subpixel
     AA) và `QFont.NoSubpixelAntialias` bị bỏ qua; riềm đỏ/xanh của ClearType lộ ra
     thành đốm nâu/tím, làm bản dịch trông sai màu so với chữ gốc. Vẽ vào lớp trong
     suốt rồi dán lại thì Qt buộc dùng AA xám, giữ đúng màu chữ mà nét vẫn nguyên.
+
+    Buffer được giữ lại và chỉ cấp phát lại khi kích thước đổi: một vùng chọn
+    1900×1000 là 7,6 MB, cấp phát mới mỗi paintEvent thì live overlay và transcript
+    realtime phải trả giá alloc đó vài lần mỗi giây.
     """
-    if size.width() <= 0 or size.height() <= 0:
-        return None
-    layer = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-    layer.fill(Qt.transparent)
-    return layer
+
+    __slots__ = ("_layer",)
+
+    def __init__(self) -> None:
+        self._layer: QImage | None = None
+
+    def acquire(self, size: QSize) -> QImage | None:
+        """Lớp ARGB đã xoá trắng, đúng `size`; None nếu size không hợp lệ."""
+        if size.width() <= 0 or size.height() <= 0:
+            return None
+        layer = self._layer
+        if layer is None or layer.size() != size:
+            layer = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+            self._layer = layer
+        layer.fill(Qt.transparent)
+        return layer
+
+    def clear(self) -> None:
+        self._layer = None
 
 
 def _render_icon_pixmap(size: int) -> QPixmap:
@@ -96,10 +103,11 @@ def _render_icon_pixmap(size: int) -> QPixmap:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
     margin = max(1, round(size * 0.07))
+    radius = max(1.0, size * 0.16)
     tile = QRectF(margin, margin, size - margin * 2, size - margin * 2)
     painter.setBrush(BRAND)
     painter.setPen(Qt.NoPen)
-    painter.drawRect(tile)
+    painter.drawRoundedRect(tile, radius, radius)
     font = QFont("IBM Plex Mono", max(8, int(size * 0.49)), QFont.DemiBold)
     painter.setFont(font)
     painter.setPen(QColor(TOKENS["FOCUS_INK"]))
@@ -108,6 +116,7 @@ def _render_icon_pixmap(size: int) -> QPixmap:
     return pixmap
 
 
+@lru_cache(maxsize=None)
 def asset_path(name: str) -> str | None:
     """Đường dẫn tới file trong assets/ — chạy cả khi đóng gói (PyInstaller)."""
     bases = []
@@ -140,6 +149,7 @@ def _load_ui_fonts() -> list[str]:
     return loaded
 
 
+@lru_cache(maxsize=None)
 def _create_app_icon() -> QIcon:
     """Icon đa độ phân giải — ưu tiên icon.ico đóng gói, nếu không thì vẽ tay."""
     path = asset_path("icon.ico")
@@ -153,6 +163,7 @@ def _create_app_icon() -> QIcon:
     return icon
 
 
+@lru_cache(maxsize=None)
 def _brand_pixmap(size: int, ratio: float = 2.0) -> QPixmap:
     """Mark thương hiệu ở kích thước bất kỳ — ưu tiên icon đóng gói cho sắc nét."""
     physical = max(1, round(size * ratio))
@@ -340,6 +351,12 @@ def _paint_glyph(painter: QPainter, kind: str, px: float, color: QColor) -> None
         painter.setBrush(color)
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(QRectF(11 * s, 11 * s, 18 * s, 18 * s), 3 * s, 3 * s)
+    elif kind == "transparent":  # bàn cờ — buộc khung dịch trong suốt
+        painter.drawRoundedRect(QRectF(6.5 * s, 6.5 * s, 27 * s, 27 * s), 5 * s, 5 * s)
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(QRectF(11 * s, 11 * s, 9 * s, 9 * s))
+        painter.drawRect(QRectF(20 * s, 20 * s, 9 * s, 9 * s))
 
 
 def _glyph_pixmap(
@@ -586,14 +603,6 @@ def _combo_from_event(event) -> str | None:
         parts.append("windows")
     parts.append(name)
     return "+".join(parts)
-
-
-def _image_signature(path: str) -> bytes:
-    """Tạo ảnh xám nhỏ để phát hiện vùng màn hình có thay đổi."""
-    from PIL import Image
-
-    with Image.open(path) as image:
-        return image.convert("L").resize((48, 48)).tobytes()
 
 
 def _sig_differs(first: bytes | None, second: bytes | None) -> bool:

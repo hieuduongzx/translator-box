@@ -166,7 +166,7 @@ class TranslationOverlayPaintTests(unittest.TestCase):
 
         self.assertEqual(widget.width(), 220)
         self.assertEqual(widget.height(), 60)
-        text_rect = widget._line_text_rect(widget._paint_regions[0])
+        text_rect = widget._paint_regions[0].text_rect
         self.assertLessEqual(text_rect.right(), widget.rect().right())
         self.assertLessEqual(text_rect.bottom(), widget.rect().bottom())
         widget.close()
@@ -205,7 +205,7 @@ class TranslationOverlayPaintTests(unittest.TestCase):
         )
 
         line = widget._paint_regions[0]
-        text_rect = widget._line_text_rect(line)
+        text_rect = line.text_rect
         metrics = QFontMetricsF(line.font)
         self.assertEqual(line.source_lines, 4)
         self.assertLessEqual(text_rect.width(), line.patch.width())
