@@ -1,6 +1,6 @@
 [package]
 name = "translator2k"
-version = "2.1.5"
+version = "2.1.6"
 description = "Translator2k — Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch audio realtime trên Windows"
 authors = ["Amri2k"]
 edition = "2021"
@@ -87,8 +87,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Cấu hình chốt theo shared/tauri-updater-standard.md (mục 9), riêng panic giữ "unwind":
+# app bắt panic trong spawn_blocking (OCR, vẽ ảnh, chụp vùng) để báo lỗi thay vì sập app khay.
 [profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 16
-strip = "none"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
