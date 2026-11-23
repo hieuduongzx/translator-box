@@ -17,7 +17,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { Button, Card, ConfirmDialog } from "../components/ui";
+import { Button, Card, ConfirmDialog, Select } from "../components/ui";
 import { usePersistentState, type ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import {
@@ -29,6 +29,7 @@ import {
   formatHotkey,
   getServiceOptions,
   parseTextServiceValue,
+  pairsToOptions,
 } from "../lib/constants";
 import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig, HistoryEntry, ReplaceCompletedPayload } from "../types";
@@ -310,34 +311,18 @@ export function TranslatePage({
         title="Dịch văn bản trực tiếp"
         headerRight={
           <div className="row-8">
-            <select
-              className="ui-select"
+            <Select
               aria-label="Bộ dịch văn bản"
               value={currentTextServiceValue(config)}
-              onChange={(e) => {
-                const parsed = parseTextServiceValue(e.target.value);
-                onUpdateConfig(parsed);
-              }}
-            >
-              <option value="">Mặc định ({defaultServiceLabel})</option>
-              {serviceOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <select
-              className="ui-select"
+              onChange={(v) => onUpdateConfig(parseTextServiceValue(v))}
+              options={[{ value: "", label: `Mặc định (${defaultServiceLabel})` }, ...serviceOptions]}
+            />
+            <Select
               aria-label="Ngôn ngữ nguồn"
               value={config.text_source_language}
-              onChange={(e) => onUpdateConfig({ text_source_language: e.target.value })}
-            >
-              {SOURCE_LANGUAGES.map(([label, code]) => (
-                <option key={code} value={code}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => onUpdateConfig({ text_source_language: v })}
+              options={pairsToOptions(SOURCE_LANGUAGES)}
+            />
             <Button
               variant="ghost"
               iconOnly
@@ -352,18 +337,12 @@ export function TranslatePage({
             >
               <ArrowLeftRight size={16} />
             </Button>
-            <select
-              className="ui-select"
+            <Select
               aria-label="Ngôn ngữ đích"
               value={config.text_target_language}
-              onChange={(e) => onUpdateConfig({ text_target_language: e.target.value })}
-            >
-              {LANGUAGES.map(([label, code]) => (
-                <option key={code} value={code}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => onUpdateConfig({ text_target_language: v })}
+              options={pairsToOptions(LANGUAGES)}
+            />
           </div>
         }
       >
@@ -452,20 +431,20 @@ export function TranslatePage({
             {!config.text_keep_history && (
               <span className="badge warning">Đang tắt lưu lịch sử</span>
             )}
-            <select
-              className="ui-select"
+            <Select
               aria-label="Lọc lịch sử theo nguồn"
               value={historyFilter}
-              onChange={(e) => setHistoryFilter(e.target.value)}
-            >
-              <option value="all">Tất cả nguồn</option>
-              <option value="text">Văn bản</option>
-              <option value="replace">Dịch &amp; thay thế</option>
-              <option value="clipboard">Tự dịch Copy</option>
-              <option value="overlay">Overlay tại chỗ</option>
-              <option value="screen">Vùng màn hình</option>
-              <option value="clipboard-image">Ảnh clipboard</option>
-            </select>
+              onChange={setHistoryFilter}
+              options={[
+                { value: "all", label: "Tất cả nguồn" },
+                { value: "text", label: "Văn bản" },
+                { value: "replace", label: "Dịch & thay thế" },
+                { value: "clipboard", label: "Tự dịch Copy" },
+                { value: "overlay", label: "Overlay tại chỗ" },
+                { value: "screen", label: "Vùng màn hình" },
+                { value: "clipboard-image", label: "Ảnh clipboard" },
+              ]}
+            />
             {history.length > 0 && (
               <Button variant="ghost" onClick={() => setConfirmClearHistory(true)}>
                 <Trash2 size={16} />

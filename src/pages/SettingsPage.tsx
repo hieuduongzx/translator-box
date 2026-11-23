@@ -10,7 +10,7 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { Button, Card, Switch } from "../components/ui";
+import { Button, Card, Select, Switch } from "../components/ui";
 import { UpdateSettingsCard } from "../components/ui/UpdateSettingsCard";
 import type { ToastKind } from "../hooks";
 import type { UseUpdaterResult } from "../hooks/useUpdater";
@@ -23,6 +23,7 @@ import {
   formatHotkey,
   getServiceOptions,
   parseTextServiceValue,
+  pairsToOptions,
 } from "../lib/constants";
 import type { AppConfig, AppMeta } from "../types";
 
@@ -215,17 +216,12 @@ export function SettingsPage({
                   Áp dụng cho chụp vùng màn hình, overlay tại chỗ, ảnh clipboard và Live đa vùng.
                 </span>
               </div>
-              <select
-                className="ui-select"
+              <Select
+                aria-label="Ngôn ngữ đích mặc định"
                 value={config.target_language}
-                onChange={(e) => onUpdateConfig({ target_language: e.target.value })}
-              >
-                {LANGUAGES.map(([label, code]) => (
-                  <option key={code} value={code}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig({ target_language: v })}
+                options={pairsToOptions(LANGUAGES)}
+              />
             </div>
           </Card>
 
@@ -274,18 +270,12 @@ export function SettingsPage({
                   Chọn Tự nhận diện để phát hiện ngôn ngữ tự động, hoặc cố định ngôn ngữ đầu vào để dịch chuẩn hơn.
                 </span>
               </div>
-              <select
-                className="ui-select"
+              <Select
                 aria-label="Ngôn ngữ nguồn dịch văn bản"
                 value={config.text_source_language}
-                onChange={(e) => onUpdateConfig({ text_source_language: e.target.value })}
-              >
-                {SOURCE_LANGUAGES.map(([label, code]) => (
-                  <option key={code} value={code}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig({ text_source_language: v })}
+                options={pairsToOptions(SOURCE_LANGUAGES)}
+              />
             </div>
 
             <div className="field-row">
@@ -295,18 +285,12 @@ export function SettingsPage({
                   Ngôn ngữ đích mặc định cho khung Dịch nhanh và tự dịch khi Copy.
                 </span>
               </div>
-              <select
-                className="ui-select"
+              <Select
                 aria-label="Ngôn ngữ đích dịch văn bản"
                 value={config.text_target_language}
-                onChange={(e) => onUpdateConfig({ text_target_language: e.target.value })}
-              >
-                {LANGUAGES.map(([label, code]) => (
-                  <option key={code} value={code}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig({ text_target_language: v })}
+                options={pairsToOptions(LANGUAGES)}
+              />
             </div>
 
             <div className="field-row">
@@ -316,22 +300,15 @@ export function SettingsPage({
                   Có thể chọn bộ dịch hoặc model AI riêng cho Dịch văn bản mà không ảnh hưởng OCR / Live.
                 </span>
               </div>
-              <select
-                className="ui-select"
+              <Select
                 aria-label="Bộ dịch văn bản"
                 value={currentTextServiceValue(config)}
-                onChange={(e) => {
-                  const parsed = parseTextServiceValue(e.target.value);
-                  onUpdateConfig(parsed);
-                }}
-              >
-                <option value="">Theo mặc định ứng dụng ({defaultServiceLabel})</option>
-                {serviceOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig(parseTextServiceValue(v))}
+                options={[
+                  { value: "", label: `Theo mặc định ứng dụng (${defaultServiceLabel})` },
+                  ...serviceOptions,
+                ]}
+              />
             </div>
           </Card>
 
@@ -359,19 +336,13 @@ export function SettingsPage({
                   Độc lập với ngôn ngữ đọc — mặc định sang Tiếng Anh để nhắn tin, viết email hoặc tìm kiếm nhanh.
                 </span>
               </div>
-              <select
-                className="ui-select"
+              <Select
                 aria-label="Ngôn ngữ đích khi thay thế"
                 disabled={!config.replace_enabled}
                 value={config.replace_target_language}
-                onChange={(e) => onUpdateConfig({ replace_target_language: e.target.value })}
-              >
-                {LANGUAGES.map(([label, code]) => (
-                  <option key={code} value={code}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig({ replace_target_language: v })}
+                options={pairsToOptions(LANGUAGES)}
+              />
             </div>
 
             <div className="field-row">

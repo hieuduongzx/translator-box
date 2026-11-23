@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { CheckCircle2, Cpu, Download, Loader2, RefreshCw, ScanText, X } from "lucide-react";
-import { Button, Card } from "../components/ui";
-import { OCR_BACKENDS, OCR_ENGINES, OCR_LANGUAGES } from "../lib/constants";
+import { Button, Card, Select } from "../components/ui";
+import { OCR_BACKENDS, OCR_ENGINES, OCR_LANGUAGES, pairsToOptions } from "../lib/constants";
 import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig } from "../types";
 
@@ -92,19 +92,12 @@ export function OcrPage({ config, onUpdateConfig }: Props) {
             </span>
           </div>
           <div className="field-control">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Bộ máy OCR"
               value={config.ocr_engine}
-              onChange={(e) =>
-                onUpdateConfig({ ocr_engine: e.target.value as AppConfig["ocr_engine"] })
-              }
-            >
-              {OCR_ENGINES.map((eng) => (
-                <option key={eng.value} value={eng.value}>
-                  {eng.label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => onUpdateConfig({ ocr_engine: v as AppConfig["ocr_engine"] })}
+              options={OCR_ENGINES.map((eng) => ({ value: eng.value, label: eng.label, description: eng.desc }))}
+            />
           </div>
         </div>
 
@@ -116,17 +109,12 @@ export function OcrPage({ config, onUpdateConfig }: Props) {
             </span>
           </div>
           <div className="field-control">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Ngôn ngữ OCR"
               value={config.ocr_language}
-              onChange={(e) => onUpdateConfig({ ocr_language: e.target.value })}
-            >
-              {OCR_LANGUAGES.map(([label, code]) => (
-                <option key={code} value={code}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => onUpdateConfig({ ocr_language: v })}
+              options={pairsToOptions(OCR_LANGUAGES)}
+            />
           </div>
         </div>
 
@@ -138,17 +126,12 @@ export function OcrPage({ config, onUpdateConfig }: Props) {
             </span>
           </div>
           <div className="field-control">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Thiết bị chạy OCR"
               value={config.ocr_backend}
-              onChange={(e) => onUpdateConfig({ ocr_backend: e.target.value })}
-            >
-              {OCR_BACKENDS.map(([label, val]) => (
-                <option key={val} value={val}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => onUpdateConfig({ ocr_backend: v })}
+              options={pairsToOptions(OCR_BACKENDS)}
+            />
           </div>
         </div>
 

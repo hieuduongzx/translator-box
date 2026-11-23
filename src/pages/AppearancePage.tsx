@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Palette, RotateCcw } from "lucide-react";
-import { Button, Card, ConfirmDialog, Switch } from "../components/ui";
+import { Button, Card, ConfirmDialog, Select, Switch } from "../components/ui";
 import type { ToastKind } from "../hooks";
 import {
   HUD_FONT_OPTIONS,
@@ -130,17 +130,12 @@ export function AppearancePage({ config, onUpdateConfig, onToast: toast }: Props
           <div className="field-meta">
             <span className="field-label">Phông chữ</span>
           </div>
-          <select
-            className="ui-select"
+          <Select
+            aria-label="Phông chữ"
             value={config.hud_font_family}
-            onChange={(e) => onUpdateConfig({ hud_font_family: e.target.value })}
-          >
-            {HUD_FONT_OPTIONS.map(([fam, cov]) => (
-              <option key={fam} value={fam}>
-                {fam} ({cov})
-              </option>
-            ))}
-          </select>
+            onChange={(v) => onUpdateConfig({ hud_font_family: v })}
+            options={HUD_FONT_OPTIONS.map(([fam, cov]) => ({ value: fam, label: fam, description: cov }))}
+          />
         </div>
 
         <div className="field-row">
@@ -202,28 +197,26 @@ export function AppearancePage({ config, onUpdateConfig, onToast: toast }: Props
             <span className="field-label">Căn lề văn bản</span>
           </div>
           <div className="row-8">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Căn ngang"
               value={config.hud_text_align}
-              onChange={(e) =>
-                onUpdateConfig({ hud_text_align: e.target.value as AppConfig["hud_text_align"] })
-              }
-            >
-              <option value="left">Trái</option>
-              <option value="center">Giữa</option>
-              <option value="right">Phải</option>
-            </select>
-            <select
-              className="ui-select"
+              onChange={(v) => onUpdateConfig({ hud_text_align: v as AppConfig["hud_text_align"] })}
+              options={[
+                { value: "left", label: "Trái" },
+                { value: "center", label: "Giữa" },
+                { value: "right", label: "Phải" },
+              ]}
+            />
+            <Select
+              aria-label="Căn dọc"
               value={config.hud_text_valign}
-              onChange={(e) =>
-                onUpdateConfig({ hud_text_valign: e.target.value as AppConfig["hud_text_valign"] })
-              }
-            >
-              <option value="top">Trên</option>
-              <option value="center">Giữa dọc</option>
-              <option value="bottom">Dưới</option>
-            </select>
+              onChange={(v) => onUpdateConfig({ hud_text_valign: v as AppConfig["hud_text_valign"] })}
+              options={[
+                { value: "top", label: "Trên" },
+                { value: "center", label: "Giữa dọc" },
+                { value: "bottom", label: "Dưới" },
+              ]}
+            />
           </div>
         </div>
 

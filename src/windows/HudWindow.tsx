@@ -33,6 +33,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import { Popover } from "../components/ui";
 import { api } from "../lib/api";
 import {
   LANGUAGES,
@@ -74,6 +75,14 @@ export function HudWindow() {
   const [barHidden, setBarHidden] = useState(false);
   const [lastReplace, setLastReplace] = useState<ReplaceCompletedPayload | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const menuRefs = {
+    screen: useRef<HTMLButtonElement>(null),
+    image: useRef<HTMLButtonElement>(null),
+    text: useRef<HTMLButtonElement>(null),
+    audio: useRef<HTMLButtonElement>(null),
+    lang: useRef<HTMLButtonElement>(null),
+    more: useRef<HTMLButtonElement>(null),
+  };
   const configRef = useRef<AppConfig | null>(null);
   const lastDownRef = useRef<{ t: number; x: number; y: number } | null>(null);
   const lastToggleRef = useRef<number>(0);
@@ -116,7 +125,9 @@ export function HudWindow() {
     ];
 
     const onDown = (e: MouseEvent) => {
-      if (barRef.current && !barRef.current.contains(e.target as Node)) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.(".ui-popover")) return;
+      if (barRef.current && !barRef.current.contains(target as Node)) {
         setOpenMenu(null);
       }
     };
@@ -195,11 +206,12 @@ export function HudWindow() {
   };
 
   const toggleMenu = (id: MenuId) => setOpenMenu((cur) => (cur === id ? null : id));
+  const closeMenu = () => setOpenMenu(null);
 
   const isInteractiveTarget = (target: EventTarget | null): boolean =>
     Boolean(
       (target as HTMLElement | null)?.closest(
-        "button, input, select, textarea, a, .hud-dropdown, .hud-pane-actions"
+        "button, input, select, textarea, a, .hud-dropdown, .ui-popover, .hud-pane-actions"
       )
     );
 
@@ -348,6 +360,7 @@ export function HudWindow() {
         {/* Màn hình ▾ */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.screen}
             type="button"
             className={`hud-bar-btn ${openMenu === "screen" ? "open" : ""} ${liveState.running ? "active" : ""}`}
             onClick={() => toggleMenu("screen")}
@@ -357,8 +370,15 @@ export function HudWindow() {
             <span>{liveState.running ? `Live (${liveState.regions.length})` : "Màn hình"}</span>
             <ChevronDown size={16} />
           </button>
-          {openMenu === "screen" && (
-            <div className="hud-dropdown">
+          <Popover
+            anchorRef={menuRefs.screen}
+            open={openMenu === "screen"}
+            onClose={closeMenu}
+            align="start"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <div className="hud-menu-section">Một lần</div>
               <button
                 type="button"
@@ -470,8 +490,7 @@ export function HudWindow() {
               >
                 <Settings size={16} /> Quản lý vùng Live…
               </button>
-            </div>
-          )}
+          </Popover>
         </div>
 
         {liveState.running && (
@@ -495,6 +514,7 @@ export function HudWindow() {
         {/* Ảnh ▾ */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.image}
             type="button"
             className={`hud-bar-btn ${openMenu === "image" ? "open" : ""}`}
             onClick={() => toggleMenu("image")}
@@ -504,8 +524,15 @@ export function HudWindow() {
             <span>Ảnh</span>
             <ChevronDown size={16} />
           </button>
-          {openMenu === "image" && (
-            <div className="hud-dropdown">
+          <Popover
+            anchorRef={menuRefs.image}
+            open={openMenu === "image"}
+            onClose={closeMenu}
+            align="start"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <button
                 type="button"
                 className="hud-menu-item"
@@ -530,13 +557,13 @@ export function HudWindow() {
                   <span className="hud-menu-kbd">{hk("clipboard_image_to_text")}</span>
                 )}
               </button>
-            </div>
-          )}
+          </Popover>
         </div>
 
         {/* Văn bản ▾ */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.text}
             type="button"
             className={`hud-bar-btn ${openMenu === "text" ? "open" : ""}`}
             onClick={() => toggleMenu("text")}
@@ -546,8 +573,15 @@ export function HudWindow() {
             <span>Văn bản</span>
             <ChevronDown size={16} />
           </button>
-          {openMenu === "text" && (
-            <div className="hud-dropdown">
+          <Popover
+            anchorRef={menuRefs.text}
+            open={openMenu === "text"}
+            onClose={closeMenu}
+            align="start"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <button
                 type="button"
                 className="hud-menu-item"
@@ -604,13 +638,13 @@ export function HudWindow() {
                 <Settings size={16} />
                 <span>Cài đặt dịch văn bản…</span>
               </button>
-            </div>
-          )}
+          </Popover>
         </div>
 
         {/* Âm thanh ▾ */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.audio}
             type="button"
             className={`hud-bar-btn ${openMenu === "audio" ? "open" : ""} ${audioActive ? "active" : ""}`}
             onClick={() => toggleMenu("audio")}
@@ -620,8 +654,15 @@ export function HudWindow() {
             <span>Âm thanh</span>
             <ChevronDown size={16} />
           </button>
-          {openMenu === "audio" && (
-            <div className="hud-dropdown">
+          <Popover
+            anchorRef={menuRefs.audio}
+            open={openMenu === "audio"}
+            onClose={closeMenu}
+            align="start"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <button
                 type="button"
                 className="hud-menu-item"
@@ -698,8 +739,7 @@ export function HudWindow() {
               >
                 <Settings size={16} /> Cài đặt Audio…
               </button>
-            </div>
-          )}
+          </Popover>
         </div>
 
         <span className="hud-divider" />
@@ -717,6 +757,7 @@ export function HudWindow() {
         {/* Dịch vụ → Ngôn ngữ ▾ */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.lang}
             type="button"
             className={`hud-bar-btn chip ${openMenu === "lang" ? "open" : ""}`}
             onClick={() => toggleMenu("lang")}
@@ -728,8 +769,15 @@ export function HudWindow() {
             </span>
             <ChevronDown size={16} style={{ flexShrink: 0 }} />
           </button>
-          {openMenu === "lang" && (
-            <div className="hud-dropdown align-right">
+          <Popover
+            anchorRef={menuRefs.lang}
+            open={openMenu === "lang"}
+            onClose={closeMenu}
+            align="end"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <div className="hud-menu-section">Dịch vụ</div>
               {serviceOptions.map((opt) => (
                 <button
@@ -771,8 +819,7 @@ export function HudWindow() {
                   )}
                 </button>
               ))}
-            </div>
-          )}
+          </Popover>
         </div>
 
         {/* Ghim */}
@@ -789,6 +836,7 @@ export function HudWindow() {
         {/* ⋯ Thêm */}
         <div className="hud-menu-wrap">
           <button
+            ref={menuRefs.more}
             type="button"
             className={`hud-bar-btn icon-only ${openMenu === "more" ? "open" : ""}`}
             onClick={() => toggleMenu("more")}
@@ -797,8 +845,15 @@ export function HudWindow() {
           >
             <MoreHorizontal size={16} />
           </button>
-          {openMenu === "more" && (
-            <div className="hud-dropdown align-right">
+          <Popover
+            anchorRef={menuRefs.more}
+            open={openMenu === "more"}
+            onClose={closeMenu}
+            align="end"
+            matchWidth={false}
+            minWidth={215}
+            className="hud-dropdown"
+          >
               <button
                 type="button"
                 className="hud-menu-item"
@@ -897,8 +952,7 @@ export function HudWindow() {
                 <span>Thoát ứng dụng</span>
                 {hk("quit") && <span className="hud-menu-kbd">{hk("quit")}</span>}
               </button>
-            </div>
-          )}
+          </Popover>
         </div>
       </div>
       )}

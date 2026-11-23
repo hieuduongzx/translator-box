@@ -10,10 +10,10 @@ import {
   Trash2,
   Volume2,
 } from "lucide-react";
-import { Button, Card, Switch } from "../components/ui";
+import { Button, Card, Select, Switch } from "../components/ui";
 import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
-import { SONIOX_LANGUAGES } from "../lib/constants";
+import { SONIOX_LANGUAGES, pairsToOptions } from "../lib/constants";
 import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig } from "../types";
 
@@ -213,26 +213,24 @@ export function AudioPage({ config, onUpdateConfig, onToast: toast }: Props) {
             </span>
           </div>
           <div className="field-control">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Thiết bị âm thanh"
               style={{ width: 260 }}
               value={
                 config.soniox_audio_source === "system"
                   ? config.soniox_system_device
                   : config.soniox_input_device
               }
-              onChange={(e) =>
+              onChange={(v) =>
                 config.soniox_audio_source === "system"
-                  ? onUpdateConfig({ soniox_system_device: e.target.value })
-                  : onUpdateConfig({ soniox_input_device: e.target.value })
+                  ? onUpdateConfig({ soniox_system_device: v })
+                  : onUpdateConfig({ soniox_input_device: v })
               }
-            >
-              {(config.soniox_audio_source === "system" ? sysDevices : micDevices).map((d) => (
-                <option key={d.id || "default"} value={d.id}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
+              options={(config.soniox_audio_source === "system" ? sysDevices : micDevices).map((d) => ({
+                value: d.id,
+                label: d.label,
+              }))}
+            />
           </div>
         </div>
 
@@ -242,56 +240,42 @@ export function AudioPage({ config, onUpdateConfig, onToast: toast }: Props) {
             <span className="field-hint">Một chiều (mọi ngôn ngữ → đích) hoặc Hai chiều (đối thoại 2 ngôn ngữ).</span>
           </div>
           <div className="row-8">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Chế độ dịch"
               value={config.soniox_translation_mode}
-              onChange={(e) =>
+              onChange={(v) =>
                 onUpdateConfig({
-                  soniox_translation_mode: e.target.value as AppConfig["soniox_translation_mode"],
+                  soniox_translation_mode: v as AppConfig["soniox_translation_mode"],
                 })
               }
-            >
-              <option value="one_way">Dịch một chiều</option>
-              <option value="two_way">Dịch hai chiều</option>
-            </select>
+              options={[
+                { value: "one_way", label: "Dịch một chiều" },
+                { value: "two_way", label: "Dịch hai chiều" },
+              ]}
+            />
 
             {config.soniox_translation_mode === "one_way" ? (
-              <select
-                className="ui-select"
+              <Select
+                aria-label="Ngôn ngữ đích"
                 value={config.soniox_target_language}
-                onChange={(e) => onUpdateConfig({ soniox_target_language: e.target.value })}
-              >
-                {SONIOX_LANGUAGES.map(([label, code]) => (
-                  <option key={code} value={code}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onUpdateConfig({ soniox_target_language: v })}
+                options={pairsToOptions(SONIOX_LANGUAGES)}
+              />
             ) : (
               <>
-                <select
-                  className="ui-select"
+                <Select
+                  aria-label="Ngôn ngữ A"
                   value={config.soniox_language_a}
-                  onChange={(e) => onUpdateConfig({ soniox_language_a: e.target.value })}
-                >
-                  {SONIOX_LANGUAGES.map(([label, code]) => (
-                    <option key={code} value={code}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => onUpdateConfig({ soniox_language_a: v })}
+                  options={pairsToOptions(SONIOX_LANGUAGES)}
+                />
                 <ArrowLeftRight size={16} />
-                <select
-                  className="ui-select"
+                <Select
+                  aria-label="Ngôn ngữ B"
                   value={config.soniox_language_b}
-                  onChange={(e) => onUpdateConfig({ soniox_language_b: e.target.value })}
-                >
-                  {SONIOX_LANGUAGES.map(([label, code]) => (
-                    <option key={code} value={code}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => onUpdateConfig({ soniox_language_b: v })}
+                  options={pairsToOptions(SONIOX_LANGUAGES)}
+                />
               </>
             )}
           </div>
@@ -302,18 +286,19 @@ export function AudioPage({ config, onUpdateConfig, onToast: toast }: Props) {
             <span className="field-label">Hiển thị song ngữ</span>
             <span className="field-hint">Hiện cả lời gốc và bản dịch, hoặc chỉ bản dịch.</span>
           </div>
-          <select
-            className="ui-select"
+          <Select
+            aria-label="Chế độ hiển thị"
             value={config.soniox_display_mode}
-            onChange={(e) =>
+            onChange={(v) =>
               onUpdateConfig({
-                soniox_display_mode: e.target.value as AppConfig["soniox_display_mode"],
+                soniox_display_mode: v as AppConfig["soniox_display_mode"],
               })
             }
-          >
-            <option value="bilingual">Song ngữ (Gốc + Dịch)</option>
-            <option value="translation">Chỉ bản dịch</option>
-          </select>
+            options={[
+              { value: "bilingual", label: "Song ngữ (Gốc + Dịch)" },
+              { value: "translation", label: "Chỉ bản dịch" },
+            ]}
+          />
         </div>
 
         <div className="field-row">

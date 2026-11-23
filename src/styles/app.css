@@ -542,26 +542,19 @@ body.transparent-window #root {
   justify-content: center;
 }
 
-.hud-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  min-width: 215px;
-  max-height: 215px;
-  overflow-y: auto;
+/* Menu HUD render qua <Popover> dùng chung (portal, tự co theo chiều cao cửa sổ HUD). */
+.ui-popover.hud-dropdown {
   padding: 4px;
   border-radius: var(--radius);
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: none;
-  z-index: 100;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.hud-dropdown.align-right {
-  left: auto;
-  right: 0;
+.ui-popover.hud-dropdown > * {
+  flex-shrink: 0;
 }
 
 .hud-menu-section {

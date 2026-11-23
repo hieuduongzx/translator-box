@@ -1,6 +1,6 @@
 [package]
 name = "translator2k"
-version = "2.1.4"
+version = "2.1.5"
 description = "Translator2k — Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch audio realtime trên Windows"
 authors = ["Amri2k"]
 edition = "2021"

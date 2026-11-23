@@ -303,10 +303,10 @@ export function buildHudBackgroundPatch(
   };
 }
 
-export function getServiceOptions(config: AppConfig): { label: string; value: string }[] {
-  const opts: { label: string; value: string }[] = [
-    { label: "Google Dịch", value: "google" },
-    { label: "Bing Translator", value: "bing" },
+export function getServiceOptions(config: AppConfig): { label: string; value: string; group?: string }[] {
+  const opts: { label: string; value: string; group?: string }[] = [
+    { label: "Google Dịch", value: "google", group: "Dịch máy" },
+    { label: "Bing Translator", value: "bing", group: "Dịch máy" },
   ];
   for (const p of BUILTIN_AI_PROVIDERS) {
     const key = p.id === "llm" ? config.llm_api_key : config.ai_keys[p.id] || "";
@@ -321,6 +321,7 @@ export function getServiceOptions(config: AppConfig): { label: string; value: st
       opts.push({
         label: `${p.name} · ${found ? found.label : modelId}`,
         value: `${p.id}::${modelId}`,
+        group: p.name,
       });
     }
   }
@@ -330,6 +331,7 @@ export function getServiceOptions(config: AppConfig): { label: string; value: st
       opts.push({
         label: `${cp.name} · ${modelId}`,
         value: `custom:${cp.id}::${modelId}`,
+        group: cp.name,
       });
     }
   }
@@ -401,4 +403,9 @@ export function eventToCombo(e: KeyboardEvent): string | null {
               : key;
   parts.push(mapped);
   return parts.join("+");
+}
+
+/** Đổi danh sách cặp [nhãn, giá trị] sang options cho <Select>. */
+export function pairsToOptions(pairs: readonly (readonly [string, string])[]): { label: string; value: string }[] {
+  return pairs.map(([label, value]) => ({ label, value }));
 }

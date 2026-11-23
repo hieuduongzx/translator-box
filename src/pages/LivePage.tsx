@@ -11,7 +11,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { Button, Card, ConfirmDialog } from "../components/ui";
+import { Button, Card, ConfirmDialog, Select } from "../components/ui";
 import { api } from "../lib/api";
 import { LIVE_TRIGGER_MODES, formatHotkey } from "../lib/constants";
 import { appActions, useAppSlice } from "../store/appStore";
@@ -204,21 +204,16 @@ export function LivePage({ config, onUpdateConfig }: Props) {
               Hybrid vừa theo dõi thay đổi màn hình vừa quét ngay khi bấm chuột / Enter / Space.
             </span>
           </div>
-          <select
-            className="ui-select"
+          <Select
+            aria-label="Chế độ kích hoạt"
             value={config.live_trigger_mode}
-            onChange={(e) =>
+            onChange={(v) =>
               onUpdateConfig({
-                live_trigger_mode: e.target.value as AppConfig["live_trigger_mode"],
+                live_trigger_mode: v as AppConfig["live_trigger_mode"],
               })
             }
-          >
-            {LIVE_TRIGGER_MODES.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+            options={LIVE_TRIGGER_MODES}
+          />
         </div>
 
         <div className="field-row">
@@ -248,25 +243,26 @@ export function LivePage({ config, onUpdateConfig }: Props) {
             </span>
           </div>
           <div className="field-control">
-            <select
-              className="ui-select"
+            <Select
+              aria-label="Ứng dụng theo dõi"
               style={{ width: 240 }}
               value={config.live_focus_app_id}
-              onChange={(e) => {
-                const selected = apps.find((a) => a.application_id === e.target.value);
+              onChange={(v) => {
+                const selected = apps.find((a) => a.application_id === v);
                 onUpdateConfig({
-                  live_focus_app_id: e.target.value,
+                  live_focus_app_id: v,
                   live_focus_app_label: selected?.label ?? "",
                 });
               }}
-            >
-              <option value="">Mọi ứng dụng (không giới hạn)</option>
-              {apps.map((a) => (
-                <option key={a.application_id} value={a.application_id}>
-                  {a.label} — {a.title.slice(0, 32)}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: "Mọi ứng dụng (không giới hạn)" },
+                ...apps.map((a) => ({
+                  value: a.application_id,
+                  label: a.label,
+                  description: a.title.slice(0, 60),
+                })),
+              ]}
+            />
             <Button
               variant="secondary"
               iconOnly

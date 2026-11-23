@@ -18,3 +18,6 @@ export type { TitleBarProps } from "./TitleBar";
 
 export { Toast } from "./Toast";
 export type { ToastProps } from "./Toast";
+
+export { Popover, Select, normalizeSearchText } from "./Select";
+export type { PopoverProps, SelectOption, SelectProps } from "./Select";
