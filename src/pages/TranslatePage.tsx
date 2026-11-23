@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   Languages,
   Layers,
+  Loader2,
   PictureInPicture2,
   Replace,
   RotateCcw,
@@ -29,6 +30,7 @@ import {
   getServiceOptions,
   parseTextServiceValue,
 } from "../lib/constants";
+import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig, HistoryEntry, ReplaceCompletedPayload } from "../types";
 
 interface Props {
@@ -52,10 +54,7 @@ export function TranslatePage({
   onHistoryCleared,
   onToast: toast,
 }: Props) {
-  const [sourceText, setSourceText] = useState("");
-  const [resultText, setResultText] = useState("");
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { sourceText, resultText, imagePreview, busy, statusText } = useAppSlice("translate");
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
   const [historyFilter, setHistoryFilter] = usePersistentState<string>(
     "translator2k.ui.historyFilter",
@@ -77,47 +76,8 @@ export function TranslatePage({
     return raw ? `${desc} · Phím tắt: ${formatHotkey(raw)}` : desc;
   };
 
-  const handleTranslate = async () => {
-    const trimmed = sourceText.trim();
-    if (!trimmed || busy) return;
-    setBusy(true);
-    setImagePreview(null);
-    try {
-      const res = await api.translateText(
-        trimmed,
-        config.text_target_language,
-        config.text_source_language
-      );
-      setResultText(res.translated);
-      if (config.text_auto_copy_result && res.translated.trim()) {
-        toast("Đã dịch và tự sao chép kết quả", "success");
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const runAction = async (
-    fn: () => Promise<{ original: string; translated: string; image_data_url: string | null }>,
-    okMsg?: string
-  ) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const res = await fn();
-      if (res.original) setSourceText(res.original);
-      if (res.translated) setResultText(res.translated);
-      setImagePreview(res.image_data_url);
-      if (okMsg && (res.translated || res.image_data_url)) {
-        toast(okMsg, "success");
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    } finally {
-      setBusy(false);
-    }
+  const handleTranslate = () => {
+    void appActions.translateText(config);
   };
 
   const handleCopy = async (text: string, label = "Đã sao chép bản dịch") => {
@@ -210,6 +170,13 @@ export function TranslatePage({
         </div>
       </div>
 
+      {busy && (
+        <div className="task-busy-banner" role="status" aria-live="polite">
+          <Loader2 size={16} className="ui-spin" />
+          <span>{statusText || "Đang xử lý tác vụ dịch…"}</span>
+        </div>
+      )}
+
       {lastReplace && config.replace_show_undo_original && (
         <div className="undo-banner">
           <div className="undo-banner-body">
@@ -251,7 +218,14 @@ export function TranslatePage({
             data-tip={actionTip("Chọn vùng, dịch một lần và vẽ đè lên chữ gốc (bấm vào overlay hoặc Esc để đóng)", "region_to_overlay")}
             data-tip-align="left"
             title={actionTip("Chọn vùng, dịch một lần và vẽ đè lên chữ gốc", "region_to_overlay")}
-            onClick={() => runAction(api.regionToOverlay, "Đã hiện overlay (bấm vào overlay hoặc nhấn Esc để đóng)")}
+            onClick={() =>
+              void appActions.runTranslateAction(
+                "region_to_overlay",
+                api.regionToOverlay,
+                "Chọn vùng để vẽ overlay bản dịch…",
+                "Đã hiện overlay (bấm vào overlay hoặc nhấn Esc để đóng)"
+              )
+            }
           >
             <Layers size={16} />
             Vùng → Overlay tại chỗ
@@ -261,7 +235,14 @@ export function TranslatePage({
             disabled={busy}
             data-tip={actionTip("Chọn vùng, OCR và đưa bản dịch vào khung", "region_to_text")}
             title={actionTip("Chọn vùng, OCR và đưa bản dịch vào khung", "region_to_text")}
-            onClick={() => runAction(api.regionToText, "Đã OCR và dịch vùng màn hình")}
+            onClick={() =>
+              void appActions.runTranslateAction(
+                "region_to_text",
+                api.regionToText,
+                "Chọn vùng màn hình cần dịch…",
+                "Đã OCR và dịch vùng màn hình"
+              )
+            }
           >
             <Camera size={16} />
             Vùng → Khung dịch
@@ -271,7 +252,14 @@ export function TranslatePage({
             disabled={busy}
             data-tip={actionTip("OCR ảnh clipboard, xoá chữ gốc và vẽ bản dịch đè lên ảnh", "clipboard_image_replace")}
             title={actionTip("OCR ảnh clipboard, xoá chữ gốc và vẽ bản dịch đè lên ảnh", "clipboard_image_replace")}
-            onClick={() => runAction(api.clipboardImageReplace, "Đã dịch ảnh từ clipboard")}
+            onClick={() =>
+              void appActions.runTranslateAction(
+                "clipboard_image_replace",
+                api.clipboardImageReplace,
+                "Đang OCR & dịch ảnh từ clipboard…",
+                "Đã dịch ảnh từ clipboard"
+              )
+            }
           >
             <ImageIcon size={16} />
             Dịch ảnh clipboard
@@ -281,7 +269,14 @@ export function TranslatePage({
             disabled={busy}
             data-tip={actionTip("OCR ảnh clipboard rồi xuất bản dịch dạng chữ", "clipboard_image_to_text")}
             title={actionTip("OCR ảnh clipboard rồi xuất bản dịch dạng chữ", "clipboard_image_to_text")}
-            onClick={() => runAction(api.clipboardImageToText, "Đã trích xuất văn bản ảnh clipboard")}
+            onClick={() =>
+              void appActions.runTranslateAction(
+                "clipboard_image_to_text",
+                api.clipboardImageToText,
+                "Đang trích xuất chữ từ ảnh clipboard…",
+                "Đã trích xuất văn bản ảnh clipboard"
+              )
+            }
           >
             <Clipboard size={16} />
             Ảnh clipboard → Chữ
@@ -296,7 +291,14 @@ export function TranslatePage({
             }
             data-tip-align="left"
             title={actionTip("Copy văn bản đang bôi đen, dịch rồi dán đè tại chỗ", "selected_text_replace")}
-            onClick={() => runAction(api.selectedTextReplace, "Đã thay thế văn bản tại chỗ")}
+            onClick={() =>
+              void appActions.runTranslateAction(
+                "selected_text_replace",
+                api.selectedTextReplace,
+                "Đang dịch & thay thế tại chỗ…",
+                "Đã thay thế văn bản tại chỗ"
+              )
+            }
           >
             <Replace size={16} />
             Dịch &amp; thay thế
@@ -372,7 +374,7 @@ export function TranslatePage({
               rows={6}
               placeholder={submitPlaceholder}
               value={sourceText}
-              onChange={(e) => setSourceText(e.target.value)}
+              onChange={(e) => appActions.setSourceText(e.target.value)}
               onKeyDown={(e) => {
                 if (config.text_submit_shortcut === "enter") {
                   if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
@@ -387,17 +389,13 @@ export function TranslatePage({
             />
             <div className="row-8">
               <Button variant="primary" disabled={busy || !sourceText.trim()} onClick={handleTranslate}>
-                <Send size={16} />
+                {busy ? <Loader2 size={16} className="ui-spin" /> : <Send size={16} />}
                 {busy ? "Đang dịch…" : "Dịch ngay"}
               </Button>
               <Button
                 variant="ghost"
-                disabled={!sourceText && !resultText && !imagePreview}
-                onClick={() => {
-                  setSourceText("");
-                  setResultText("");
-                  setImagePreview(null);
-                }}
+                disabled={busy || (!sourceText && !resultText && !imagePreview)}
+                onClick={() => appActions.clearTranslate()}
               >
                 Xoá ô nhập
               </Button>

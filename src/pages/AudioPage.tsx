@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import {
   ArrowLeftRight,
   AudioLines,
@@ -14,13 +14,12 @@ import { Button, Card, Switch } from "../components/ui";
 import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { SONIOX_LANGUAGES } from "../lib/constants";
-import type { AppConfig, AudioDeviceOption, SonioxStatePayload } from "../types";
+import { appActions, useAppSlice } from "../store/appStore";
+import type { AppConfig } from "../types";
 
 interface Props {
   config: AppConfig;
-  sonioxState: SonioxStatePayload;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  onSonioxChange: (state: SonioxStatePayload) => void;
   onToast: (message: string, kind?: ToastKind) => void;
 }
 
@@ -33,54 +32,15 @@ const STATE_LABELS: Record<string, { text: string; tone: string }> = {
   stopping: { text: "Đang dừng…", tone: "warning" },
 };
 
-export function AudioPage({
-  config,
-  sonioxState,
-  onUpdateConfig,
-  onSonioxChange,
-  onToast: toast,
-}: Props) {
-  const [micDevices, setMicDevices] = useState<AudioDeviceOption[]>([]);
-  const [sysDevices, setSysDevices] = useState<AudioDeviceOption[]>([]);
-  const [loadingDevices, setLoadingDevices] = useState(false);
-
-  const loadDevices = async () => {
-    setLoadingDevices(true);
-    try {
-      const [mics, sys] = await Promise.all([
-        api.listAudioDevices(false),
-        api.listAudioDevices(true),
-      ]);
-      setMicDevices(mics);
-      setSysDevices(sys);
-    } catch {
-      // ignore
-    } finally {
-      setLoadingDevices(false);
-    }
-  };
+export function AudioPage({ config, onUpdateConfig, onToast: toast }: Props) {
+  const { sonioxState, micDevices, sysDevices, loadingDevices, toggling } = useAppSlice("audio");
 
   useEffect(() => {
-    loadDevices();
+    void appActions.loadAudioDevices();
   }, []);
 
   const isActive = sonioxState.state !== "idle";
   const badgeInfo = STATE_LABELS[sonioxState.state] || STATE_LABELS.idle;
-
-  const handleToggle = async () => {
-    try {
-      if (isActive) {
-        const st = await api.sonioxStop();
-        onSonioxChange(st);
-        toast("Đã dừng dịch âm thanh", "info");
-      } else {
-        await api.sonioxStart();
-        toast("Đã khởi động dịch âm thanh Soniox", "success");
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    }
-  };
 
   const visibleBlocks =
     config.soniox_display_mode === "translation"
@@ -112,8 +72,10 @@ export function AudioPage({
           <span className={`badge ${badgeInfo.tone}`}>{badgeInfo.text}</span>
           <Button
             variant={isActive ? "danger" : "primary"}
-            disabled={sonioxState.state === "connecting" || sonioxState.state === "stopping"}
-            onClick={handleToggle}
+            disabled={
+              toggling || sonioxState.state === "connecting" || sonioxState.state === "stopping"
+            }
+            onClick={() => void appActions.toggleSoniox()}
           >
             {isActive ? <Square size={16} /> : <Play size={16} />}
             {isActive ? "Dừng dịch âm thanh" : "Bắt đầu nghe"}
@@ -138,10 +100,7 @@ export function AudioPage({
             <Button
               variant="ghost"
               disabled={sonioxState.blocks.length === 0}
-              onClick={async () => {
-                const st = await api.sonioxClear();
-                onSonioxChange(st);
-              }}
+              onClick={() => void appActions.clearSoniox()}
             >
               <Trash2 size={16} />
               Xoá
@@ -193,7 +152,11 @@ export function AudioPage({
       <Card
         title="Cấu hình Soniox & Thiết bị âm thanh"
         headerRight={
-          <Button variant="secondary" disabled={loadingDevices} onClick={loadDevices}>
+          <Button
+            variant="secondary"
+            disabled={loadingDevices}
+            onClick={() => void appActions.loadAudioDevices(true)}
+          >
             <RefreshCw size={16} className={loadingDevices ? "spin" : undefined} />
             {loadingDevices ? "Đang quét…" : "Quét thiết bị"}
           </Button>
@@ -365,7 +328,7 @@ export function AudioPage({
         </div>
 
         <div className="stack-8" style={{ paddingTop: 12 }}>
-          <span className="field-label">Ngữ cảnh & thuật ngữ ưu tiên (tuỳ chọn)</span>
+          <span className="field-label">Ngữ cảnh &amp; thuật ngữ ưu tiên (tuỳ chọn)</span>
           <input
             type="text"
             className="ui-input"

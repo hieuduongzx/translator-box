@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
+import { Loader2, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 
 export interface SidebarItem {
   id: string;
@@ -7,6 +7,8 @@ export interface SidebarItem {
   icon: ReactNode;
   badge?: string | number;
   badgeVariant?: "neutral" | "warning" | "accent";
+  busy?: boolean;
+  busyLabel?: string;
 }
 
 export interface SidebarProps {
@@ -66,28 +68,50 @@ export function Sidebar({
       >
         {items.map((item) => {
           const isActive = activeId === item.id;
+          const busyText = item.busyLabel || "Đang xử lý…";
+          const itemTitle = collapsed
+            ? item.busy
+              ? `${item.label} · ${busyText}`
+              : item.label
+            : item.busy
+              ? busyText
+              : undefined;
           return (
             <button
               key={item.id}
               type="button"
               className={`ui-sidebar-item${isActive ? " active" : ""}`}
               aria-current={isActive ? "page" : undefined}
-              aria-label={item.label}
-              title={collapsed ? item.label : undefined}
+              aria-label={item.busy ? `${item.label} (${busyText})` : item.label}
+              title={itemTitle}
               onClick={() => onSelect(item.id)}
             >
               <span className="ui-sidebar-icon">{item.icon}</span>
               {!collapsed && <span className="ui-sidebar-label">{item.label}</span>}
-              {!collapsed && item.badge !== undefined && item.badge !== "" && (
-                <span
-                  className={`ui-sidebar-badge${
-                    item.badgeVariant && item.badgeVariant !== "neutral"
-                      ? ` ${item.badgeVariant}`
-                      : ""
-                  }`}
-                >
-                  {item.badge}
-                </span>
+              {item.busy ? (
+                collapsed ? (
+                  <span className="ui-sidebar-dot busy" aria-hidden="true" />
+                ) : (
+                  <Loader2
+                    size={14}
+                    className="ui-spin ui-sidebar-spinner"
+                    aria-hidden="true"
+                  />
+                )
+              ) : (
+                !collapsed &&
+                item.badge !== undefined &&
+                item.badge !== "" && (
+                  <span
+                    className={`ui-sidebar-badge${
+                      item.badgeVariant && item.badgeVariant !== "neutral"
+                        ? ` ${item.badgeVariant}`
+                        : ""
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )
               )}
             </button>
           );

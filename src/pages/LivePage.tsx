@@ -12,28 +12,18 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button, Card, ConfirmDialog } from "../components/ui";
-import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { LIVE_TRIGGER_MODES, formatHotkey } from "../lib/constants";
-import type { AppConfig, DesktopApplication, LiveStatePayload } from "../types";
+import { appActions, useAppSlice } from "../store/appStore";
+import type { AppConfig } from "../types";
 
 interface Props {
   config: AppConfig;
-  liveState: LiveStatePayload;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  onLiveStateChange: (state: LiveStatePayload) => void;
-  onToast: (message: string, kind?: ToastKind) => void;
 }
 
-export function LivePage({
-  config,
-  liveState,
-  onUpdateConfig,
-  onLiveStateChange,
-  onToast: toast,
-}: Props) {
-  const [apps, setApps] = useState<DesktopApplication[]>([]);
-  const [loadingApps, setLoadingApps] = useState(false);
+export function LivePage({ config, onUpdateConfig }: Props) {
+  const { state: liveState, apps, loadingApps, busyAction } = useAppSlice("live");
   const [confirmClear, setConfirmClear] = useState(false);
   const [deleteRegionTarget, setDeleteRegionTarget] = useState<{ id: number; index: number } | null>(
     null
@@ -44,61 +34,11 @@ export function LivePage({
     return raw ? `${desc} · Phím tắt: ${formatHotkey(raw)}` : desc;
   };
 
-  const refreshApps = async () => {
-    setLoadingApps(true);
-    try {
-      const list = await api.listDesktopApps();
-      setApps(list);
-    } catch {
-      // ignore
-    } finally {
-      setLoadingApps(false);
-    }
-  };
-
   useEffect(() => {
-    refreshApps();
+    void appActions.loadDesktopApps();
   }, []);
 
-  const handleAddRegion = async (mode: "overlay" | "frame") => {
-    try {
-      const added = await api.liveAddRegion(mode);
-      if (added) {
-        const next = await api.getLiveState();
-        onLiveStateChange(next);
-        if (mode === "frame") {
-          await api.openLiveOutputWindow(added.id, added.bbox);
-        }
-        toast(
-          mode === "overlay" ? "Đã thêm vùng Live Overlay" : "Đã thêm vùng Live Khung nổi",
-          "success"
-        );
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    }
-  };
-
-  const handleToggleRun = async () => {
-    try {
-      if (liveState.running) {
-        const st = await api.liveStop();
-        onLiveStateChange(st);
-        toast("Đã dừng dịch Live", "info");
-      } else {
-        for (const r of liveState.regions) {
-          if (r.mode === "frame") {
-            await api.openLiveOutputWindow(r.id, r.bbox);
-          }
-        }
-        const st = await api.liveStart();
-        onLiveStateChange(st);
-        toast("Đã bắt đầu dịch Live", "success");
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    }
-  };
+  const actionBusy = busyAction !== null;
 
   return (
     <div className="stack-16">
@@ -117,12 +57,12 @@ export function LivePage({
         <div className="page-header-actions">
           <Button
             variant={liveState.running ? "danger" : "primary"}
-            disabled={liveState.regions.length === 0}
+            disabled={liveState.regions.length === 0 || actionBusy}
             data-tip={actionTip("Bắt đầu hoặc dừng dịch Live trên mọi vùng", "live_toggle")}
             data-tip-pos="bottom"
             data-tip-align="right"
             title={actionTip("Bắt đầu hoặc dừng dịch Live trên mọi vùng", "live_toggle")}
-            onClick={handleToggleRun}
+            onClick={() => void appActions.liveToggleRun()}
           >
             {liveState.running ? <Square size={16} /> : <Play size={16} />}
             {liveState.running ? "Dừng Live" : "Bắt đầu Live"}
@@ -130,14 +70,12 @@ export function LivePage({
           {liveState.running && (
             <Button
               variant="secondary"
+              disabled={actionBusy}
               data-tip={actionTip("Ép OCR và dịch lại ngay mọi vùng Live", "live_rescan")}
               data-tip-pos="bottom"
               data-tip-align="right"
               title={actionTip("Ép OCR và dịch lại ngay mọi vùng Live", "live_rescan")}
-              onClick={async () => {
-                await api.liveRescan();
-                toast("Đang quét lại toàn bộ vùng Live…", "info");
-              }}
+              onClick={() => void appActions.liveRescan()}
             >
               <Scan size={16} />
               Quét lại ngay
@@ -159,26 +97,28 @@ export function LivePage({
           <div className="ui-card-header-actions">
             <Button
               variant="primary"
+              disabled={actionBusy}
               data-tip={actionTip("Kéo chọn thêm vùng dịch liên tục kiểu overlay tại chỗ", "region_to_live")}
               data-tip-align="right"
               title={actionTip("Kéo chọn thêm vùng dịch liên tục kiểu overlay tại chỗ", "region_to_live")}
-              onClick={() => handleAddRegion("overlay")}
+              onClick={() => void appActions.liveAddRegion("overlay")}
             >
               <Plus size={16} />
               Thêm Overlay
             </Button>
             <Button
               variant="secondary"
+              disabled={actionBusy}
               data-tip={actionTip("Kéo chọn thêm vùng dịch liên tục hiện ở khung nổi riêng", "region_to_live_frame")}
               data-tip-align="right"
               title={actionTip("Kéo chọn thêm vùng dịch liên tục hiện ở khung nổi riêng", "region_to_live_frame")}
-              onClick={() => handleAddRegion("frame")}
+              onClick={() => void appActions.liveAddRegion("frame")}
             >
               <AppWindow size={16} />
               Thêm Khung
             </Button>
             {liveState.regions.length > 0 && (
-              <Button variant="ghost" onClick={() => setConfirmClear(true)}>
+              <Button variant="ghost" disabled={actionBusy} onClick={() => setConfirmClear(true)}>
                 <Trash2 size={16} />
                 Xoá tất cả
               </Button>
@@ -220,14 +160,8 @@ export function LivePage({
                     <div className="row-8">
                       <Button
                         variant="secondary"
-                        onClick={async () => {
-                          try {
-                            const st = await api.liveEditRegion(region.id);
-                            onLiveStateChange(st);
-                          } catch (err) {
-                            toast(String(err), "error");
-                          }
-                        }}
+                        disabled={actionBusy}
+                        onClick={() => void appActions.liveEditRegion(region.id)}
                       >
                         <Move size={16} />
                         Sửa vùng
@@ -243,6 +177,7 @@ export function LivePage({
                       <Button
                         variant="ghost"
                         iconOnly
+                        disabled={actionBusy}
                         title={`Xoá vùng #${idx + 1}`}
                         aria-label={`Xoá vùng #${idx + 1}`}
                         onClick={() => setDeleteRegionTarget({ id: region.id, index: idx + 1 })}
@@ -336,7 +271,7 @@ export function LivePage({
               variant="secondary"
               iconOnly
               disabled={loadingApps}
-              onClick={refreshApps}
+              onClick={() => void appActions.loadDesktopApps(true)}
               title="Làm mới danh sách ứng dụng"
               aria-label="Làm mới danh sách ứng dụng"
             >
@@ -355,10 +290,9 @@ export function LivePage({
         onCancel={() => setDeleteRegionTarget(null)}
         onConfirm={async () => {
           if (!deleteRegionTarget) return;
-          const st = await api.liveRemoveRegion(deleteRegionTarget.id);
-          onLiveStateChange(st);
-          toast(`Đã xoá vùng #${deleteRegionTarget.index}`, "info");
+          const target = deleteRegionTarget;
           setDeleteRegionTarget(null);
+          await appActions.liveRemoveRegion(target.id, target.index);
         }}
       />
 
@@ -370,10 +304,8 @@ export function LivePage({
         confirmVariant="danger"
         onCancel={() => setConfirmClear(false)}
         onConfirm={async () => {
-          const st = await api.liveClearRegions();
-          onLiveStateChange(st);
           setConfirmClear(false);
-          toast("Đã xoá toàn bộ vùng Live", "info");
+          await appActions.liveClearRegions();
         }}
       />
     </div>

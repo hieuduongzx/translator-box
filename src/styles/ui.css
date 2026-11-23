@@ -406,6 +406,28 @@ textarea:focus-visible,
   flex-shrink: 0;
 }
 
+@keyframes ui-pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+.ui-sidebar-dot.busy {
+  background: var(--accent);
+  animation: ui-pulse-dot 1.2s ease-in-out infinite;
+}
+
+.ui-sidebar-spinner {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
 .ui-sidebar.collapsed .ui-sidebar-item .ui-sidebar-dot {
   position: absolute;
   top: 6px;

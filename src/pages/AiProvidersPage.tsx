@@ -1,19 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { BookOpen, Bot, ExternalLink, Plus, Save, Trash2 } from "lucide-react";
 import { Button, Card, ConfirmDialog, Dialog } from "../components/ui";
 import type { ToastKind } from "../hooks";
 import { BUILTIN_AI_PROVIDERS } from "../lib/constants";
+import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig, CustomAiProvider, GlossaryEntry } from "../types";
 
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onToast: (message: string, kind?: ToastKind) => void;
-}
-
-function formatGlossary(entries: GlossaryEntry[]): string {
-  return entries.map((e) => `${e.source} = ${e.target}`).join("\n");
 }
 
 function parseGlossary(raw: string): GlossaryEntry[] {
@@ -30,12 +27,14 @@ function parseGlossary(raw: string): GlossaryEntry[] {
 }
 
 export function AiProvidersPage({ config, onUpdateConfig, onToast: toast }: Props) {
-  const [glossaryText, setGlossaryText] = useState(() =>
-    formatGlossary(config.translation_glossary)
-  );
+  const { glossaryDraft, glossaryDirty, savingGlossary } = useAppSlice("ai");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<CustomAiProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CustomAiProvider | null>(null);
+
+  useEffect(() => {
+    appActions.syncGlossaryFromConfig(config.translation_glossary);
+  }, [config.translation_glossary]);
 
   const [cpName, setCpName] = useState("");
   const [cpEndpoint, setCpEndpoint] = useState("");
@@ -205,17 +204,20 @@ export function AiProvidersPage({ config, onUpdateConfig, onToast: toast }: Prop
         title="Từ điển thuật ngữ"
         description="Mỗi dòng một cặp “từ gốc = bản dịch” để giữ đúng tên riêng, kỹ năng, vật phẩm game trên cả Google/Bing và AI."
         headerRight={
-          <Button
-            variant="primary"
-            onClick={async () => {
-              const entries = parseGlossary(glossaryText);
-              await onUpdateConfig({ translation_glossary: entries });
-              toast(`Đã lưu ${entries.length} thuật ngữ`, "success");
-            }}
-          >
-            <Save size={16} />
-            Lưu từ điển
-          </Button>
+          <div className="row-8">
+            {glossaryDirty && <span className="badge warning">Chưa lưu</span>}
+            <Button
+              variant="primary"
+              disabled={savingGlossary}
+              onClick={() => {
+                const entries = parseGlossary(glossaryDraft);
+                void appActions.saveGlossary(entries, onUpdateConfig);
+              }}
+            >
+              <Save size={16} />
+              {savingGlossary ? "Đang lưu…" : "Lưu từ điển"}
+            </Button>
+          </div>
         }
       >
         <div className="stack-8">
@@ -223,8 +225,8 @@ export function AiProvidersPage({ config, onUpdateConfig, onToast: toast }: Prop
             className="ui-textarea"
             rows={5}
             placeholder={"# Ví dụ:\nHollow Purple = Tử Thức\nHP = Máu"}
-            value={glossaryText}
-            onChange={(e) => setGlossaryText(e.target.value)}
+            value={glossaryDraft}
+            onChange={(e) => appActions.setGlossaryDraft(e.target.value)}
           />
           <div className="row-8 field-hint">
             <BookOpen size={16} />

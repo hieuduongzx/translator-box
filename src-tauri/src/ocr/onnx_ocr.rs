@@ -2,6 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use image::{imageops, RgbImage};
@@ -15,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::config_dir;
 use crate::ocr::{OcrEngineStatusInfo, TextRegion};
+use crate::tasks::OcrDownloadProgressEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrModelInfo {
@@ -160,18 +164,34 @@ pub fn status(model_id: &str, backend: &str) -> OcrEngineStatusInfo {
     }
 }
 
-async fn download_file(url: &str, dest: &PathBuf) -> Result<(), String> {
-    if fs::metadata(dest)
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(());
+pub fn model_label(model_id: &str) -> &'static str {
+    spec_for(model_id).label
+}
+
+async fn download_file_with_progress<F>(
+    url: &str,
+    dest: &PathBuf,
+    cancel: &AtomicBool,
+    mut on_chunk: F,
+) -> Result<u64, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    if let Ok(meta) = fs::metadata(dest) {
+        if meta.is_file() && meta.len() > 0 {
+            let len = meta.len();
+            on_chunk(len, Some(len));
+            return Ok(len);
+        }
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("CANCELLED".to_string());
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Không tạo được thư mục model: {e}"))?;
     }
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(Duration::from_secs(300))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Translator2k/2.1")
         .build()
         .map_err(|_| "Không khởi tạo được kết nối mạng, vui lòng thử lại sau.".to_string())?;
@@ -183,30 +203,115 @@ async fn download_file(url: &str, dest: &PathBuf) -> Result<(), String> {
     if !resp.status().is_success() {
         return Err("Tải mô hình OCR không thành công, vui lòng thử lại sau.".to_string());
     }
+    let content_len = resp.content_length();
+    on_chunk(0, content_len);
+
     let tmp = dest.with_extension("download");
     let mut file =
         fs::File::create(&tmp).map_err(|e| format!("Không tạo được file model tạm: {e}"))?;
     let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+
     while let Some(chunk) = stream.next().await {
-        let bytes = chunk
-            .map_err(|_| "Tải mô hình OCR bị gián đoạn, vui lòng thử lại sau.".to_string())?;
-        file.write_all(&bytes)
-            .map_err(|e| format!("Lỗi ghi file model: {e}"))?;
+        if cancel.load(Ordering::SeqCst) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err("CANCELLED".to_string());
+        }
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(_) => {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err("Tải mô hình OCR bị gián đoạn, vui lòng thử lại sau.".to_string());
+            }
+        };
+        if let Err(e) = file.write_all(&bytes) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("Lỗi ghi file model: {e}"));
+        }
+        downloaded += bytes.len() as u64;
+        if last_emit.elapsed() >= Duration::from_millis(60) {
+            on_chunk(downloaded, content_len);
+            last_emit = Instant::now();
+        }
     }
+    on_chunk(downloaded, content_len.or(Some(downloaded)));
     drop(file);
+    if cancel.load(Ordering::SeqCst) {
+        let _ = fs::remove_file(&tmp);
+        return Err("CANCELLED".to_string());
+    }
     let _ = fs::remove_file(dest);
     fs::rename(&tmp, dest).map_err(|e| format!("Không lưu được file model: {e}"))?;
+    Ok(downloaded)
+}
+
+pub async fn download_model_with_progress<F>(
+    model_id: &str,
+    cancel: Arc<AtomicBool>,
+    on_progress: F,
+) -> Result<(), String>
+where
+    F: Fn(OcrDownloadProgressEvent) + Send + Sync,
+{
+    let spec = spec_for(model_id);
+    let (det, rec, dict) = model_paths(model_id);
+    let est_total_bytes = ((spec.size_mb as f64) * 1024.0 * 1024.0).round().max(1.0) as u64;
+    let steps: [(&str, &PathBuf, &str); 3] = [
+        (spec.det_url, &det, "Mô hình phát hiện chữ"),
+        (spec.rec_url, &rec, "Mô hình nhận dạng chữ"),
+        (spec.dict_url, &dict, "Từ điển ký tự"),
+    ];
+    let file_total = steps.len();
+    let mut completed_bytes: u64 = 0;
+
+    for (idx, (url, dest, label)) in steps.iter().enumerate() {
+        let file_index = idx + 1;
+        let step_done = download_file_with_progress(url, dest, &cancel, |cur_dl, cur_total| {
+            let total_dl = completed_bytes.saturating_add(cur_dl);
+            let approx_total = est_total_bytes.max(
+                completed_bytes.saturating_add(cur_total.unwrap_or(cur_dl)),
+            );
+            let raw_pct = if approx_total > 0 {
+                (total_dl as f64 / approx_total as f64) * 100.0
+            } else {
+                ((file_index.saturating_sub(1)) as f64 / file_total as f64) * 100.0
+            };
+            let percent = raw_pct.clamp(0.0, 99.5);
+            on_progress(OcrDownloadProgressEvent {
+                model_id: spec.id.to_string(),
+                model_label: spec.label.to_string(),
+                file_index,
+                file_total,
+                current_file: (*label).to_string(),
+                downloaded_bytes: total_dl,
+                total_bytes: approx_total,
+                percent,
+            });
+        })
+        .await?;
+        completed_bytes = completed_bytes.saturating_add(step_done);
+    }
+
+    on_progress(OcrDownloadProgressEvent {
+        model_id: spec.id.to_string(),
+        model_label: spec.label.to_string(),
+        file_index: file_total,
+        file_total,
+        current_file: "Hoàn tất".to_string(),
+        downloaded_bytes: completed_bytes,
+        total_bytes: completed_bytes.max(est_total_bytes),
+        percent: 100.0,
+    });
+    forget_engines();
     Ok(())
 }
 
 pub async fn download_model(model_id: &str) -> Result<(), String> {
-    let spec = spec_for(model_id);
-    let (det, rec, dict) = model_paths(model_id);
-    download_file(spec.det_url, &det).await?;
-    download_file(spec.rec_url, &rec).await?;
-    download_file(spec.dict_url, &dict).await?;
-    forget_engines();
-    Ok(())
+    download_model_with_progress(model_id, Arc::new(AtomicBool::new(false)), |_| {}).await
 }
 
 struct OnnxEngine {

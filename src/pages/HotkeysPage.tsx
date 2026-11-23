@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Keyboard, RotateCcw, X } from "lucide-react";
 import { Button, Card, ConfirmDialog } from "../components/ui";
 import type { ToastKind } from "../hooks";
-import { api } from "../lib/api";
 import { HOTKEY_ACTIONS, eventToCombo, formatHotkey } from "../lib/constants";
+import { appActions, useAppSlice } from "../store/appStore";
 import type { AppConfig } from "../types";
 
 interface Props {
@@ -19,6 +19,7 @@ export function HotkeysPage({
   onConfigReplaced,
   onToast: toast,
 }: Props) {
+  const { resetting } = useAppSlice("hotkeys");
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
@@ -65,9 +66,9 @@ export function HotkeysPage({
           </p>
         </div>
         <div className="page-header-actions">
-          <Button variant="secondary" onClick={() => setConfirmReset(true)}>
+          <Button variant="secondary" disabled={resetting} onClick={() => setConfirmReset(true)}>
             <RotateCcw size={16} />
-            Khôi phục mặc định
+            {resetting ? "Đang khôi phục…" : "Khôi phục mặc định"}
           </Button>
         </div>
       </div>
@@ -121,14 +122,8 @@ export function HotkeysPage({
         confirmVariant="primary"
         onCancel={() => setConfirmReset(false)}
         onConfirm={async () => {
-          try {
-            const updated = await api.resetHotkeys();
-            onConfigReplaced(updated);
-            setConfirmReset(false);
-            toast("Đã khôi phục phím tắt mặc định", "success");
-          } catch (err) {
-            toast(String(err), "error");
-          }
+          setConfirmReset(false);
+          await appActions.resetHotkeys(onConfigReplaced);
         }}
       />
     </div>

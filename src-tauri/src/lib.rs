@@ -10,6 +10,7 @@ pub mod live;
 pub mod ocr;
 pub mod overlay_win32;
 pub mod soniox;
+pub mod tasks;
 pub mod translate;
 pub mod updater;
 pub mod version;
@@ -129,6 +130,7 @@ use crate::hotkeys::HotkeyManager;
 use crate::live::LiveController;
 use crate::overlay_win32::OverlayManager;
 use crate::soniox::SonioxManager;
+use crate::tasks::{OcrTaskSnapshot, TaskRegistry, TranslateTaskSnapshot};
 use crate::translate::translate_text;
 use crate::updater::{InstallKind, UpdaterConfig, UpdaterManager};
 
@@ -147,6 +149,12 @@ fn dispatch_hotkey_action(app: AppHandle, action: String) {
                 Ok(())
             }
             "region_to_live" => {
+                let Some(_guard) = state
+                    .tasks
+                    .try_acquire_exclusive("live:select", &["live:select", "translate:action"])
+                else {
+                    return;
+                };
                 state.overlays.set_esc_suspended(true);
                 let bbox_res = tokio::task::spawn_blocking(overlay_win32::select_screen_region)
                     .await
@@ -163,6 +171,12 @@ fn dispatch_hotkey_action(app: AppHandle, action: String) {
                 Ok(())
             }
             "region_to_live_frame" => {
+                let Some(_guard) = state
+                    .tasks
+                    .try_acquire_exclusive("live:select", &["live:select", "translate:action"])
+                else {
+                    return;
+                };
                 state.overlays.set_esc_suspended(true);
                 let bbox_res = tokio::task::spawn_blocking(overlay_win32::select_screen_region)
                     .await
@@ -394,6 +408,9 @@ pub fn run() {
                 overlays,
                 live,
                 soniox,
+                tasks: Arc::new(TaskRegistry::new()),
+                ocr_task: Arc::new(Mutex::new(OcrTaskSnapshot::default())),
+                translate_task: Arc::new(Mutex::new(TranslateTaskSnapshot::default())),
                 main_window_lifecycle: Mutex::new(None),
             });
             app.manage(state.clone());
@@ -415,6 +432,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_meta,
+            commands::get_task_snapshot,
+            commands::cancel_task,
             commands::get_config,
             commands::save_config,
             commands::get_history,

@@ -213,3 +213,44 @@ export interface StatusEvent {
   text: string;
   state: "ready" | "busy" | "error";
 }
+
+export type TranslateActionKind =
+  | "text"
+  | "region_to_overlay"
+  | "region_to_text"
+  | "clipboard_image_replace"
+  | "clipboard_image_to_text"
+  | "selected_text_replace";
+
+export interface OcrDownloadProgressEvent {
+  modelId: string;
+  modelLabel: string;
+  fileIndex: number;
+  fileTotal: number;
+  currentFile: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+}
+
+export interface OcrTaskSnapshot {
+  downloadingModelId: string | null;
+  downloadProgress: OcrDownloadProgressEvent | null;
+  lastError: string | null;
+}
+
+export interface TranslateTaskSnapshot {
+  busy: boolean;
+  action: string | null;
+  statusText: string | null;
+  lastSource: string | null;
+  lastResult: string | null;
+  lastImageDataUrl: string | null;
+  lastError: string | null;
+}
+
+export interface TaskSnapshotDto {
+  activeTasks: string[];
+  ocr: OcrTaskSnapshot;
+  translate: TranslateTaskSnapshot;
+}

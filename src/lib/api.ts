@@ -9,16 +9,22 @@ import type {
   LiveFrameUpdate,
   LiveRegionInfo,
   LiveStatePayload,
+  OcrDownloadProgressEvent,
   OcrEngineStatusInfo,
   OcrModelInfo,
+  OcrTaskSnapshot,
   ReplaceCompletedPayload,
   SonioxStatePayload,
   StatusEvent,
+  TaskSnapshotDto,
   TranslateResultPayload,
+  TranslateTaskSnapshot,
 } from "../types";
 
 export const api = {
   getAppMeta: () => invoke<AppMeta>("get_app_meta"),
+  getTaskSnapshot: () => invoke<TaskSnapshotDto>("get_task_snapshot"),
+  cancelTask: (scope?: string) => invoke<void>("cancel_task", { scope: scope ?? null }),
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config: AppConfig) => invoke<AppConfig>("save_config", { config }),
 
@@ -86,6 +92,12 @@ export const api = {
     listen<LiveFrameUpdate>("live-frame-text", (ev) => cb(ev.payload)),
   onSonioxState: (cb: (state: SonioxStatePayload) => void): Promise<UnlistenFn> =>
     listen<SonioxStatePayload>("soniox-state", (ev) => cb(ev.payload)),
+  onOcrDownloadProgress: (cb: (prog: OcrDownloadProgressEvent) => void): Promise<UnlistenFn> =>
+    listen<OcrDownloadProgressEvent>("ocr-download-progress", (ev) => cb(ev.payload)),
+  onOcrTaskState: (cb: (snap: OcrTaskSnapshot) => void): Promise<UnlistenFn> =>
+    listen<OcrTaskSnapshot>("ocr-task-state", (ev) => cb(ev.payload)),
+  onTranslateTaskState: (cb: (snap: TranslateTaskSnapshot) => void): Promise<UnlistenFn> =>
+    listen<TranslateTaskSnapshot>("translate-task-state", (ev) => cb(ev.payload)),
   onNavigate: (cb: (page: string) => void): Promise<UnlistenFn> =>
     listen<string>("navigate", (ev) => cb(ev.payload)),
   onHudShowBar: (cb: () => void): Promise<UnlistenFn> =>

@@ -20,7 +20,7 @@ use crate::inpaint::reconstruct_layout;
 use crate::live::{LiveController, LiveRegionInfo, LiveStatePayload};
 use crate::ocr::{
     merge_regions_into_blocks, merge_regions_into_lines, ocr_engine_status, ocr_layout,
-    onnx_ocr::{download_model, list_models, OcrModelInfo},
+    onnx_ocr::{download_model_with_progress, list_models, model_label, OcrModelInfo},
     OcrEngineStatusInfo,
 };
 use crate::overlay_win32::{
@@ -29,6 +29,10 @@ use crate::overlay_win32::{
 };
 use crate::soniox::{
     list_audio_devices, AudioDeviceOption, SonioxManager, SonioxStartParams, SonioxStatePayload,
+};
+use crate::tasks::{
+    OcrDownloadProgressEvent, OcrTaskSnapshot, TaskRegistry, TaskSnapshotDto,
+    TranslateTaskSnapshot,
 };
 use crate::translate::{
     translate_regions, translate_text, translate_text_with_formatting, TranslateParams,
@@ -111,10 +115,78 @@ pub struct AppState {
     pub overlays: Arc<OverlayManager>,
     pub live: Arc<LiveController>,
     pub soniox: Arc<SonioxManager>,
+    pub tasks: Arc<TaskRegistry>,
+    pub ocr_task: Arc<Mutex<OcrTaskSnapshot>>,
+    pub translate_task: Arc<Mutex<TranslateTaskSnapshot>>,
     pub main_window_lifecycle: Mutex<Option<crate::window_state::WindowLifecycle>>,
 }
 
 impl AppState {
+    pub fn emit_translate_task(&self, app: &AppHandle) {
+        let snap = self.translate_task.lock().clone();
+        let _ = app.emit("translate-task-state", snap);
+    }
+
+    pub fn emit_ocr_task(&self, app: &AppHandle) {
+        let snap = self.ocr_task.lock().clone();
+        let _ = app.emit("ocr-task-state", snap);
+    }
+
+    pub fn begin_translate_task(&self, app: &AppHandle, action: &str, status_text: &str) {
+        {
+            let mut t = self.translate_task.lock();
+            t.busy = true;
+            t.action = Some(action.to_string());
+            t.status_text = Some(status_text.to_string());
+            t.last_error = None;
+        }
+        self.emit_translate_task(app);
+    }
+
+    pub fn update_translate_task_status(&self, app: &AppHandle, status_text: &str) {
+        {
+            let mut t = self.translate_task.lock();
+            if t.busy {
+                t.status_text = Some(status_text.to_string());
+            }
+        }
+        self.emit_translate_task(app);
+    }
+
+    pub fn finish_translate_task(
+        &self,
+        app: &AppHandle,
+        result: Result<&TranslateResultPayload, &str>,
+    ) {
+        {
+            let mut t = self.translate_task.lock();
+            t.busy = false;
+            t.action = None;
+            t.status_text = None;
+            match result {
+                Ok(payload) => {
+                    let has_content = !payload.original.is_empty()
+                        || !payload.translated.is_empty()
+                        || payload.image_data_url.is_some();
+                    if !payload.original.is_empty() {
+                        t.last_source = Some(payload.original.clone());
+                    }
+                    if !payload.translated.is_empty() {
+                        t.last_result = Some(payload.translated.clone());
+                    }
+                    if has_content {
+                        t.last_image_data_url = payload.image_data_url.clone();
+                    }
+                    t.last_error = None;
+                }
+                Err(err) => {
+                    t.last_error = Some(err.to_string());
+                }
+            }
+        }
+        self.emit_translate_task(app);
+    }
+
     pub fn record_history(
         &self,
         app: &AppHandle,
@@ -227,6 +299,20 @@ pub fn get_app_meta() -> AppMeta {
 }
 
 #[tauri::command]
+pub fn get_task_snapshot(state: State<'_, Arc<AppState>>) -> TaskSnapshotDto {
+    TaskSnapshotDto {
+        active_tasks: state.tasks.active_keys(),
+        ocr: state.ocr_task.lock().clone(),
+        translate: state.translate_task.lock().clone(),
+    }
+}
+
+#[tauri::command]
+pub fn cancel_task(state: State<'_, Arc<AppState>>, scope: Option<String>) {
+    state.tasks.cancel(scope.as_deref());
+}
+
+#[tauri::command]
 pub fn get_config(state: State<'_, Arc<AppState>>) -> AppConfig {
     state.config.lock().clone()
 }
@@ -301,27 +387,56 @@ pub async fn translate_text_cmd(
     target: Option<String>,
     source: Option<String>,
 ) -> Result<TranslateResultPayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("translate:text", &["translate:text", "translate:action"])
+    else {
+        return Err("ALREADY_RUNNING: Đang xử lý tác vụ dịch khác.".to_string());
+    };
     let params = state.build_text_translate_params(source.as_deref(), target.as_deref());
+    state.begin_translate_task(&app, "text", "Đang dịch văn bản…");
     emit_status(&app, "Đang dịch văn bản…", "busy");
     match translate_text(&text, &params).await {
         Ok(translated) => {
             state.maybe_auto_copy(&translated);
             state.record_history(&app, "text", &text, &translated, &params.target);
             emit_status(&app, "Đã dịch xong", "ready");
-            Ok(TranslateResultPayload {
+            let payload = TranslateResultPayload {
                 original: text,
                 translated,
                 image_data_url: None,
-            })
+            };
+            state.finish_translate_task(&app, Ok(&payload));
+            Ok(payload)
         }
         Err(err) => {
             emit_status(&app, &err, "error");
+            state.finish_translate_task(&app, Err(&err));
             Err(err)
         }
     }
 }
 
 pub async fn run_region_to_text(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+) -> Result<TranslateResultPayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("translate:action", &["translate:action", "translate:text", "live:select"])
+    else {
+        return Err("ALREADY_RUNNING: Đang chạy tác vụ chọn vùng hoặc dịch màn hình.".to_string());
+    };
+    state.begin_translate_task(app, "region_to_text", "Chọn vùng màn hình cần dịch…");
+    let res = run_region_to_text_inner(app, state).await;
+    match &res {
+        Ok(payload) => state.finish_translate_task(app, Ok(payload)),
+        Err(err) => state.finish_translate_task(app, Err(err)),
+    }
+    res
+}
+
+async fn run_region_to_text_inner(
     app: &AppHandle,
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
@@ -339,6 +454,7 @@ pub async fn run_region_to_text(
         });
     };
 
+    state.update_translate_task_status(app, "Đang OCR & dịch vùng màn hình…");
     emit_status(app, "Đang OCR & dịch vùng màn hình…", "busy");
     let frame = tokio::task::spawn_blocking(move || capture_region(bbox))
         .await
@@ -386,6 +502,25 @@ pub async fn run_region_to_overlay(
     app: &AppHandle,
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("translate:action", &["translate:action", "translate:text", "live:select"])
+    else {
+        return Err("ALREADY_RUNNING: Đang chạy tác vụ chọn vùng hoặc dịch màn hình.".to_string());
+    };
+    state.begin_translate_task(app, "region_to_overlay", "Chọn vùng để vẽ overlay bản dịch…");
+    let res = run_region_to_overlay_inner(app, state).await;
+    match &res {
+        Ok(payload) => state.finish_translate_task(app, Ok(payload)),
+        Err(err) => state.finish_translate_task(app, Err(err)),
+    }
+    res
+}
+
+async fn run_region_to_overlay_inner(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+) -> Result<TranslateResultPayload, String> {
     emit_status(app, "Chọn vùng để vẽ overlay bản dịch…", "busy");
     state.overlays.set_esc_suspended(true);
     let sel_res = tokio::task::spawn_blocking(select_screen_region).await;
@@ -400,6 +535,7 @@ pub async fn run_region_to_overlay(
         });
     };
 
+    state.update_translate_task_status(app, "Đang OCR, dựng nền & dịch overlay…");
     emit_status(app, "Đang OCR, dựng nền & dịch overlay…", "busy");
     let frame = tokio::task::spawn_blocking(move || capture_region(bbox))
         .await
@@ -492,6 +628,31 @@ pub async fn run_clipboard_image(
     state: &Arc<AppState>,
     replace_image: bool,
 ) -> Result<TranslateResultPayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("translate:action", &["translate:action", "translate:text", "live:select"])
+    else {
+        return Err("ALREADY_RUNNING: Đang xử lý tác vụ dịch khác.".to_string());
+    };
+    let action_name = if replace_image {
+        "clipboard_image_replace"
+    } else {
+        "clipboard_image_to_text"
+    };
+    state.begin_translate_task(app, action_name, "Đang đọc & OCR ảnh từ clipboard…");
+    let res = run_clipboard_image_inner(app, state, replace_image).await;
+    match &res {
+        Ok(payload) => state.finish_translate_task(app, Ok(payload)),
+        Err(err) => state.finish_translate_task(app, Err(err)),
+    }
+    res
+}
+
+async fn run_clipboard_image_inner(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    replace_image: bool,
+) -> Result<TranslateResultPayload, String> {
     emit_status(app, "Đang đọc & OCR ảnh từ clipboard…", "busy");
     let img = tokio::task::spawn_blocking(grab_clipboard_image)
         .await
@@ -524,6 +685,14 @@ pub async fn run_clipboard_image(
     }
 
     let params = state.build_translate_params(None);
+    state.update_translate_task_status(
+        app,
+        if replace_image {
+            "Đang dịch & dựng ảnh clipboard…"
+        } else {
+            "Đang dịch văn bản từ ảnh clipboard…"
+        },
+    );
     let translated_list = translate_regions(&merged, &params).await?;
     let original = merged
         .iter()
@@ -586,6 +755,25 @@ pub async fn run_selected_text_replace(
     app: &AppHandle,
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("translate:action", &["translate:action", "translate:text", "live:select"])
+    else {
+        return Err("ALREADY_RUNNING: Đang xử lý tác vụ dịch khác.".to_string());
+    };
+    state.begin_translate_task(app, "selected_text_replace", "Đang dịch & thay thế tại chỗ…");
+    let res = run_selected_text_replace_inner(app, state).await;
+    match &res {
+        Ok(payload) => state.finish_translate_task(app, Ok(payload)),
+        Err(err) => state.finish_translate_task(app, Err(err)),
+    }
+    res
+}
+
+async fn run_selected_text_replace_inner(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+) -> Result<TranslateResultPayload, String> {
     let (
         replace_enabled,
         replace_target,
@@ -610,6 +798,7 @@ pub async fn run_selected_text_replace(
         return Err(msg.to_string());
     }
 
+    state.update_translate_task_status(app, "Đang lấy văn bản đang bôi đen…");
     emit_status(app, "Đang lấy văn bản đang bôi đen…", "busy");
     let (selected, previous_clip) =
         tokio::task::spawn_blocking(move || copy_selected_text(preserve_formatting))
@@ -618,6 +807,7 @@ pub async fn run_selected_text_replace(
     state.clipboard.mark_internal_write(&selected);
 
     let params = state.build_text_translate_params(None, Some(&replace_target));
+    state.update_translate_task_status(app, "Đang dịch để thay thế tại chỗ…");
     emit_status(app, "Đang dịch để thay thế tại chỗ…", "busy");
     let translated =
         translate_text_with_formatting(&selected, &params, preserve_formatting).await?;
@@ -792,6 +982,12 @@ pub async fn live_add_region(
     state: State<'_, Arc<AppState>>,
     mode: String,
 ) -> Result<Option<LiveRegionInfo>, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("live:select", &["live:select", "translate:action"])
+    else {
+        return Err("ALREADY_RUNNING: Đang chọn hoặc chỉnh vùng màn hình.".to_string());
+    };
     emit_status(&app, "Kéo chọn vùng màn hình cho Live…", "busy");
     state.overlays.set_esc_suspended(true);
     let sel_res = tokio::task::spawn_blocking(select_screen_region).await;
@@ -818,6 +1014,12 @@ pub async fn live_edit_region(
     state: State<'_, Arc<AppState>>,
     id: u64,
 ) -> Result<LiveStatePayload, String> {
+    let Some(_guard) = state
+        .tasks
+        .try_acquire_exclusive("live:select", &["live:select", "translate:action"])
+    else {
+        return Err("ALREADY_RUNNING: Đang chọn hoặc chỉnh vùng màn hình.".to_string());
+    };
     let target = state
         .live
         .snapshot()
@@ -892,6 +1094,9 @@ pub async fn live_start(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<LiveStatePayload, String> {
+    let Some(_guard) = state.tasks.try_acquire("live:start") else {
+        return Err("ALREADY_RUNNING: Đang khởi động dịch Live.".to_string());
+    };
     let snap_before = state.live.snapshot();
     for r in &snap_before.regions {
         if r.mode == "frame" {
@@ -950,8 +1155,15 @@ pub async fn open_live_output_window(
 }
 
 #[tauri::command]
-pub fn list_desktop_apps() -> Vec<DesktopApplication> {
-    list_desktop_applications()
+pub async fn list_desktop_apps(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<DesktopApplication>, String> {
+    let Some(_guard) = state.tasks.try_acquire("live:apps") else {
+        return Err("ALREADY_RUNNING: Đang quét danh sách ứng dụng.".to_string());
+    };
+    tokio::task::spawn_blocking(list_desktop_applications)
+        .await
+        .map_err(|e| format!("Lỗi quét danh sách ứng dụng: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -969,11 +1181,80 @@ pub fn list_ocr_models() -> Vec<OcrModelInfo> {
 }
 
 #[tauri::command]
-pub async fn download_ocr_model(app: AppHandle, model_id: String) -> Result<Vec<OcrModelInfo>, String> {
-    emit_status(&app, &format!("Đang tải model OCR {model_id}…"), "busy");
-    download_model(&model_id).await?;
-    emit_status(&app, "Đã tải xong model OCR ngoại tuyến", "ready");
-    Ok(list_models())
+pub async fn download_ocr_model(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+) -> Result<Vec<OcrModelInfo>, String> {
+    let Some(_guard) = state.tasks.try_acquire("ocr:download") else {
+        return Err("ALREADY_RUNNING: Đang tải một mô hình OCR khác.".to_string());
+    };
+    let cancel = state.tasks.reset_cancel("ocr");
+    let label = model_label(&model_id).to_string();
+    let initial_progress = OcrDownloadProgressEvent {
+        model_id: model_id.clone(),
+        model_label: label.clone(),
+        file_index: 1,
+        file_total: 3,
+        current_file: "Đang chuẩn bị tải…".to_string(),
+        downloaded_bytes: 0,
+        total_bytes: 0,
+        percent: 0.0,
+    };
+    {
+        let mut snap = state.ocr_task.lock();
+        snap.downloading_model_id = Some(model_id.clone());
+        snap.download_progress = Some(initial_progress.clone());
+        snap.last_error = None;
+    }
+    let _ = app.emit("ocr-download-progress", &initial_progress);
+    state.emit_ocr_task(&app);
+    emit_status(&app, &format!("Đang tải model OCR {label}…"), "busy");
+
+    let app_cb = app.clone();
+    let ocr_task_cb = state.ocr_task.clone();
+    let res = download_model_with_progress(&model_id, cancel, move |prog| {
+        {
+            let mut snap = ocr_task_cb.lock();
+            snap.download_progress = Some(prog.clone());
+        }
+        let _ = app_cb.emit("ocr-download-progress", prog);
+    })
+    .await;
+
+    match res {
+        Ok(()) => {
+            {
+                let mut snap = state.ocr_task.lock();
+                snap.downloading_model_id = None;
+                snap.download_progress = None;
+                snap.last_error = None;
+            }
+            state.emit_ocr_task(&app);
+            emit_status(&app, "Đã tải xong model OCR ngoại tuyến", "ready");
+            Ok(list_models())
+        }
+        Err(err) => {
+            let msg = if err == "CANCELLED" {
+                "Đã huỷ tải mô hình OCR.".to_string()
+            } else {
+                err
+            };
+            {
+                let mut snap = state.ocr_task.lock();
+                snap.downloading_model_id = None;
+                snap.download_progress = None;
+                snap.last_error = Some(msg.clone());
+            }
+            state.emit_ocr_task(&app);
+            emit_status(
+                &app,
+                &msg,
+                if msg.starts_with("Đã huỷ") { "ready" } else { "error" },
+            );
+            Err(msg)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -981,8 +1262,21 @@ pub async fn download_ocr_model(app: AppHandle, model_id: String) -> Result<Vec<
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_audio_devices_cmd(is_system: bool) -> Vec<AudioDeviceOption> {
-    list_audio_devices(is_system)
+pub async fn list_audio_devices_cmd(
+    state: State<'_, Arc<AppState>>,
+    is_system: bool,
+) -> Result<Vec<AudioDeviceOption>, String> {
+    let key = if is_system {
+        "audio:devices:sys"
+    } else {
+        "audio:devices:mic"
+    };
+    let Some(_guard) = state.tasks.try_acquire(key) else {
+        return Err("ALREADY_RUNNING: Đang quét thiết bị âm thanh.".to_string());
+    };
+    tokio::task::spawn_blocking(move || list_audio_devices(is_system))
+        .await
+        .map_err(|e| format!("Lỗi quét thiết bị âm thanh: {e}"))
 }
 
 #[tauri::command]
@@ -992,6 +1286,9 @@ pub fn get_soniox_state(state: State<'_, Arc<AppState>>) -> SonioxStatePayload {
 
 #[tauri::command]
 pub async fn soniox_start(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let Some(_guard) = state.tasks.try_acquire("audio:start") else {
+        return Err("ALREADY_RUNNING: Đang khởi động dịch âm thanh.".to_string());
+    };
     let cfg = state.config.lock().clone();
     let params = SonioxStartParams {
         api_key: cfg.soniox_api_key,
@@ -1006,9 +1303,14 @@ pub async fn soniox_start(app: AppHandle, state: State<'_, Arc<AppState>>) -> Re
         context_text: cfg.soniox_context_text,
         context_terms: cfg.soniox_context_terms,
     };
-    state.soniox.start(params, move |payload| {
-        let _ = app.emit("soniox-state", payload);
+    let soniox = state.soniox.clone();
+    tokio::task::spawn_blocking(move || {
+        soniox.start(params, move |payload| {
+            let _ = app.emit("soniox-state", payload);
+        })
     })
+    .await
+    .map_err(|e| format!("Lỗi khởi động dịch âm thanh: {e}"))?
 }
 
 #[tauri::command]
@@ -1036,6 +1338,9 @@ pub fn reset_hotkeys(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AppConfig, String> {
+    let Some(_guard) = state.tasks.try_acquire("hotkeys:reset") else {
+        return Err("ALREADY_RUNNING: Đang khôi phục phím tắt.".to_string());
+    };
     let mut defaults = BTreeMap::new();
     for &(action, combo) in DEFAULT_HOTKEYS {
         defaults.insert(action.to_string(), combo.to_string());

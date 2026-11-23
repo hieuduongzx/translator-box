@@ -1,9 +1,18 @@
 [package]
 name = "translator2k"
-version = "2.1.2"
+version = "2.1.4"
 description = "Translator2k — Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch audio realtime trên Windows"
-authors = ["hieuduongzx"]
+authors = ["Amri2k"]
 edition = "2021"
+
+[package.metadata.tauri-winres]
+CompanyName = "Amri2k"
+ProductName = "Translator2k"
+FileDescription = "Translator2k - Công cụ OCR, dịch màn hình và dịch âm thanh Windows"
+LegalCopyright = "Copyright (c) 2026 Amri2k"
+OriginalFilename = "Translator2k.exe"
+InternalName = "Translator2k"
+Comments = "Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch âm thanh trực tiếp trên Windows"
 
 [lib]
 name = "translator2k_lib"
@@ -79,8 +88,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [profile.release]
-panic = "abort"
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = "none"

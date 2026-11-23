@@ -729,19 +729,46 @@ impl UpdaterManager {
             return Err(err);
         }
 
-        if let Err(err) = spawn_apply_helper(&self.config.slug, &staged_path, &pending.entry, relaunch) {
-            self.apply_triggered.store(false, Ordering::SeqCst);
-            self.set_error(&err);
-            return Err(err);
-        }
+        let followup = match spawn_apply_helper(&self.config.slug, &staged_path, &pending.entry, relaunch) {
+            Ok(f) => f,
+            Err(err) => {
+                self.apply_triggered.store(false, Ordering::SeqCst);
+                self.set_error(&err);
+                return Err(err);
+            }
+        };
 
-        if relaunch {
-            // Give frontend a brief moment to paint "Đang áp dụng...", then exit cleanly.
-            let app = self.app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(180)).await;
-                app.exit(0);
-            });
+        match followup {
+            ApplyFollowup::ExitSoon => {
+                if relaunch {
+                    // Give frontend a brief moment to paint "Đang áp dụng...", then exit cleanly.
+                    let app = self.app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(180)).await;
+                        app.exit(0);
+                    });
+                }
+            }
+            #[cfg(target_os = "windows")]
+            ApplyFollowup::WaitInstallerAndRelaunch {
+                process_handle,
+                staged_path,
+                target_exe,
+            } => {
+                // Hide windows while the silent installer finishes, then relaunch new binary & exit.
+                for win in self.app.webview_windows().values() {
+                    let _ = win.hide();
+                }
+                let app = self.app.clone();
+                std::thread::spawn(move || {
+                    win32_ffi::wait_and_close_handle(process_handle, 180_000);
+                    let _ = fs::remove_file(&staged_path);
+                    if target_exe.is_file() {
+                        let _ = std::process::Command::new(&target_exe).spawn();
+                    }
+                    app.exit(0);
+                });
+            }
         }
         Ok(())
     }
@@ -1129,12 +1156,20 @@ fn save_settings(app_name: &str, settings: &UpdaterSettings) {
 
 fn cleanup_leftovers(app_name: &str, current_version: &str) {
     // 1. Remove leftover `<current_exe>.old` next to running portable exe.
+    //    If the previous process is still exiting for a few hundred ms, retry briefly in background.
     if let Ok(exe) = std::env::current_exe() {
         let mut old_os = exe.as_os_str().to_os_string();
         old_os.push(".old");
         let old_path = PathBuf::from(old_os);
-        if old_path.is_file() {
-            let _ = fs::remove_file(&old_path);
+        if old_path.is_file() && fs::remove_file(&old_path).is_err() {
+            std::thread::spawn(move || {
+                for _ in 0..12 {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if !old_path.exists() || fs::remove_file(&old_path).is_ok() {
+                        break;
+                    }
+                }
+            });
         }
     }
 
@@ -1154,8 +1189,20 @@ fn cleanup_leftovers(app_name: &str, current_version: &str) {
     }
 }
 
-fn ps_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+enum ApplyFollowup {
+    ExitSoon,
+    #[cfg(target_os = "windows")]
+    WaitInstallerAndRelaunch {
+        process_handle: usize,
+        staged_path: PathBuf,
+        target_exe: PathBuf,
+    },
+}
+
+fn append_file_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
 }
 
 fn can_write_directory(dir: &Path) -> bool {
@@ -1169,201 +1216,208 @@ fn can_write_directory(dir: &Path) -> bool {
     }
 }
 
+fn quote_win_arg(arg: &str) -> String {
+    if arg.is_empty() || arg.contains([' ', '\t', '"']) {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
+}
+
+fn build_installer_command_and_args(
+    staged_path: &Path,
+    entry: &UpdateFileEntry,
+    target_dir: &Path,
+) -> (PathBuf, String) {
+    let is_msi = staged_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
+    if is_msi {
+        let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let msiexec = PathBuf::from(sys_root).join("System32").join("msiexec.exe");
+        let params = format!(
+            "/i {} /qn /norestart",
+            quote_win_arg(&staged_path.to_string_lossy())
+        );
+        return (msiexec, params);
+    }
+
+    let mut args_vec = entry
+        .silent_args
+        .clone()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["/S".to_string()]);
+
+    let is_nsis = args_vec.iter().any(|a| a.eq_ignore_ascii_case("/S"));
+    let has_dir_arg = args_vec.iter().any(|a| {
+        let upper = a.to_ascii_uppercase();
+        upper.starts_with("/D=") || upper.starts_with("/DIR=")
+    });
+
+    let mut parts: Vec<String> = args_vec.drain(..).map(|a| quote_win_arg(&a)).collect();
+    if is_nsis && !has_dir_arg {
+        // NSIS requires /D=<dir> to be the last unquoted argument.
+        parts.push(format!("/D={}", target_dir.to_string_lossy()));
+    }
+    (staged_path.to_path_buf(), parts.join(" "))
+}
+
+fn swap_portable_binary(staged_path: &Path, target_exe: &Path) -> Result<(), String> {
+    let old_bak = append_file_suffix(target_exe, ".old");
+    let new_tmp = append_file_suffix(target_exe, ".new");
+
+    let _ = fs::remove_file(&new_tmp);
+    fs::copy(staged_path, &new_tmp)
+        .map_err(|e| format!("Không sao chép được bản cập nhật mới: {e}"))?;
+
+    let mut moved_old = false;
+    for _ in 0..15 {
+        if old_bak.exists() {
+            let _ = fs::remove_file(&old_bak);
+        }
+        if !target_exe.exists() || fs::rename(target_exe, &old_bak).is_ok() {
+            moved_old = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    if !moved_old {
+        let _ = fs::remove_file(&new_tmp);
+        return Err("Không thể thay thế tệp ứng dụng đang chạy.".to_string());
+    }
+
+    if let Err(e) = fs::rename(&new_tmp, target_exe) {
+        if old_bak.exists() {
+            let _ = fs::rename(&old_bak, target_exe);
+        }
+        let _ = fs::remove_file(&new_tmp);
+        return Err(format!("Không thể hoàn tất thay thế bản mới: {e}"));
+    }
+
+    let _ = fs::remove_file(&old_bak);
+    Ok(())
+}
+
+/// Optional early-entry handler for `--apply-portable-update <old_pid> <target_exe> <relaunch_0_or_1>`,
+/// used when an `asInvoker` portable binary lives in a protected directory (e.g. `Program Files`)
+/// and delegates atomic replacement to the verified staged executable via UAC (`ShellExecuteExW`).
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub fn maybe_run_apply_update_mode() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("--apply-portable-update") {
+        return None;
+    }
+    if args.len() < 5 {
+        return Some(1);
+    }
+    let old_pid: u32 = args[2].parse().unwrap_or(0);
+    let target_exe = PathBuf::from(&args[3]);
+    let relaunch = args[4] == "1";
+
+    if old_pid != 0 {
+        win32_ffi::wait_for_pid_exit(old_pid, 25_000);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let Ok(self_exe) = std::env::current_exe() else {
+        return Some(1);
+    };
+    if swap_portable_binary(&self_exe, &target_exe).is_err() {
+        return Some(1);
+    }
+    if relaunch && target_exe.is_file() {
+        let _ = std::process::Command::new(&target_exe).spawn();
+    }
+    Some(0)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn maybe_run_apply_update_mode() -> Option<i32> {
+    None
+}
+
 fn spawn_apply_helper(
-    slug: &str,
+    _slug: &str,
     staged_path: &Path,
     entry: &UpdateFileEntry,
     relaunch: bool,
-) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("Không xác định được đường dẫn ứng dụng đang chạy: {e}"))?;
-    let target_dir = current_exe
-        .parent()
-        .ok_or_else(|| "Không xác định được thư mục chứa ứng dụng.".to_string())?;
-    let pid = std::process::id();
-    let relaunch_flag = if relaunch { "1" } else { "0" };
-
-    let script_path = std::env::temp_dir().join(format!("{slug}-apply-update-{pid}.ps1"));
-    let script_body = if entry.kind.eq_ignore_ascii_case("installer") {
-        let is_msi = staged_path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
-        let custom_args = entry.silent_args.clone().unwrap_or_default();
-        let custom_args_ps = custom_args
-            .iter()
-            .map(|a| ps_single_quote(a))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        format!(
-            r#"$ErrorActionPreference = 'SilentlyContinue'
-$OldPid = {pid}
-$Staged = {staged}
-$TargetExe = {target_exe}
-$TargetDir = {target_dir}
-$Relaunch = {relaunch_flag}
-$IsMsi = {is_msi}
-$CustomArgs = @({custom_args_ps})
-
-try {{ Wait-Process -Id $OldPid -Timeout 25 -ErrorAction SilentlyContinue }} catch {{}}
-Start-Sleep -Milliseconds 400
-
-if (Test-Path -LiteralPath $Staged) {{
-    if ($IsMsi) {{
-        Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $Staged, '/qn', '/norestart') -Wait -WindowStyle Hidden
-    }} else {{
-        $argsList = if ($CustomArgs.Count -gt 0) {{ $CustomArgs }} else {{ @('/S') }}
-        $hasD = $false
-        foreach ($a in $argsList) {{ if ($a -like '/D=*') {{ $hasD = $true }} }}
-        if (-not $hasD -and $TargetDir) {{
-            $argsList = $argsList + @("/D=$TargetDir")
-        }}
-        Start-Process -FilePath $Staged -ArgumentList $argsList -Wait -WindowStyle Hidden
-    }}
-    Remove-Item -LiteralPath $Staged -Force -ErrorAction SilentlyContinue
-}}
-
-if ($Relaunch -eq 1 -and (Test-Path -LiteralPath $TargetExe)) {{
-    Start-Process -FilePath $TargetExe
-}}
-
-Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-"#,
-            pid = pid,
-            staged = ps_single_quote(&staged_path.to_string_lossy()),
-            target_exe = ps_single_quote(&current_exe.to_string_lossy()),
-            target_dir = ps_single_quote(&target_dir.to_string_lossy()),
-            relaunch_flag = relaunch_flag,
-            is_msi = if is_msi { "$true" } else { "$false" },
-            custom_args_ps = custom_args_ps,
-        )
-    } else {
-        // Portable single-file exe atomic swap with automatic rollback on failure.
-        format!(
-            r#"$ErrorActionPreference = 'Stop'
-$OldPid = {pid}
-$Staged = {staged}
-$TargetExe = {target_exe}
-$NewTmp = "$TargetExe.new"
-$OldBak = "$TargetExe.old"
-$Relaunch = {relaunch_flag}
-
-try {{ Wait-Process -Id $OldPid -Timeout 25 -ErrorAction SilentlyContinue }} catch {{}}
-Start-Sleep -Milliseconds 350
-
-try {{
-    Copy-Item -LiteralPath $Staged -Destination $NewTmp -Force
-
-    $movedOld = $false
-    for ($i = 0; $i -lt 15; $i++) {{
-        try {{
-            if (Test-Path -LiteralPath $OldBak) {{
-                Remove-Item -LiteralPath $OldBak -Force -ErrorAction SilentlyContinue
-            }}
-            if (Test-Path -LiteralPath $TargetExe) {{
-                Move-Item -LiteralPath $TargetExe -Destination $OldBak -Force
-            }}
-            $movedOld = $true
-            break
-        }} catch {{
-            Start-Sleep -Milliseconds 300
-        }}
-    }}
-
-    if (-not $movedOld) {{
-        throw "Could not release running executable"
-    }}
-
-    try {{
-        Move-Item -LiteralPath $NewTmp -Destination $TargetExe -Force
-    }} catch {{
-        if (Test-Path -LiteralPath $OldBak) {{
-            Move-Item -LiteralPath $OldBak -Destination $TargetExe -Force -ErrorAction SilentlyContinue
-        }}
-        throw
-    }}
-
-    Remove-Item -LiteralPath $OldBak -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $Staged -Force -ErrorAction SilentlyContinue
-}} catch {{
-    Remove-Item -LiteralPath $NewTmp -Force -ErrorAction SilentlyContinue
-}}
-
-if ($Relaunch -eq 1 -and (Test-Path -LiteralPath $TargetExe)) {{
-    Start-Process -FilePath $TargetExe
-}}
-
-Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-"#,
-            pid = pid,
-            staged = ps_single_quote(&staged_path.to_string_lossy()),
-            target_exe = ps_single_quote(&current_exe.to_string_lossy()),
-            relaunch_flag = relaunch_flag,
-        )
-    };
-
-    // Write with UTF-8 BOM so Windows PowerShell 5.1 reads Unicode paths correctly.
-    let mut bytes = Vec::with_capacity(script_body.len() + 3);
-    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-    bytes.extend_from_slice(script_body.as_bytes());
-    fs::write(&script_path, bytes)
-        .map_err(|e| format!("Không tạo được script cài cập nhật: {e}"))?;
-
-    let needs_uac = !entry.kind.eq_ignore_ascii_case("installer") && !can_write_directory(target_dir);
-
-    #[cfg(target_os = "windows")]
-    {
-        if needs_uac {
-            spawn_powershell_elevated(&script_path)?;
-        } else {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            std::process::Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                ])
-                .arg(&script_path)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| format!("Không chạy được tiến trình cập nhật: {e}"))?;
-        }
-    }
-
+) -> Result<ApplyFollowup, String> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (needs_uac, script_path);
+        let _ = (staged_path, entry, relaunch);
         return Err("Tự cập nhật hiện chỉ hỗ trợ Windows.".to_string());
     }
 
-    Ok(())
+    #[cfg(target_os = "windows")]
+    {
+        let current_exe = std::env::current_exe()
+            .map_err(|e| format!("Không xác định được đường dẫn ứng dụng đang chạy: {e}"))?;
+        let target_dir = current_exe
+            .parent()
+            .ok_or_else(|| "Không xác định được thư mục chứa ứng dụng.".to_string())?;
+        let writable = can_write_directory(target_dir);
+
+        if entry.kind.eq_ignore_ascii_case("installer") {
+            let (file, params) = build_installer_command_and_args(staged_path, entry, target_dir);
+            if writable {
+                // Rename running exe so silent NSIS/Inno/MSI can write the new binary immediately.
+                let old_bak = append_file_suffix(&current_exe, ".old");
+                let _ = fs::remove_file(&old_bak);
+                let _ = fs::rename(&current_exe, &old_bak);
+
+                let handle_opt = win32_ffi::launch_installer_silent(&file, &params, false)?;
+                if relaunch {
+                    if let Some(h) = handle_opt {
+                        return Ok(ApplyFollowup::WaitInstallerAndRelaunch {
+                            process_handle: h,
+                            staged_path: staged_path.to_path_buf(),
+                            target_exe: current_exe,
+                        });
+                    }
+                } else if let Some(h) = handle_opt {
+                    win32_ffi::close_handle(h);
+                }
+            } else {
+                // Protected directory: launch elevated silent installer and exit cleanly.
+                let handle_opt = win32_ffi::launch_installer_silent(&file, &params, true)?;
+                if let Some(h) = handle_opt {
+                    win32_ffi::close_handle(h);
+                }
+            }
+            return Ok(ApplyFollowup::ExitSoon);
+        }
+
+        // Portable single-file exe atomic swap via native Win32 rename (allowed while running).
+        if writable {
+            swap_portable_binary(staged_path, &current_exe)?;
+            let _ = fs::remove_file(staged_path);
+            if relaunch {
+                std::process::Command::new(&current_exe)
+                    .spawn()
+                    .map_err(|e| format!("Đã cập nhật nhưng không mở lại được ứng dụng: {e}"))?;
+            }
+        } else {
+            // Target folder requires elevation: run verified staged exe via UAC ShellExecuteExW.
+            let pid = std::process::id();
+            let relaunch_flag = if relaunch { "1" } else { "0" };
+            let params = format!(
+                "--apply-portable-update {pid} {} {relaunch_flag}",
+                quote_win_arg(&current_exe.to_string_lossy())
+            );
+            let h = win32_ffi::shell_execute(Some("runas"), staged_path, Some(&params), true, false)?;
+            if let Some(handle) = h {
+                win32_ffi::close_handle(handle);
+            }
+        }
+
+        Ok(ApplyFollowup::ExitSoon)
+    }
 }
 
-#[cfg(target_os = "windows")]
-fn spawn_powershell_elevated(script_path: &Path) -> Result<(), String> {
-    let args = format!(
-        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"",
-        script_path.to_string_lossy()
-    );
-    let ps_cmd = format!(
-        "Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList {}",
-        ps_single_quote(&args)
-    );
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("Không thể yêu cầu quyền Admin để cập nhật: {e}"))?;
-    Ok(())
-}
-
+#[allow(dead_code)]
 pub fn xml_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -1379,58 +1433,435 @@ pub fn xml_escape(input: &str) -> String {
     out
 }
 
-/// Shows a native Windows 10/11 system toast notification (works for both portable & installed
-/// apps, including when minimized to the system tray) via per-user HKCU AppUserModelId + WinRT.
+/// Shows a native Windows 10/11 system notification via pure Win32 `Shell_NotifyIconW` (`NIF_INFO`)
+/// with zero PowerShell/cmd child processes and zero extra Cargo dependencies.
 #[cfg(target_os = "windows")]
-fn show_windows_toast(slug: &str, app_name: &str, title: &str, body: &str) {
-    let aumid = format!("com.{}.app", slug.to_ascii_lowercase());
-    let toast_xml = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
-        xml_escape(title),
-        xml_escape(body),
-    );
-    let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
-$aumid = {aumid}
-$regPath = "HKCU:\Software\Classes\AppUserModelId\$aumid"
-if (-not (Test-Path $regPath)) {{ New-Item -Path $regPath -Force | Out-Null }}
-Set-ItemProperty -Path $regPath -Name 'DisplayName' -Value {app_name}
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml({toast_xml})
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($aumid).Show($toast)
-"#,
-        aumid = ps_single_quote(&aumid),
-        app_name = ps_single_quote(app_name),
-        toast_xml = ps_single_quote(&toast_xml),
-    );
-
-    // UTF-16LE Base64 for PowerShell -EncodedCommand preserves full Vietnamese Unicode.
-    let utf16_bytes: Vec<u8> = script
-        .encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
-        .collect();
-    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16_bytes);
-
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-EncodedCommand",
-            &encoded,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+fn show_windows_toast(_slug: &str, app_name: &str, title: &str, body: &str) {
+    win32_ffi::show_tray_balloon_notification(app_name, title, body);
 }
 
 #[cfg(not(target_os = "windows"))]
 fn show_windows_toast(_slug: &str, _app_name: &str, _title: &str, _body: &str) {}
+
+#[cfg(target_os = "windows")]
+mod win32_ffi {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+    use std::time::Duration;
+
+    const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_ELEVATION_REQUIRED: u32 = 740;
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+    const SW_HIDE: i32 = 0;
+    const SW_SHOWNORMAL: i32 = 1;
+
+    const HWND_MESSAGE: *mut c_void = (-3isize) as *mut c_void;
+    const NIM_ADD: u32 = 0x0000_0000;
+    const NIM_DELETE: u32 = 0x0000_0002;
+    const NIF_ICON: u32 = 0x0000_0002;
+    const NIF_TIP: u32 = 0x0000_0004;
+    const NIF_INFO: u32 = 0x0000_0010;
+    const NIIF_INFO: u32 = 0x0000_0001;
+    const NIIF_RESPECT_QUIET_TIME: u32 = 0x0000_0080;
+    const IDI_APPLICATION: *const u16 = 32512usize as *const u16;
+
+    #[repr(C)]
+    struct StartupInfoW {
+        cb: u32,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: *mut c_void,
+        h_std_output: *mut c_void,
+        h_std_error: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct ProcessInformation {
+        h_process: *mut c_void,
+        h_thread: *mut c_void,
+        dw_process_id: u32,
+        dw_thread_id: u32,
+    }
+
+    #[repr(C)]
+    struct ShellExecuteInfoW {
+        cb_size: u32,
+        f_mask: u32,
+        hwnd: *mut c_void,
+        lp_verb: *const u16,
+        lp_file: *const u16,
+        lp_parameters: *const u16,
+        lp_directory: *const u16,
+        n_show: i32,
+        h_inst_app: *mut c_void,
+        lp_id_list: *mut c_void,
+        lp_class: *const u16,
+        hkey_class: *mut c_void,
+        dw_hot_key: u32,
+        h_icon_or_monitor: *mut c_void,
+        h_process: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct NotifyIconDataW {
+        cb_size: u32,
+        hwnd: *mut c_void,
+        u_id: u32,
+        u_flags: u32,
+        u_callback_message: u32,
+        h_icon: *mut c_void,
+        sz_tip: [u16; 128],
+        dw_state: u32,
+        dw_state_mask: u32,
+        sz_info: [u16; 256],
+        u_timeout_or_version: u32,
+        sz_info_title: [u16; 64],
+        dw_info_flags: u32,
+        guid_item: Guid,
+        h_balloon_icon: *mut c_void,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32)
+            -> *mut c_void;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+        fn CreateProcessW(
+            lp_application_name: *const u16,
+            lp_command_line: *mut u16,
+            lp_process_attributes: *mut c_void,
+            lp_thread_attributes: *mut c_void,
+            b_inherit_handles: i32,
+            dw_creation_flags: u32,
+            lp_environment: *mut c_void,
+            lp_current_directory: *const u16,
+            lp_startup_info: *const StartupInfoW,
+            lp_process_information: *mut ProcessInformation,
+        ) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteExW(p_exec_info: *mut ShellExecuteInfoW) -> i32;
+        fn Shell_NotifyIconW(dw_message: u32, lp_data: *const NotifyIconDataW) -> i32;
+        fn ExtractIconExW(
+            lpsz_file: *const u16,
+            n_icon_index: i32,
+            phicon_large: *mut *mut c_void,
+            phicon_small: *mut *mut c_void,
+            n_icons: u32,
+        ) -> u32;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn CreateWindowExW(
+            dw_ex_style: u32,
+            lp_class_name: *const u16,
+            lp_window_name: *const u16,
+            dw_style: u32,
+            x: i32,
+            y: i32,
+            n_width: i32,
+            n_height: i32,
+            h_wnd_parent: *mut c_void,
+            h_menu: *mut c_void,
+            h_instance: *mut c_void,
+            lp_param: *mut c_void,
+        ) -> *mut c_void;
+        fn DestroyWindow(h_wnd: *mut c_void) -> i32;
+        fn DestroyIcon(h_icon: *mut c_void) -> i32;
+        fn LoadIconW(h_instance: *mut c_void, lp_icon_name: *const u16) -> *mut c_void;
+    }
+
+    fn to_wide_z(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn copy_wide_trunc(dst: &mut [u16], src: &str) {
+        if dst.is_empty() {
+            return;
+        }
+        let max_chars = dst.len() - 1;
+        let mut i = 0;
+        for u in OsStr::new(src).encode_wide() {
+            if i >= max_chars {
+                break;
+            }
+            dst[i] = u;
+            i += 1;
+        }
+        dst[i] = 0;
+    }
+
+    pub fn wait_for_pid_exit(pid: u32, timeout_ms: u32) {
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !h.is_null() {
+                let _ = WaitForSingleObject(h, timeout_ms);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
+    pub fn wait_and_close_handle(raw_handle: usize, timeout_ms: u32) {
+        let h = raw_handle as *mut c_void;
+        if !h.is_null() {
+            unsafe {
+                let _ = WaitForSingleObject(h, timeout_ms);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
+    pub fn close_handle(raw_handle: usize) {
+        let h = raw_handle as *mut c_void;
+        if !h.is_null() {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
+    pub fn shell_execute(
+        verb: Option<&str>,
+        file: &Path,
+        params: Option<&str>,
+        hidden: bool,
+        want_process_handle: bool,
+    ) -> Result<Option<usize>, String> {
+        let wverb = verb.map(to_wide_z);
+        let wfile = to_wide_z(&file.to_string_lossy());
+        let wparams = params.map(to_wide_z);
+        let wdir = file.parent().map(|p| to_wide_z(&p.to_string_lossy()));
+
+        let mut sei = ShellExecuteInfoW {
+            cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: if want_process_handle {
+                SEE_MASK_NOCLOSEPROCESS
+            } else {
+                0
+            },
+            hwnd: ptr::null_mut(),
+            lp_verb: wverb.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
+            lp_file: wfile.as_ptr(),
+            lp_parameters: wparams.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
+            lp_directory: wdir.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
+            n_show: if hidden { SW_HIDE } else { SW_SHOWNORMAL },
+            h_inst_app: ptr::null_mut(),
+            lp_id_list: ptr::null_mut(),
+            lp_class: ptr::null(),
+            hkey_class: ptr::null_mut(),
+            dw_hot_key: 0,
+            h_icon_or_monitor: ptr::null_mut(),
+            h_process: ptr::null_mut(),
+        };
+
+        let ok = unsafe { ShellExecuteExW(&mut sei) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(format!("Không thể khởi chạy tiến trình cập nhật (mã lỗi {err})."));
+        }
+
+        if want_process_handle && !sei.h_process.is_null() {
+            Ok(Some(sei.h_process as usize))
+        } else {
+            if !sei.h_process.is_null() {
+                unsafe {
+                    let _ = CloseHandle(sei.h_process);
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn launch_installer_silent(
+        file: &Path,
+        params: &str,
+        force_elevate: bool,
+    ) -> Result<Option<usize>, String> {
+        if force_elevate {
+            return shell_execute(Some("runas"), file, Some(params), true, true);
+        }
+
+        let cmd_line_str = if params.is_empty() {
+            format!("\"{}\"", file.to_string_lossy())
+        } else {
+            format!("\"{}\" {}", file.to_string_lossy(), params)
+        };
+        let mut cmd_line = to_wide_z(&cmd_line_str);
+        let wdir = file.parent().map(|p| to_wide_z(&p.to_string_lossy()));
+
+        let si = StartupInfoW {
+            cb: std::mem::size_of::<StartupInfoW>() as u32,
+            lp_reserved: ptr::null_mut(),
+            lp_desktop: ptr::null_mut(),
+            lp_title: ptr::null_mut(),
+            dw_x: 0,
+            dw_y: 0,
+            dw_x_size: 0,
+            dw_y_size: 0,
+            dw_x_count_chars: 0,
+            dw_y_count_chars: 0,
+            dw_fill_attribute: 0,
+            dw_flags: STARTF_USESHOWWINDOW,
+            w_show_window: SW_HIDE as u16,
+            cb_reserved2: 0,
+            lp_reserved2: ptr::null_mut(),
+            h_std_input: ptr::null_mut(),
+            h_std_output: ptr::null_mut(),
+            h_std_error: ptr::null_mut(),
+        };
+        let mut pi = ProcessInformation {
+            h_process: ptr::null_mut(),
+            h_thread: ptr::null_mut(),
+            dw_process_id: 0,
+            dw_thread_id: 0,
+        };
+
+        let ok = unsafe {
+            CreateProcessW(
+                ptr::null(),
+                cmd_line.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                CREATE_NO_WINDOW,
+                ptr::null_mut(),
+                wdir.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
+                &si,
+                &mut pi,
+            )
+        };
+
+        if ok != 0 {
+            if !pi.h_thread.is_null() {
+                unsafe {
+                    let _ = CloseHandle(pi.h_thread);
+                }
+            }
+            if !pi.h_process.is_null() {
+                return Ok(Some(pi.h_process as usize));
+            }
+            return Ok(None);
+        }
+
+        let err = unsafe { GetLastError() };
+        if err == ERROR_ELEVATION_REQUIRED || err == ERROR_ACCESS_DENIED {
+            return shell_execute(Some("runas"), file, Some(params), true, true);
+        }
+        Err(format!("Không thể chạy bộ cài cập nhật (mã lỗi {err})."))
+    }
+
+    pub fn show_tray_balloon_notification(app_name: &str, title: &str, body: &str) {
+        let class_name = to_wide_z("STATIC");
+        let win_name = to_wide_z(app_name);
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                win_name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if hwnd.is_null() {
+            return;
+        }
+
+        let mut extracted_icon: *mut c_void = ptr::null_mut();
+        let mut owned_icon = false;
+        if let Ok(exe) = std::env::current_exe() {
+            let wexe = to_wide_z(&exe.to_string_lossy());
+            let mut small: *mut c_void = ptr::null_mut();
+            let count = unsafe { ExtractIconExW(wexe.as_ptr(), 0, ptr::null_mut(), &mut small, 1) };
+            if count > 0 && !small.is_null() {
+                extracted_icon = small;
+                owned_icon = true;
+            }
+        }
+        if extracted_icon.is_null() {
+            extracted_icon = unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) };
+        }
+
+        let mut nid = NotifyIconDataW {
+            cb_size: std::mem::size_of::<NotifyIconDataW>() as u32,
+            hwnd,
+            u_id: 0x2A01,
+            u_flags: NIF_ICON | NIF_TIP | NIF_INFO,
+            u_callback_message: 0,
+            h_icon: extracted_icon,
+            sz_tip: [0; 128],
+            dw_state: 0,
+            dw_state_mask: 0,
+            sz_info: [0; 256],
+            u_timeout_or_version: 5000,
+            sz_info_title: [0; 64],
+            dw_info_flags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
+            guid_item: Guid {
+                data1: 0,
+                data2: 0,
+                data3: 0,
+                data4: [0; 8],
+            },
+            h_balloon_icon: extracted_icon,
+        };
+        copy_wide_trunc(&mut nid.sz_tip, app_name);
+        copy_wide_trunc(&mut nid.sz_info_title, title);
+        copy_wide_trunc(&mut nid.sz_info, body);
+
+        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
+        if added != 0 {
+            std::thread::sleep(Duration::from_secs(6));
+            unsafe {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+            }
+        }
+
+        if owned_icon && !extracted_icon.is_null() {
+            unsafe {
+                let _ = DestroyIcon(extracted_icon);
+            }
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1554,5 +1985,54 @@ mod tests {
             xml_escape("Có bản mới <2.0> & \"tốt\""),
             "Có bản mới &lt;2.0&gt; &amp; &quot;tốt&quot;"
         );
+    }
+
+    #[test]
+    fn installer_command_builder_supports_nsis_inno_and_msi() {
+        let dir = Path::new(r"C:\Apps\Demo2k");
+        let nsis_entry = UpdateFileEntry {
+            kind: "installer".into(),
+            platform: "Windows x64".into(),
+            filename: "Demo2k_2.0.1_x64-setup.exe".into(),
+            object_key: "builds/demo2k/2.0.1/Demo2k_2.0.1_x64-setup.exe".into(),
+            url: "".into(),
+            size: 1,
+            sha256: "00".repeat(32),
+            signature: None,
+            silent_args: Some(vec!["/S".into()]),
+        };
+        let (f_nsis, a_nsis) =
+            build_installer_command_and_args(Path::new(r"C:\tmp\setup.exe"), &nsis_entry, dir);
+        assert_eq!(f_nsis, PathBuf::from(r"C:\tmp\setup.exe"));
+        assert_eq!(a_nsis, r"/S /D=C:\Apps\Demo2k");
+
+        let inno_entry = UpdateFileEntry {
+            silent_args: Some(vec!["/VERYSILENT".into(), "/NORESTART".into()]),
+            ..nsis_entry.clone()
+        };
+        let (_, a_inno) =
+            build_installer_command_and_args(Path::new(r"C:\tmp\inno.exe"), &inno_entry, dir);
+        assert_eq!(a_inno, "/VERYSILENT /NORESTART");
+
+        let (f_msi, a_msi) =
+            build_installer_command_and_args(Path::new(r"C:\tmp\app setup.msi"), &nsis_entry, dir);
+        assert!(f_msi.to_string_lossy().to_ascii_lowercase().ends_with("msiexec.exe"));
+        assert_eq!(a_msi, r#"/i "C:\tmp\app setup.msi" /qn /norestart"#);
+    }
+
+    #[test]
+    fn portable_swap_replaces_target_atomically() {
+        let tmp_dir = std::env::temp_dir().join(format!("2k-swap-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("App.exe");
+        let staged = tmp_dir.join("App-new.exe");
+        fs::write(&target, b"old-binary").unwrap();
+        fs::write(&staged, b"new-binary-v2").unwrap();
+
+        swap_portable_binary(&staged, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new-binary-v2");
+        assert!(!append_file_suffix(&target, ".new").exists());
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

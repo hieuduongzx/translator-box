@@ -30,15 +30,19 @@ import { LivePage } from "./pages/LivePage";
 import { OcrPage } from "./pages/OcrPage";
 import { SettingsPage, type SettingsTab } from "./pages/SettingsPage";
 import { TranslatePage } from "./pages/TranslatePage";
+import {
+  appActions,
+  initAppStore,
+  registerNotifier,
+  useTabBusyMap,
+} from "./store/appStore";
 import { HudWindow } from "./windows/HudWindow";
 import { LiveOutputWindow } from "./windows/LiveOutputWindow";
 import type {
   AppConfig,
   AppMeta,
   HistoryEntry,
-  LiveStatePayload,
   ReplaceCompletedPayload,
-  SonioxStatePayload,
   StatusEvent,
 } from "./types";
 
@@ -66,6 +70,7 @@ function MainApp() {
   const { setTheme } = useTheme("translator2k");
   const appVersion = useAppVersion();
   const updater = useUpdater();
+  const tabBusy = useTabBusyMap();
 
   const [activePage, setActivePage] = usePersistentState<string>(
     "translator2k.ui.activePage",
@@ -88,17 +93,6 @@ function MainApp() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [lastReplace, setLastReplace] = useState<ReplaceCompletedPayload | null>(null);
   const [status, setStatus] = useState<StatusEvent>({ text: "Sẵn sàng", state: "ready" });
-  const [liveState, setLiveState] = useState<LiveStatePayload>({
-    running: false,
-    paused_by_focus: false,
-    regions: [],
-  });
-  const [sonioxState, setSonioxState] = useState<SonioxStatePayload>({
-    state: "idle",
-    source: "system",
-    error: null,
-    blocks: [],
-  });
 
   const notify = useCallback(
     (message: string, kind: ToastKind = "info") => {
@@ -108,19 +102,19 @@ function MainApp() {
   );
 
   useEffect(() => {
-    Promise.all([
-      api.getConfig(),
-      api.getAppMeta(),
-      api.getHistory(),
-      api.getLiveState(),
-      api.getSonioxState(),
-    ])
-      .then(([cfg, m, hist, live, sx]) => {
+    registerNotifier(notify);
+    return () => registerNotifier(null);
+  }, [notify]);
+
+  useEffect(() => {
+    initAppStore();
+
+    Promise.all([api.getConfig(), api.getAppMeta(), api.getHistory()])
+      .then(([cfg, m, hist]) => {
         setConfig(cfg);
         setMeta(m);
         setHistory(hist);
-        setLiveState(live);
-        setSonioxState(sx);
+        appActions.syncGlossaryFromConfig(cfg.translation_glossary);
         if (isThemeMode(cfg.ui_theme)) {
           try {
             if (!localStorage.getItem(themeStorageKey("translator2k"))) {
@@ -151,6 +145,7 @@ function MainApp() {
       api.onStatus(setStatus),
       api.onConfigUpdated((cfg) => {
         setConfig(cfg);
+        appActions.syncGlossaryFromConfig(cfg.translation_glossary);
         if (isThemeMode(cfg.ui_theme)) {
           setTheme(cfg.ui_theme);
         }
@@ -168,8 +163,6 @@ function MainApp() {
       api.onReplaceCompleted((payload) => {
         setLastReplace(payload);
       }),
-      api.onLiveState(setLiveState),
-      api.onSonioxState(setSonioxState),
       api.onNavigate((page) => {
         if (page === "settings:text") {
           setSettingsTab("text");
@@ -237,25 +230,49 @@ function MainApp() {
   }
 
   const navItems: SidebarItem[] = [
-    { id: "translate", label: "Dịch nhanh", icon: <Languages size={20} /> },
+    {
+      id: "translate",
+      label: "Dịch nhanh",
+      icon: <Languages size={20} />,
+      busy: tabBusy.translate?.busy,
+      busyLabel: tabBusy.translate?.label,
+    },
     {
       id: "live",
       label: "Live màn hình",
       icon: <Radio size={20} />,
-      badge: liveState.running ? "ON" : undefined,
-      badgeVariant: "accent",
+      busy: tabBusy.live?.busy,
+      busyLabel: tabBusy.live?.label,
     },
     {
       id: "audio",
       label: "Dịch âm thanh",
       icon: <AudioLines size={20} />,
-      badge: sonioxState.state !== "idle" ? "ON" : undefined,
-      badgeVariant: "accent",
+      busy: tabBusy.audio?.busy,
+      busyLabel: tabBusy.audio?.label,
     },
-    { id: "ai", label: "Dịch vụ AI", icon: <Bot size={20} /> },
-    { id: "ocr", label: "OCR", icon: <ScanText size={20} /> },
+    {
+      id: "ai",
+      label: "Dịch vụ AI",
+      icon: <Bot size={20} />,
+      busy: tabBusy.ai?.busy,
+      busyLabel: tabBusy.ai?.label,
+    },
+    {
+      id: "ocr",
+      label: "OCR",
+      icon: <ScanText size={20} />,
+      busy: tabBusy.ocr?.busy,
+      busyLabel: tabBusy.ocr?.label,
+    },
     { id: "appearance", label: "Khung dịch", icon: <Palette size={20} /> },
-    { id: "hotkeys", label: "Phím tắt", icon: <Keyboard size={20} /> },
+    {
+      id: "hotkeys",
+      label: "Phím tắt",
+      icon: <Keyboard size={20} />,
+      busy: tabBusy.hotkeys?.busy,
+      busyLabel: tabBusy.hotkeys?.label,
+    },
   ];
 
   const handleToggleCollapse = () => {
@@ -314,20 +331,12 @@ function MainApp() {
               />
             )}
             {activePage === "live" && (
-              <LivePage
-                config={config}
-                liveState={liveState}
-                onUpdateConfig={updateConfig}
-                onLiveStateChange={setLiveState}
-                onToast={notify}
-              />
+              <LivePage config={config} onUpdateConfig={updateConfig} />
             )}
             {activePage === "audio" && (
               <AudioPage
                 config={config}
-                sonioxState={sonioxState}
                 onUpdateConfig={updateConfig}
-                onSonioxChange={setSonioxState}
                 onToast={notify}
               />
             )}
@@ -339,7 +348,7 @@ function MainApp() {
               />
             )}
             {activePage === "ocr" && (
-              <OcrPage config={config} onUpdateConfig={updateConfig} onToast={notify} />
+              <OcrPage config={config} onUpdateConfig={updateConfig} />
             )}
             {activePage === "appearance" && (
               <AppearancePage

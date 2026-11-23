@@ -1,55 +1,55 @@
-import { useEffect, useState } from "react";
-import { CheckCircle2, Cpu, Download, RefreshCw, ScanText } from "lucide-react";
+import { useEffect } from "react";
+import { CheckCircle2, Cpu, Download, Loader2, RefreshCw, ScanText, X } from "lucide-react";
 import { Button, Card } from "../components/ui";
-import type { ToastKind } from "../hooks";
-import { api } from "../lib/api";
 import { OCR_BACKENDS, OCR_ENGINES, OCR_LANGUAGES } from "../lib/constants";
-import type { AppConfig, OcrEngineStatusInfo, OcrModelInfo } from "../types";
+import { appActions, useAppSlice } from "../store/appStore";
+import type { AppConfig } from "../types";
 
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  onToast: (message: string, kind?: ToastKind) => void;
 }
 
-export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
-  const [status, setStatus] = useState<OcrEngineStatusInfo | null>(null);
-  const [models, setModels] = useState<OcrModelInfo[]>([]);
-  const [checking, setChecking] = useState(false);
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-  const refresh = async () => {
-    setChecking(true);
-    try {
-      const [st, list] = await Promise.all([
-        api.getOcrStatus(config.ocr_engine, config.ocr_model, config.ocr_backend),
-        api.listOcrModels(),
-      ]);
-      setStatus(st);
-      setModels(list);
-    } catch {
-      // ignore
-    } finally {
-      setChecking(false);
-    }
-  };
+export function OcrPage({ config, onUpdateConfig }: Props) {
+  const {
+    status,
+    models,
+    checking,
+    downloadingId,
+    cancellingDownload,
+    downloadProgress,
+    downloadError,
+  } = useAppSlice("ocr");
 
   useEffect(() => {
-    refresh();
+    void appActions.refreshOcr({
+      ocr_engine: config.ocr_engine,
+      ocr_model: config.ocr_model,
+      ocr_backend: config.ocr_backend,
+    });
   }, [config.ocr_engine, config.ocr_model, config.ocr_backend]);
 
-  const handleDownload = async (modelId: string) => {
-    setDownloadingId(modelId);
-    try {
-      const next = await api.downloadOcrModel(modelId);
-      setModels(next);
-      await refresh();
-      toast("Đã tải xong model OCR ngoại tuyến", "success");
-    } catch (err) {
-      toast(String(err), "error");
-    } finally {
-      setDownloadingId(null);
-    }
+  const handleRefresh = () => {
+    void appActions.refreshOcr(
+      {
+        ocr_engine: config.ocr_engine,
+        ocr_model: config.ocr_model,
+        ocr_backend: config.ocr_backend,
+      },
+      true
+    );
+  };
+
+  const handleDownload = (modelId: string) => {
+    void appActions.downloadOcrModel(modelId, {
+      ocr_engine: config.ocr_engine,
+      ocr_model: config.ocr_model,
+      ocr_backend: config.ocr_backend,
+    });
   };
 
   return (
@@ -67,7 +67,7 @@ export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
           </p>
         </div>
         <div className="page-header-actions">
-          <Button variant="secondary" disabled={checking} onClick={refresh}>
+          <Button variant="secondary" disabled={checking} onClick={handleRefresh}>
             <RefreshCw size={16} className={checking ? "spin" : undefined} />
             {checking ? "Đang kiểm tra…" : "Kiểm tra trạng thái"}
           </Button>
@@ -160,6 +160,12 @@ export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
         )}
       </Card>
 
+      {downloadError && !downloadingId && (
+        <Card>
+          <span style={{ color: "var(--danger)", fontWeight: 500 }}>{downloadError}</span>
+        </Card>
+      )}
+
       <Card
         title="Mô hình OCR ngoại tuyến (ONNX)"
         description="Chọn và tải mô hình PP-OCR lưu tại ~/.screen-translator-2k/models/rapidocr."
@@ -168,6 +174,9 @@ export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
           {models.map((m) => {
             const selected = config.ocr_model === m.id;
             const isDownloading = downloadingId === m.id;
+            const prog = isDownloading && downloadProgress?.modelId === m.id ? downloadProgress : null;
+            const pct = prog ? Math.min(100, Math.max(0, Math.round(prog.percent))) : 0;
+
             return (
               <div
                 key={m.id}
@@ -186,19 +195,36 @@ export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
                           <CheckCircle2 size={16} /> Đã cài
                         </span>
                       )}
+                      {isDownloading && (
+                        <span className="badge accent">
+                          <Loader2 size={14} className="ui-spin" />
+                          {pct > 0 ? `Đang tải ${pct}%` : "Đang tải…"}
+                        </span>
+                      )}
                     </div>
                     <div className="field-hint">{m.languages}</div>
                   </div>
                   <div className="row-8">
-                    {!m.installed && (
+                    {isDownloading ? (
                       <Button
-                        variant="secondary"
-                        disabled={Boolean(downloadingId)}
-                        onClick={() => handleDownload(m.id)}
+                        variant="ghost"
+                        disabled={cancellingDownload}
+                        onClick={() => appActions.cancelOcrDownload()}
                       >
-                        <Download size={16} />
-                        {isDownloading ? "Đang tải…" : "Tải model"}
+                        <X size={16} />
+                        {cancellingDownload ? "Đang huỷ…" : "Huỷ tải"}
                       </Button>
+                    ) : (
+                      !m.installed && (
+                        <Button
+                          variant="secondary"
+                          disabled={Boolean(downloadingId)}
+                          onClick={() => handleDownload(m.id)}
+                        >
+                          <Download size={16} />
+                          Tải model
+                        </Button>
+                      )
                     )}
                     <Button
                       variant={selected ? "primary" : "secondary"}
@@ -208,6 +234,24 @@ export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
                     </Button>
                   </div>
                 </div>
+
+                {isDownloading && prog && (
+                  <div className="task-progress-box">
+                    <div className="task-progress-meta">
+                      <span>
+                        Tệp {prog.fileIndex}/{prog.fileTotal} · {prog.currentFile}
+                      </span>
+                      <span>
+                        {prog.totalBytes > 0
+                          ? `${formatMb(prog.downloadedBytes)} / ${formatMb(prog.totalBytes)} (${pct}%)`
+                          : `${pct}%`}
+                      </span>
+                    </div>
+                    <div className="task-progress-track">
+                      <div className="task-progress-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
