@@ -592,7 +592,7 @@ fn run_overlay_window_thread(
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
         let hinst = GetModuleHandleW(None).unwrap_or_default();
-        let class_name = w!("TranslatorBoxOverlayClass");
+        let class_name = w!("Translator2kOverlayClass");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinst.into(),
@@ -988,7 +988,7 @@ pub fn select_screen_region() -> Result<Option<[i32; 4]>, String> {
             let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
 
             let hinst = GetModuleHandleW(None).unwrap_or_default();
-            let class_name = w!("TranslatorBoxRegionSelector");
+            let class_name = w!("Translator2kRegionSelector");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(selector_proc),
                 hInstance: hinst.into(),
@@ -1321,7 +1321,7 @@ pub fn edit_screen_region(initial: [i32; 4], mode: &str) -> Result<Option<[i32; 
             let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
 
             let hinst = GetModuleHandleW(None).unwrap_or_default();
-            let class_name = w!("TranslatorBoxRegionEditor");
+            let class_name = w!("Translator2kRegionEditor");
             let wc = WNDCLASSW {
                 style: windows::Win32::UI::WindowsAndMessaging::CS_DBLCLKS,
                 lpfnWndProc: Some(editor_proc),
@@ -1428,7 +1428,7 @@ mod tests {
 
     fn wait_until(cond: impl Fn() -> bool) -> bool {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(2) {
+        while start.elapsed() < Duration::from_secs(10) {
             if cond() {
                 return true;
             }

@@ -40,6 +40,16 @@ interface Props {
   onHistoryCleared: () => void;
 }
 
+const HISTORY_FILTER_KEY = "translator2k.ui.historyFilter";
+
+function loadHistoryFilter(): string {
+  try {
+    return localStorage.getItem(HISTORY_FILTER_KEY) || "all";
+  } catch {
+    return "all";
+  }
+}
+
 export function TranslatePage({
   config,
   history,
@@ -55,6 +65,21 @@ export function TranslatePage({
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
+  const [historyFilter, setHistoryFilterState] = useState<string>(loadHistoryFilter);
+
+  const setHistoryFilter = (val: string) => {
+    setHistoryFilterState(val);
+    try {
+      localStorage.setItem(HISTORY_FILTER_KEY, val);
+    } catch {
+      // ignore
+    }
+  };
+
+  const filteredHistory =
+    historyFilter === "all"
+      ? history
+      : history.filter((item) => item.source_kind === historyFilter);
 
   const serviceOptions = getServiceOptions(config);
   const defaultServiceLabel =
@@ -203,7 +228,7 @@ export function TranslatePage({
           <div className="undo-banner-body">
             <div className="row-8">
               <span className="badge accent">
-                <RotateCcw size={14} />
+                <RotateCcw size={16} />
                 Bản gốc vừa thay thế ({lastReplace.timestamp})
               </span>
               <span className="field-hint">Nhấn Ctrl+Z ở ứng dụng đích hoặc sao chép lại bản gốc:</span>
@@ -436,12 +461,26 @@ export function TranslatePage({
       </Card>
 
       <Card
-        title={`Lịch sử dịch (${history.length}/${config.text_history_limit})`}
+        title={`Lịch sử dịch (${filteredHistory.length}/${config.text_history_limit})`}
         headerRight={
           <div className="row-8">
             {!config.text_keep_history && (
               <span className="badge warning">Đang tắt lưu lịch sử</span>
             )}
+            <select
+              className="ui-select"
+              aria-label="Lọc lịch sử theo nguồn"
+              value={historyFilter}
+              onChange={(e) => setHistoryFilter(e.target.value)}
+            >
+              <option value="all">Tất cả nguồn</option>
+              <option value="text">Văn bản</option>
+              <option value="replace">Dịch &amp; thay thế</option>
+              <option value="clipboard">Tự dịch Copy</option>
+              <option value="overlay">Overlay tại chỗ</option>
+              <option value="screen">Vùng màn hình</option>
+              <option value="clipboard-image">Ảnh clipboard</option>
+            </select>
             {history.length > 0 && (
               <Button variant="ghost" onClick={() => setConfirmClearHistory(true)}>
                 <Trash2 size={16} />
@@ -451,18 +490,20 @@ export function TranslatePage({
           </div>
         }
       >
-        {history.length === 0 ? (
+        {filteredHistory.length === 0 ? (
           <div className="empty-state">
             <Languages size={20} />
             <span>
-              {config.text_keep_history
-                ? "Chưa có bản dịch nào được lưu."
-                : "Tính năng lưu lịch sử đang tắt trong Cài đặt → Dịch văn bản."}
+              {!config.text_keep_history
+                ? "Tính năng lưu lịch sử đang tắt trong Cài đặt → Dịch văn bản."
+                : history.length === 0
+                  ? "Chưa có bản dịch nào được lưu."
+                  : "Không có bản dịch nào khớp bộ lọc đang chọn."}
             </span>
           </div>
         ) : (
           <div className="stack-8">
-            {history.slice(0, config.text_history_limit).map((item) => (
+            {filteredHistory.slice(0, config.text_history_limit).map((item) => (
               <div key={item.id} className="history-item">
                 <div className="row-8" style={{ justifyContent: "space-between" }}>
                   <div className="row-8">

@@ -118,8 +118,8 @@ a:focus-visible {
 }
 
 .titlebar-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 4px;
   object-fit: contain;
 }
@@ -291,9 +291,9 @@ a:focus-visible {
 }
 
 .sidebar-item.active {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
-  border-color: var(--border);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .sidebar-badge {
@@ -304,6 +304,53 @@ a:focus-visible {
   border-radius: 999px;
   background: var(--accent);
   color: #ffffff;
+}
+
+.sidebar-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.sidebar-update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.sidebar.collapsed .sidebar-icon-wrap .sidebar-update-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  border: 1.5px solid var(--surface);
+  width: 8px;
+  height: 8px;
+}
+
+.sidebar-version {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 12px 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-align: left;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.sidebar-version:hover {
+  color: var(--text);
+  background: var(--surface-2);
 }
 
 /* Main Content Area (24px padding, 20px page title) */

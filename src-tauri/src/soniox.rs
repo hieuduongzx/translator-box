@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub const SONIOX_WEBSOCKET_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 pub const SONIOX_MODEL: &str = "stt-rt-v6";
-pub const SONIOX_CLIENT_REFERENCE: &str = "translator-box";
+pub const SONIOX_CLIENT_REFERENCE: &str = "translator2k";
 
 const KEEPALIVE_IDLE_SECS: f64 = 8.0;
 const FINALIZE_AFTER_SILENCE_SECS: f64 = 1.5;

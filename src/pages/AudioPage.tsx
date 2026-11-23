@@ -199,7 +199,7 @@ export function AudioPage({
       >
         <div className="field-row">
           <div className="field-meta">
-            <span className="field-label">Soniox API Key</span>
+            <span className="field-label">Khóa API Soniox</span>
             <span className="field-hint">
               Gửi qua header Authorization: Bearer theo chuẩn bảo mật Soniox v6.
             </span>

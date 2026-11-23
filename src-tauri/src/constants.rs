@@ -15,7 +15,7 @@ pub struct BuiltinAiProvider {
 pub const BUILTIN_AI_PROVIDERS: &[BuiltinAiProvider] = &[
     BuiltinAiProvider {
         id: "llm",
-        name: "Translator Box",
+        name: "Translator2k AI",
         endpoint: DEFAULT_LLM_ENDPOINT,
         models: &[
             ("Deepseek V4 Flash", "deepseek-v4-flash"),

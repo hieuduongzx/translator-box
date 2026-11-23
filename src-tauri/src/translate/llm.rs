@@ -12,7 +12,7 @@ use crate::translate::glossary_prompt_hint;
 static LLM_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(45))
-        .user_agent("TranslatorBox-Rust/2.0")
+        .user_agent("Translator2k-Rust/2.1")
         .build()
         .expect("Failed to build LLM HTTP client")
 });

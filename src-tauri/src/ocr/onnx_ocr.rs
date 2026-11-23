@@ -172,7 +172,7 @@ async fn download_file(url: &str, dest: &PathBuf) -> Result<(), String> {
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) TranslatorBox/2.0")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Translator2k/2.1")
         .build()
         .map_err(|e| format!("Lỗi HTTP client: {e}"))?;
     let resp = client

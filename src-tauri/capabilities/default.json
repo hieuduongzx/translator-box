@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Quyền mặc định cho tất cả cửa sổ Translator Box",
+  "description": "Quyền mặc định cho tất cả cửa sổ Translator2k",
   "windows": ["main", "hud", "live-output-*"],
   "permissions": [
     "core:default",

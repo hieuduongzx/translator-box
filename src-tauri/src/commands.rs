@@ -33,8 +33,7 @@ use crate::soniox::{
 use crate::translate::{
     translate_regions, translate_text, translate_text_with_formatting, TranslateParams,
 };
-use crate::updater::{download_asset, find_update, run_installer, ReleaseInfo};
-use crate::version::{APP_ID, APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO, PUBLISHER};
+use crate::version::{APP_ID, APP_NAME, APP_VERSION, PUBLISHER};
 
 static NEXT_ONCE_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -95,8 +94,6 @@ pub struct AppMeta {
     pub name: String,
     pub app_id: String,
     pub publisher: String,
-    pub github_repo: String,
-    pub releases_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,8 +224,6 @@ pub fn get_app_meta() -> AppMeta {
         name: APP_NAME.to_string(),
         app_id: APP_ID.to_string(),
         publisher: PUBLISHER.to_string(),
-        github_repo: GITHUB_REPO.to_string(),
-        releases_url: GITHUB_RELEASES_URL.to_string(),
     }
 }
 
@@ -1056,25 +1051,4 @@ pub fn reset_hotkeys(
     let _ = state.hotkeys.apply(&updated.effective_hotkeys());
     let _ = app.emit("config-updated", updated.clone());
     Ok(updated)
-}
-
-#[tauri::command]
-pub async fn check_for_update() -> Result<Option<ReleaseInfo>, String> {
-    find_update().await
-}
-
-#[tauri::command]
-pub async fn install_update(app: AppHandle, release: ReleaseInfo) -> Result<(), String> {
-    emit_status(&app, "Đang tải bản cập nhật…", "busy");
-    let app_clone = app.clone();
-    let path = download_asset(&release, move |downloaded, total| {
-        let _ = app_clone.emit(
-            "update-progress",
-            serde_json::json!({ "downloaded": downloaded, "total": total }),
-        );
-    })
-    .await?;
-    run_installer(&path)?;
-    app.exit(0);
-    Ok(())
 }

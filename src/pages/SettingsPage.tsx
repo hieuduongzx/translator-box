@@ -1,8 +1,5 @@
 import { useEffect, useState } from "react";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
-  Download,
-  ExternalLink,
   FileText,
   Keyboard,
   Monitor,
@@ -13,8 +10,8 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { Button, Card, Dialog, Toggle, useToast } from "../components/ui";
-import { api } from "../lib/api";
+import { Button, Card, Toggle, UpdateSettingsCard, useToast } from "../components/ui";
+import type { UseUpdaterResult } from "../hooks/useUpdater";
 import {
   LANGUAGES,
   SOURCE_LANGUAGES,
@@ -25,13 +22,15 @@ import {
   getServiceOptions,
   parseTextServiceValue,
 } from "../lib/constants";
-import type { AppConfig, AppMeta, ReleaseInfo } from "../types";
+import type { AppConfig, AppMeta } from "../types";
 
 export type SettingsTab = "general" | "text";
 
 interface Props {
   config: AppConfig;
   meta: AppMeta | null;
+  appVersion: string;
+  updater: UseUpdaterResult;
   activeTab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
@@ -40,24 +39,14 @@ interface Props {
 export function SettingsPage({
   config,
   meta,
+  appVersion,
+  updater,
   activeTab,
   onTabChange,
   onUpdateConfig,
 }: Props) {
   const { toast } = useToast();
-  const [checking, setChecking] = useState(false);
-  const [release, setRelease] = useState<ReleaseInfo | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [progress, setProgress] = useState<{ downloaded: number; total: number } | null>(null);
-  const [confirmInstall, setConfirmInstall] = useState(false);
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
-
-  useEffect(() => {
-    const unlisten = api.onUpdateProgress((p) => setProgress(p));
-    return () => {
-      unlisten.then((fn) => fn()).catch(() => {});
-    };
-  }, []);
 
   useEffect(() => {
     if (!recordingAction) return;
@@ -91,34 +80,11 @@ export function SettingsPage({
   const defaultServiceLabel =
     serviceOptions.find((o) => o.value === currentServiceValue(config))?.label ?? "Google Dịch";
 
-  const handleCheckUpdate = async () => {
-    setChecking(true);
-    try {
-      const found = await api.checkForUpdate();
-      setRelease(found);
-      if (found) {
-        toast(`Có phiên bản mới ${found.version}!`, "success");
-      } else {
-        toast("Bạn đang dùng phiên bản mới nhất.", "info");
-      }
-    } catch (err) {
-      toast(String(err), "error");
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const handleInstall = async () => {
-    if (!release) return;
-    setConfirmInstall(false);
-    setInstalling(true);
-    try {
-      await api.installUpdate(release);
-    } catch (err) {
-      toast(String(err), "error");
-      setInstalling(false);
-    }
-  };
+  const checkingUpdate = updater.state?.status === "checking";
+  const busyUpdate = Boolean(
+    updater.state &&
+      ["checking", "downloading", "verifying", "installing"].includes(updater.state.status)
+  );
 
   const renderHotkeyControl = (action: string, label: string, disabled = false) => {
     const combo = config.hotkeys[action] || "";
@@ -260,63 +226,34 @@ export function SettingsPage({
             </div>
           </Card>
 
-          <Card title="Cập nhật &amp; Giới thiệu">
-            <div className="field-row">
-              <div className="field-meta">
-                <span className="field-label">Tự kiểm tra cập nhật khi mở ứng dụng</span>
-              </div>
-              <Toggle
-                checked={config.auto_update}
-                onChange={(v) => onUpdateConfig({ auto_update: v })}
-              />
-            </div>
+          <UpdateSettingsCard
+            appName={meta?.name ?? "Translator2k"}
+            updater={updater}
+            currentVersion={appVersion}
+          />
 
+          <Card title="Giới thiệu">
             <div className="field-row">
               <div className="field-meta">
                 <span className="field-label">
-                  {meta?.name ?? "Translator2k"} · v{meta?.version ?? "2.1.0"}
+                  {meta?.name ?? "Translator2k"}
+                  {appVersion ? ` · v${appVersion}` : ""}
                 </span>
                 <span className="field-hint">
-                  Viết lại hoàn toàn bằng Rust + Tauri 2 · Tác giả: {meta?.publisher ?? "hieuduongzx"}
+                  Công cụ OCR, dịch màn hình, overlay tại chỗ, Live đa vùng và dịch âm thanh viết bằng Rust + Tauri 2 · Tác giả: {meta?.publisher ?? "hieuduongzx"}
                 </span>
               </div>
               <div className="field-control">
-                <Button variant="secondary" disabled={checking} onClick={handleCheckUpdate}>
-                  <RefreshCw size={16} className={checking ? "spin" : undefined} />
-                  {checking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
+                <Button
+                  variant="secondary"
+                  disabled={busyUpdate}
+                  onClick={() => updater.checkForUpdates(updater.state?.autoUpdate ?? true)}
+                >
+                  <RefreshCw size={16} className={checkingUpdate ? "spin" : undefined} />
+                  {checkingUpdate ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
                 </Button>
-                {meta?.releases_url && (
-                  <Button variant="ghost" onClick={() => openExternal(meta.releases_url)}>
-                    <ExternalLink size={16} />
-                    Trang phát hành
-                  </Button>
-                )}
               </div>
             </div>
-
-            {release && (
-              <div className="history-item" style={{ marginTop: 12 }}>
-                <div className="row-8" style={{ justifyContent: "space-between" }}>
-                  <div>
-                    <strong>Phiên bản mới: {release.name}</strong>
-                    {progress && progress.total > 0 && (
-                      <div className="field-hint">
-                        Đang tải: {Math.round((progress.downloaded / progress.total) * 100)}%
-                      </div>
-                    )}
-                  </div>
-                  <Button
-                    variant="primary"
-                    disabled={installing || !release.asset_url}
-                    onClick={() => setConfirmInstall(true)}
-                  >
-                    <Download size={16} />
-                    {installing ? "Đang tải & cài…" : "Cập nhật ngay"}
-                  </Button>
-                </div>
-                {release.notes && <div className="field-hint">{release.notes}</div>}
-              </div>
-            )}
           </Card>
         </>
       )}
@@ -657,15 +594,6 @@ export function SettingsPage({
           </Card>
         </>
       )}
-
-      <Dialog
-        open={confirmInstall}
-        title={`Cài đặt bản cập nhật ${release?.version}?`}
-        description="Ứng dụng sẽ tải bộ cài đặt từ GitHub Releases, tự đóng để cài đặt im lặng rồi mở lại."
-        confirmLabel="Cập nhật"
-        onClose={() => setConfirmInstall(false)}
-        onConfirm={handleInstall}
-      />
     </div>
   );
 }

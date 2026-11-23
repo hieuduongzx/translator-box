@@ -11,7 +11,6 @@ import type {
   LiveStatePayload,
   OcrEngineStatusInfo,
   OcrModelInfo,
-  ReleaseInfo,
   ReplaceCompletedPayload,
   SonioxStatePayload,
   StatusEvent,
@@ -72,8 +71,6 @@ export const api = {
   sonioxClear: () => invoke<SonioxStatePayload>("soniox_clear"),
 
   resetHotkeys: () => invoke<AppConfig>("reset_hotkeys"),
-  checkForUpdate: () => invoke<ReleaseInfo | null>("check_for_update"),
-  installUpdate: (release: ReleaseInfo) => invoke<void>("install_update", { release }),
 
   onStatus: (cb: (e: StatusEvent) => void): Promise<UnlistenFn> =>
     listen<StatusEvent>("app-status", (ev) => cb(ev.payload)),
@@ -93,6 +90,4 @@ export const api = {
     listen<string>("navigate", (ev) => cb(ev.payload)),
   onHudShowBar: (cb: () => void): Promise<UnlistenFn> =>
     listen("hud-show-bar", () => cb()),
-  onUpdateProgress: (cb: (p: { downloaded: number; total: number }) => void): Promise<UnlistenFn> =>
-    listen<{ downloaded: number; total: number }>("update-progress", (ev) => cb(ev.payload)),
 };

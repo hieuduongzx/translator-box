@@ -118,8 +118,10 @@ export const BUILTIN_AI_PROVIDERS = [
 export const SOURCE_KIND_LABELS: Record<string, string> = {
   text: "Văn bản",
   region: "Vùng màn hình",
+  screen: "Vùng màn hình",
   overlay: "Overlay tại chỗ",
   image: "Ảnh clipboard",
+  "clipboard-image": "Ảnh clipboard",
   clipboard: "Tự dịch Copy",
   replace: "Dịch & thay thế",
 };

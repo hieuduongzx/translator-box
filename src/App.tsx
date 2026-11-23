@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AudioLines,
@@ -14,9 +15,11 @@ import {
   Sidebar,
   TitleBar,
   ToastProvider,
+  UpdateBanner,
   useToast,
   type SidebarItem,
 } from "./components/ui";
+import { useUpdater } from "./hooks/useUpdater";
 import { api } from "./lib/api";
 import { AiProvidersPage } from "./pages/AiProvidersPage";
 import { AppearancePage } from "./pages/AppearancePage";
@@ -38,6 +41,39 @@ import type {
   StatusEvent,
 } from "./types";
 
+const VALID_PAGES = new Set([
+  "translate",
+  "live",
+  "audio",
+  "ai",
+  "ocr",
+  "appearance",
+  "hotkeys",
+  "settings",
+]);
+const PAGE_STORAGE_KEY = "translator2k.ui.activePage";
+const SETTINGS_TAB_STORAGE_KEY = "translator2k.ui.settingsTab";
+
+function loadInitialPage(): string {
+  try {
+    const raw = localStorage.getItem(PAGE_STORAGE_KEY);
+    if (raw && VALID_PAGES.has(raw)) return raw;
+  } catch {
+    // ignore
+  }
+  return "translate";
+}
+
+function loadInitialSettingsTab(): SettingsTab {
+  try {
+    const raw = localStorage.getItem(SETTINGS_TAB_STORAGE_KEY);
+    if (raw === "general" || raw === "text") return raw;
+  } catch {
+    // ignore
+  }
+  return "general";
+}
+
 function applyTheme(theme: AppConfig["ui_theme"]) {
   try {
     localStorage.setItem("translator2k_theme", theme);
@@ -51,8 +87,10 @@ function applyTheme(theme: AppConfig["ui_theme"]) {
 
 function MainApp() {
   const { toast } = useToast();
-  const [activePage, setActivePage] = useState("translate");
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const updater = useUpdater();
+  const [activePage, setActivePageState] = useState<string>(loadInitialPage);
+  const [settingsTab, setSettingsTabState] = useState<SettingsTab>(loadInitialSettingsTab);
+  const [appVersion, setAppVersion] = useState<string>("");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [meta, setMeta] = useState<AppMeta | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -70,7 +108,32 @@ function MainApp() {
     blocks: [],
   });
 
+  const setActivePage = useCallback((page: string) => {
+    const safe = VALID_PAGES.has(page) ? page : "translate";
+    setActivePageState(safe);
+    try {
+      localStorage.setItem(PAGE_STORAGE_KEY, safe);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const setSettingsTab = useCallback((tab: SettingsTab) => {
+    setSettingsTabState(tab);
+    try {
+      localStorage.setItem(SETTINGS_TAB_STORAGE_KEY, tab);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
+    getVersion()
+      .then((ver) => {
+        if (ver) setAppVersion(ver);
+      })
+      .catch(() => {});
+
     Promise.all([
       api.getConfig(),
       api.getAppMeta(),
@@ -81,6 +144,9 @@ function MainApp() {
       .then(([cfg, m, hist, live, sx]) => {
         setConfig(cfg);
         setMeta(m);
+        if (m?.version) {
+          setAppVersion((prev) => prev || m.version);
+        }
         setHistory(hist);
         setLiveState(live);
         setSonioxState(sx);
@@ -141,7 +207,7 @@ function MainApp() {
         p.then((fn) => fn()).catch(() => {});
       }
     };
-  }, []);
+  }, [setActivePage, setSettingsTab]);
 
   const updateConfig = useCallback(
     async (patch: Partial<AppConfig>) => {
@@ -157,6 +223,12 @@ function MainApp() {
       }
     },
     [config, toast]
+  );
+
+  const resolvedVersion = appVersion || updater.state?.currentVersion || meta?.version || "";
+  const hasUpdate = Boolean(
+    updater.state &&
+      ["available", "downloading", "verifying", "ready"].includes(updater.state.status)
   );
 
   if (!config) {
@@ -197,16 +269,23 @@ function MainApp() {
   return (
     <div className="app-shell">
       <TitleBar title={meta?.name ?? "Translator2k"} status={status} />
+      <UpdateBanner appName={meta?.name ?? "Translator2k"} updater={updater} />
       <div className="app-body">
         <Sidebar
           items={navItems}
           footerItems={footerItems}
           activeId={activePage}
           collapsed={config.sidebar_collapsed}
+          version={resolvedVersion}
+          hasUpdate={hasUpdate}
           onSelect={setActivePage}
           onToggleCollapse={() =>
             updateConfig({ sidebar_collapsed: !config.sidebar_collapsed })
           }
+          onVersionClick={() => {
+            setSettingsTab("general");
+            setActivePage("settings");
+          }}
         />
         <main className="content-area">
           <div
@@ -266,6 +345,8 @@ function MainApp() {
               <SettingsPage
                 config={config}
                 meta={meta}
+                appVersion={resolvedVersion}
+                updater={updater}
                 activeTab={settingsTab}
                 onTabChange={setSettingsTab}
                 onUpdateConfig={updateConfig}

@@ -183,6 +183,7 @@ use crate::live::LiveController;
 use crate::overlay_win32::OverlayManager;
 use crate::soniox::SonioxManager;
 use crate::translate::translate_text;
+use crate::updater::{InstallKind, UpdaterConfig, UpdaterManager};
 
 fn dispatch_hotkey_action(app: AppHandle, action: String) {
     let state = app.state::<Arc<AppState>>().inner().clone();
@@ -457,6 +458,14 @@ pub fn run() {
             let _ = setup_tray(app.handle());
             spawn_clipboard_loop(app.handle().clone(), state);
 
+            // Tự cập nhật nền qua Cloudflare R2 (kiểm tra lúc mở + định kỳ 6 giờ, thông báo toast Windows).
+            let updater_handle = app.handle().clone();
+            UpdaterManager::init(
+                &updater_handle,
+                UpdaterConfig::new("translator2k", "Translator2k", env!("CARGO_PKG_VERSION"))
+                    .with_install_kind(InstallKind::Installer),
+            );
+
             // Khi khởi động: chỉ mở thanh HUD nổi gọn nhẹ, không bật bảng điều khiển to.
             let _ = open_or_focus_hud_window(app.handle());
             Ok(())
@@ -499,19 +508,42 @@ pub fn run() {
             commands::soniox_stop,
             commands::soniox_clear,
             commands::reset_hotkeys,
-            commands::check_for_update,
-            commands::install_update,
+            updater::updater_get_state,
+            updater::updater_check,
+            updater::updater_download,
+            updater::updater_cancel_download,
+            updater::updater_install_now,
+            updater::updater_set_auto_update,
+            updater::updater_set_install_on_exit,
         ])
         .build(tauri::generate_context!())
         .expect("Lỗi khởi tạo Translator2k")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| {
             // Khi người dùng đóng cửa sổ chính: WebView2 được giải phóng hoàn toàn,
             // chỉ giữ lõi Rust chạy nền ở khay hệ thống (phím tắt, clipboard, live, overlay).
-            if let RunEvent::ExitRequested { api, .. } = event {
-                if !EXPLICIT_QUIT.load(Ordering::SeqCst) {
-                    api.prevent_exit();
-                    trim_working_set();
+            // Cho phép thoát hẳn khi người dùng chọn Thoát hoặc khi Updater đang áp dụng bản mới.
+            match event {
+                RunEvent::ExitRequested { api, .. } => {
+                    let updating = app_handle
+                        .try_state::<Arc<UpdaterManager>>()
+                        .is_some_and(|m| m.snapshot().status == "installing");
+                    if !EXPLICIT_QUIT.load(Ordering::SeqCst) && !updating {
+                        api.prevent_exit();
+                        trim_working_set();
+                    } else {
+                        persist_main_window_geometry(app_handle);
+                        if let Some(st) = app_handle.try_state::<Arc<AppState>>() {
+                            st.overlays.clear_all();
+                            st.soniox.stop();
+                        }
+                    }
                 }
+                RunEvent::Exit => {
+                    if let Some(mgr) = app_handle.try_state::<Arc<UpdaterManager>>() {
+                        mgr.apply_on_exit_if_scheduled();
+                    }
+                }
+                _ => {}
             }
         });
 }

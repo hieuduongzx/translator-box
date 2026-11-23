@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    translator_box_lib::run();
+    translator2k_lib::run();
 }

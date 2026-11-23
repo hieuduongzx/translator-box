@@ -906,32 +906,32 @@ export function HudWindow() {
       {/* Replace undo-original strip */}
       {lastReplace && config?.replace_show_undo_original && (
         <div className="hud-undo-bar">
-          <RotateCcw size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <RotateCcw size={16} style={{ color: "var(--accent)", flexShrink: 0 }} />
           <span className="hud-undo-text" title={lastReplace.original}>
             Bản gốc: {lastReplace.original}
           </span>
           <button
             type="button"
             className="hud-bar-btn"
-            style={{ height: 22, padding: "0 6px", fontSize: 11.5 }}
+            style={{ height: 24, padding: "0 8px", fontSize: 12 }}
             onClick={() => {
               api.copyText(lastReplace.original).catch(() => {});
               setStatus({ text: "Đã sao chép bản gốc để hoàn tác", state: "ready" });
             }}
             title="Sao chép bản gốc để dán lại / hoàn tác"
           >
-            <Copy size={14} />
+            <Copy size={16} />
             Chép gốc
           </button>
           <button
             type="button"
             className="hud-bar-btn icon-only"
-            style={{ height: 22, width: 22 }}
+            style={{ height: 24, width: 24 }}
             onClick={() => setLastReplace(null)}
             title="Đóng"
             aria-label="Đóng thanh bản gốc"
           >
-            <X size={14} />
+            <X size={16} />
           </button>
         </div>
       )}

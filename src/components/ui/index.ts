@@ -5,3 +5,5 @@ export { Card } from "./Card";
 export { Dialog } from "./Dialog";
 export { ToastProvider, useToast, type ToastType } from "./Toast";
 export { Toggle } from "./Toggle";
+export { UpdateBanner } from "./UpdateBanner";
+export { UpdateSettingsCard } from "./UpdateSettingsCard";

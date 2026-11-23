@@ -120,8 +120,6 @@ export interface AppMeta {
   name: string;
   app_id: string;
   publisher: string;
-  github_repo: string;
-  releases_url: string;
 }
 
 export interface HistoryEntry {
@@ -209,17 +207,6 @@ export interface SonioxStatePayload {
   source: string;
   error: string | null;
   blocks: TranscriptBlock[];
-}
-
-export interface ReleaseInfo {
-  version: string;
-  tag: string;
-  name: string;
-  notes: string;
-  html_url: string;
-  asset_url: string | null;
-  asset_name: string | null;
-  asset_size: number;
 }
 
 export interface StatusEvent {
