@@ -1,22 +1,27 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
+# Dependencies & Build Artifacts
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+target/
+*.pdb
 
-# Test / lint caches
-.pytest_cache/
-.ruff_cache/
+# Secrets & Signing Keys
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*.crt
+*.cer
+*.snk
+*.jks
+*.keystore
 
-# Build artifacts (PyInstaller + Inno Setup)
-/build/
-/dist/
-packaging/file_version_info.txt
-
-# OS
+# OS / Editor / Local
+*.log
+.DS_Store
 Thumbs.db
-Desktop.ini
-
-# Local Claude Code settings (personal)
-.claude/settings.local.json
+.claude/

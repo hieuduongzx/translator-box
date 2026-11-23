@@ -1,14 +1,16 @@
 @echo off
+setlocal
 cd /d "%~dp0"
 
-if not exist "python-app\main.py" (
-    echo Khong tim thay python-app\main.py.
-    pause
-    exit /b 1
+if exist "src-tauri\target\release\Translator2k.exe" (
+    start "" "src-tauri\target\release\Translator2k.exe"
+    exit /b 0
 )
 
-set "PYW=%LOCALAPPDATA%\Programs\Python\Python310\pythonw.exe"
-if not exist "%PYW%" set "PYW=pythonw"
+where bun >nul 2>nul
+if %errorlevel%==0 (
+    bun run tauri:dev
+    exit /b %errorlevel%
+)
 
-start "" "%PYW%" "python-app\main.py"
-exit /b
+npm run tauri:dev

@@ -1,15 +1,12 @@
-; Inno Setup script cho Screen Translator 2K.
-; Biên dịch: iscc /DAppVersion=1.0.0 packaging\installer.iss
-; (build.ps1 tự truyền /DAppVersion từ python-app/version.py)
-
+﻿; Inno Setup script cho Translator2k (Rust + Tauri 2).
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "2.0.0"
 #endif
 
-#define AppName "Translator Box"
-#define AppId "ScreenTranslator2K"
+#define AppName "Translator2k"
+#define AppId "Translator2k"
 #define Publisher "hieuduongzx"
-#define ExeName "ScreenTranslator2K.exe"
+#define ExeName "Translator2k.exe"
 #define RepoUrl "https://github.com/hieuduongzx/translator-box"
 
 [Setup]
@@ -28,8 +25,8 @@ DisableDirPage=auto
 UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 OutputDir=..\dist
-OutputBaseFilename=TranslatorBox-Windows-x64-{#AppVersion}
-SetupIconFile=..\python-app\assets\icon.ico
+OutputBaseFilename=Translator2k-Windows-x64-{#AppVersion}
+SetupIconFile=..\src-tauri\icons\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -46,9 +43,25 @@ Name: "vi"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Tạo lối tắt ngoài Desktop"; GroupDescription: "Lối tắt:"
 Name: "startupicon"; Description: "Khởi động cùng Windows"; GroupDescription: "Tùy chọn:"; Flags: unchecked
 
+[InstallDelete]
+Type: files; Name: "{app}\ScreenTranslator2K.exe"
+Type: files; Name: "{autodesktop}\Translator Box.lnk"
+Type: files; Name: "{userdesktop}\Translator Box.lnk"
+Type: files; Name: "{commondesktop}\Translator Box.lnk"
+Type: files; Name: "{autostartup}\Translator Box.lnk"
+Type: files; Name: "{userstartup}\Translator Box.lnk"
+Type: files; Name: "{commonstartup}\Translator Box.lnk"
+Type: filesandordirs; Name: "{autoprograms}\Translator Box"
+Type: filesandordirs; Name: "{userprograms}\Translator Box"
+Type: filesandordirs; Name: "{commonprograms}\Translator Box"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Translator Box"; Flags: deletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "TranslatorBox"; Flags: deletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "ScreenTranslator2K"; Flags: deletevalue
+
 [Files]
-; Toàn bộ thư mục onedir do PyInstaller sinh ra (dist\ScreenTranslator2K\...).
-Source: "..\dist\ScreenTranslator2K\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\src-tauri\target\release\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"
@@ -57,6 +70,5 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopic
 Name: "{autostartup}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: startupicon
 
 [Run]
-; Sau khi cài (kể cả bản cập nhật im lặng) tự mở lại app.
 Filename: "{app}\{#ExeName}"; Description: "Mở {#AppName}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#ExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
