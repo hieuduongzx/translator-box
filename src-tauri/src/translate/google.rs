@@ -118,11 +118,16 @@ fn google_batches(texts: &[String]) -> Vec<Vec<usize>> {
     batches
 }
 
-pub async fn translate_google_many(texts: &[String], target: &str) -> Result<Vec<String>, String> {
+pub async fn translate_google_many(
+    texts: &[String],
+    source: &str,
+    target: &str,
+) -> Result<Vec<String>, String> {
+    let sl = if source.trim().is_empty() { "auto" } else { source.trim() };
     let mut results = vec![String::new(); texts.len()];
     for batch in google_batches(texts) {
         let slice: Vec<String> = batch.iter().map(|&i| texts[i].clone()).collect();
-        let translated = translate_google_batch(&slice, target).await?;
+        let translated = translate_google_batch(&slice, sl, target).await?;
         for (idx, val) in batch.into_iter().zip(translated.into_iter()) {
             results[idx] = val;
         }
@@ -130,7 +135,11 @@ pub async fn translate_google_many(texts: &[String], target: &str) -> Result<Vec
     Ok(results)
 }
 
-async fn translate_google_batch(texts: &[String], target: &str) -> Result<Vec<String>, String> {
+async fn translate_google_batch(
+    texts: &[String],
+    source: &str,
+    target: &str,
+) -> Result<Vec<String>, String> {
     let mut last_err: Option<String> = None;
     let mut rate_limited = false;
 
@@ -146,7 +155,7 @@ async fn translate_google_batch(texts: &[String], target: &str) -> Result<Vec<St
                 rate_limited = true;
                 continue;
             }
-            match call_once_more_on_5xx(backend, texts, target).await {
+            match call_once_more_on_5xx(backend, texts, source, target).await {
                 Ok(translated) => {
                     reset_cooldown(backend);
                     return Ok(translated);
@@ -180,10 +189,11 @@ async fn translate_google_batch(texts: &[String], target: &str) -> Result<Vec<St
 async fn call_once_more_on_5xx(
     backend: &str,
     texts: &[String],
+    source: &str,
     target: &str,
 ) -> Result<Vec<String>, GoogleCallError> {
-    match call_backend(backend, texts, target).await {
-        Err(GoogleCallError::Server5xx(_)) => call_backend(backend, texts, target).await,
+    match call_backend(backend, texts, source, target).await {
+        Err(GoogleCallError::Server5xx(_)) => call_backend(backend, texts, source, target).await,
         other => other,
     }
 }
@@ -285,6 +295,7 @@ async fn post_google(
 async fn call_backend(
     backend: &str,
     texts: &[String],
+    source: &str,
     target: &str,
 ) -> Result<Vec<String>, GoogleCallError> {
     let translated = match backend {
@@ -295,7 +306,8 @@ async fn call_backend(
                 "clients5.google.com"
             };
             let url = format!(
-                "https://{host}/translate_a/t?client=dict-chrome-ex&sl=auto&tl={}&tbb=1&ie=UTF-8&oe=UTF-8",
+                "https://{host}/translate_a/t?client=dict-chrome-ex&sl={}&tl={}&tbb=1&ie=UTF-8&oe=UTF-8",
+                urlencoding::encode(source),
                 urlencoding::encode(target)
             );
             let form_body = texts
@@ -323,7 +335,7 @@ async fn call_backend(
                         .join("<br>")
                 })
                 .collect();
-            let payload = serde_json::json!([[items, "auto", target], "te_lib"]);
+            let payload = serde_json::json!([[items, source, target], "te_lib"]);
             let body = serde_json::to_vec(&payload).unwrap_or_default();
             let data = post_google(
                 backend,
@@ -364,7 +376,8 @@ async fn call_backend(
                     .join("\n")
             };
             let url = format!(
-                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={}&dt=t",
+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl={}&tl={}&dt=t",
+                urlencoding::encode(source),
                 urlencoding::encode(target)
             );
             let body = format!("q={}", urlencoding::encode(&flat));

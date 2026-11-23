@@ -11,6 +11,11 @@ export const LANGUAGES: [string, string][] = [
   ["Deutsch", "de"],
 ];
 
+export const SOURCE_LANGUAGES: [string, string][] = [
+  ["Tự nhận diện", "auto"],
+  ...LANGUAGES,
+];
+
 export const SONIOX_LANGUAGES: [string, string][] = [
   ["Tiếng Việt", "vi"],
   ["English", "en"],
@@ -343,4 +348,55 @@ export function parseServiceValue(val: string): { translator: string; llm_model?
     translator: val.slice(0, idx),
     llm_model: val.slice(idx + 2),
   };
+}
+
+export function currentTextServiceValue(config: AppConfig): string {
+  if (!config.text_translator?.trim()) return "";
+  if (config.text_translator === "google" || config.text_translator === "bing") {
+    return config.text_translator;
+  }
+  const model = config.text_llm_model?.trim() || config.llm_model;
+  return `${config.text_translator}::${model}`;
+}
+
+export function parseTextServiceValue(val: string): {
+  text_translator: string;
+  text_llm_model: string;
+} {
+  if (!val.trim()) {
+    return { text_translator: "", text_llm_model: "" };
+  }
+  const idx = val.indexOf("::");
+  if (idx === -1) {
+    return { text_translator: val, text_llm_model: "" };
+  }
+  return {
+    text_translator: val.slice(0, idx),
+    text_llm_model: val.slice(idx + 2),
+  };
+}
+
+export function eventToCombo(e: KeyboardEvent): string | null {
+  const key = e.key.toLowerCase();
+  if (["control", "alt", "shift", "meta"].includes(key)) return null;
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push("ctrl");
+  if (e.altKey) parts.push("alt");
+  if (e.shiftKey) parts.push("shift");
+  if (e.metaKey) parts.push("win");
+
+  const mapped =
+    key === " "
+      ? "space"
+      : key === "arrowup"
+        ? "up"
+        : key === "arrowdown"
+          ? "down"
+          : key === "arrowleft"
+            ? "left"
+            : key === "arrowright"
+              ? "right"
+              : key;
+  parts.push(mapped);
+  return parts.join("+");
 }

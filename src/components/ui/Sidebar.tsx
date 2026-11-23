@@ -34,10 +34,17 @@ export function Sidebar({
             type="button"
             className={`sidebar-item ${activeId === item.id ? "active" : ""}`}
             onClick={() => onSelect(item.id)}
-            title={collapsed ? item.label : undefined}
+            title={
+              collapsed
+                ? item.badge
+                  ? `${item.label} (${item.badge})`
+                  : item.label
+                : undefined
+            }
+            aria-label={item.label}
           >
             <span style={{ display: "inline-flex", flexShrink: 0 }}>{item.icon}</span>
-            {!collapsed && <span>{item.label}</span>}
+            {!collapsed && <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{item.label}</span>}
             {!collapsed && item.badge && <span className="sidebar-badge">{item.badge}</span>}
           </button>
         ))}
@@ -51,9 +58,10 @@ export function Sidebar({
             className={`sidebar-item ${activeId === item.id ? "active" : ""}`}
             onClick={() => onSelect(item.id)}
             title={collapsed ? item.label : undefined}
+            aria-label={item.label}
           >
             <span style={{ display: "inline-flex", flexShrink: 0 }}>{item.icon}</span>
-            {!collapsed && <span>{item.label}</span>}
+            {!collapsed && <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{item.label}</span>}
           </button>
         ))}
         <button

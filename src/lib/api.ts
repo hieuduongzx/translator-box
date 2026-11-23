@@ -12,6 +12,7 @@ import type {
   OcrEngineStatusInfo,
   OcrModelInfo,
   ReleaseInfo,
+  ReplaceCompletedPayload,
   SonioxStatePayload,
   StatusEvent,
   TranslateResultPayload,
@@ -25,8 +26,12 @@ export const api = {
   getHistory: () => invoke<HistoryEntry[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
-  translateText: (text: string, target?: string) =>
-    invoke<TranslateResultPayload>("translate_text_cmd", { text, target: target ?? null }),
+  translateText: (text: string, target?: string, source?: string) =>
+    invoke<TranslateResultPayload>("translate_text_cmd", {
+      text,
+      target: target ?? null,
+      source: source ?? null,
+    }),
 
   regionToText: () => invoke<TranslateResultPayload>("action_region_to_text"),
   regionToOverlay: () => invoke<TranslateResultPayload>("action_region_to_overlay"),
@@ -76,6 +81,8 @@ export const api = {
     listen<AppConfig>("config-updated", (ev) => cb(ev.payload)),
   onTranslationResult: (cb: (entry: HistoryEntry) => void): Promise<UnlistenFn> =>
     listen<HistoryEntry>("translation-result", (ev) => cb(ev.payload)),
+  onReplaceCompleted: (cb: (payload: ReplaceCompletedPayload) => void): Promise<UnlistenFn> =>
+    listen<ReplaceCompletedPayload>("replace-completed", (ev) => cb(ev.payload)),
   onLiveState: (cb: (state: LiveStatePayload) => void): Promise<UnlistenFn> =>
     listen<LiveStatePayload>("live-state", (ev) => cb(ev.payload)),
   onLiveFrameText: (cb: (upd: LiveFrameUpdate) => void): Promise<UnlistenFn> =>

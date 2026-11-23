@@ -327,6 +327,7 @@ impl LiveController {
                 let (service, llm_endpoint, llm_api_key, llm_model) = cfg.resolve_llm();
                 let tparams = TranslateParams {
                     service,
+                    source: "auto".to_string(),
                     target: cfg.target_language.clone(),
                     llm_endpoint,
                     llm_api_key,

@@ -199,11 +199,12 @@ fn dispatch_hotkey_action(app: AppHandle, action: String) {
                 Ok(())
             }
             "region_to_live" => {
-                if let Ok(Some(bbox)) =
-                    tokio::task::spawn_blocking(overlay_win32::select_screen_region)
-                        .await
-                        .unwrap_or(Ok(None))
-                {
+                state.overlays.set_esc_suspended(true);
+                let bbox_res = tokio::task::spawn_blocking(overlay_win32::select_screen_region)
+                    .await
+                    .unwrap_or(Ok(None));
+                state.overlays.set_esc_suspended(false);
+                if let Ok(Some(bbox)) = bbox_res {
                     if state.live.add_region(bbox, "overlay").is_ok() {
                         let mut cfg = state.config.lock();
                         cfg.live_regions = state.live.saved_regions();
@@ -214,11 +215,12 @@ fn dispatch_hotkey_action(app: AppHandle, action: String) {
                 Ok(())
             }
             "region_to_live_frame" => {
-                if let Ok(Some(bbox)) =
-                    tokio::task::spawn_blocking(overlay_win32::select_screen_region)
-                        .await
-                        .unwrap_or(Ok(None))
-                {
+                state.overlays.set_esc_suspended(true);
+                let bbox_res = tokio::task::spawn_blocking(overlay_win32::select_screen_region)
+                    .await
+                    .unwrap_or(Ok(None));
+                state.overlays.set_esc_suspended(false);
+                if let Ok(Some(bbox)) = bbox_res {
                     if let Ok(added) = state.live.add_region(bbox, "frame") {
                         {
                             let mut cfg = state.config.lock();
@@ -296,10 +298,11 @@ fn spawn_clipboard_loop(app: AppHandle, state: Arc<AppState>) {
         loop {
             tick.tick().await;
             if let Some(copied) = state.clipboard.poll_new_text() {
-                let params = state.build_translate_params(None);
+                let params = state.build_text_translate_params(None, None);
                 emit_status(&app, "Đang tự dịch clipboard…", "busy");
                 match translate_text(&copied, &params).await {
                     Ok(translated) => {
+                        state.maybe_auto_copy(&translated);
                         state.record_history(&app, "clipboard", &copied, &translated, &params.target);
                         emit_status(&app, "Đã dịch văn bản vừa copy", "ready");
                     }
@@ -422,11 +425,13 @@ pub fn run() {
         .setup(|app| {
             let cfg = AppConfig::load();
             let auto_clip = cfg.auto_translate_clipboard;
+            let auto_clip_max = cfg.auto_clipboard_max_chars as usize;
             let initial_regions = cfg.live_regions.clone();
-            let initial_hotkeys = cfg.hotkeys.clone();
+            let initial_hotkeys = cfg.effective_hotkeys();
+            let initial_history = commands::load_persisted_history(&cfg);
             let overlays = Arc::new(OverlayManager::new());
             let live = Arc::new(LiveController::new(&initial_regions, overlays.clone()));
-            let clipboard = Arc::new(ClipboardWatcher::new(auto_clip));
+            let clipboard = Arc::new(ClipboardWatcher::new(auto_clip, auto_clip_max));
             let soniox = Arc::new(SonioxManager::new());
 
             let app_handle_hk = app.handle().clone();
@@ -438,7 +443,7 @@ pub fn run() {
             let initial_main_geom = cfg.main_window_geometry.clone();
             let state = Arc::new(AppState {
                 config: Arc::new(Mutex::new(cfg)),
-                history: Mutex::new(Vec::new()),
+                history: Mutex::new(initial_history),
                 hotkeys,
                 clipboard,
                 overlays,

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ArrowLeftRight,
   Camera,
   Clipboard,
   Copy,
@@ -9,24 +10,32 @@ import {
   Layers,
   PictureInPicture2,
   Replace,
+  RotateCcw,
   Send,
+  SlidersHorizontal,
   Trash2,
+  X,
 } from "lucide-react";
 import { Button, Card, Dialog, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import {
   LANGUAGES,
+  SOURCE_LANGUAGES,
   SOURCE_KIND_LABELS,
   currentServiceValue,
+  currentTextServiceValue,
   formatHotkey,
   getServiceOptions,
-  parseServiceValue,
+  parseTextServiceValue,
 } from "../lib/constants";
-import type { AppConfig, HistoryEntry } from "../types";
+import type { AppConfig, HistoryEntry, ReplaceCompletedPayload } from "../types";
 
 interface Props {
   config: AppConfig;
   history: HistoryEntry[];
+  lastReplace: ReplaceCompletedPayload | null;
+  onDismissReplace: () => void;
+  onOpenTextSettings: () => void;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onHistoryCleared: () => void;
 }
@@ -34,6 +43,9 @@ interface Props {
 export function TranslatePage({
   config,
   history,
+  lastReplace,
+  onDismissReplace,
+  onOpenTextSettings,
   onUpdateConfig,
   onHistoryCleared,
 }: Props) {
@@ -45,6 +57,8 @@ export function TranslatePage({
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
 
   const serviceOptions = getServiceOptions(config);
+  const defaultServiceLabel =
+    serviceOptions.find((o) => o.value === currentServiceValue(config))?.label ?? "Google Dịch";
 
   const actionTip = (desc: string, action: string) => {
     const raw = config.hotkeys[action]?.trim() || "";
@@ -57,8 +71,15 @@ export function TranslatePage({
     setBusy(true);
     setImagePreview(null);
     try {
-      const res = await api.translateText(trimmed, config.target_language);
+      const res = await api.translateText(
+        trimmed,
+        config.text_target_language,
+        config.text_source_language
+      );
       setResultText(res.translated);
+      if (config.text_auto_copy_result && res.translated.trim()) {
+        toast("Đã dịch và tự sao chép kết quả", "success");
+      }
     } catch (err) {
       toast(String(err), "error");
     } finally {
@@ -87,11 +108,11 @@ export function TranslatePage({
     }
   };
 
-  const handleCopy = async (text: string) => {
+  const handleCopy = async (text: string, label = "Đã sao chép bản dịch") => {
     if (!text.trim()) return;
     try {
       await api.copyText(text);
-      toast("Đã sao chép bản dịch", "success");
+      toast(label, "success");
     } catch (err) {
       toast(String(err), "error");
     }
@@ -111,6 +132,21 @@ export function TranslatePage({
     }
   };
 
+  const handleSwapLanguages = () => {
+    if (config.text_source_language === "auto") return;
+    const prevSource = config.text_source_language;
+    const prevTarget = config.text_target_language;
+    onUpdateConfig({
+      text_source_language: prevTarget,
+      text_target_language: prevSource,
+    });
+  };
+
+  const submitPlaceholder =
+    config.text_submit_shortcut === "enter"
+      ? "Nhập hoặc dán văn bản cần dịch… (Enter để dịch, Shift+Enter xuống dòng)"
+      : "Nhập hoặc dán văn bản cần dịch… (Ctrl+Enter để dịch)";
+
   return (
     <div className="stack-16">
       <div className="page-header">
@@ -128,6 +164,17 @@ export function TranslatePage({
         <div className="page-header-actions">
           <Button
             variant="secondary"
+            data-tip="Mở tab Cài đặt riêng cho Dịch văn bản & Replace"
+            data-tip-pos="bottom"
+            data-tip-align="right"
+            title="Mở tab Cài đặt riêng cho Dịch văn bản & Replace"
+            onClick={onOpenTextSettings}
+          >
+            <SlidersHorizontal size={16} />
+            Cài đặt dịch
+          </Button>
+          <Button
+            variant="secondary"
             data-tip="Mở hoặc ẩn thanh HUD nổi gọn nhẹ trên màn hình"
             data-tip-pos="bottom"
             data-tip-align="right"
@@ -139,7 +186,7 @@ export function TranslatePage({
           </Button>
           <Button
             variant="secondary"
-            data-tip="Xoá toàn bộ lớp phủ bản dịch đang hiện trên màn hình"
+            data-tip="Xoá toàn bộ lớp phủ bản dịch đang hiện trên màn hình (hoặc bấm vào overlay / nhấn Esc)"
             data-tip-pos="bottom"
             data-tip-align="right"
             title="Xoá toàn bộ lớp phủ bản dịch đang hiện trên màn hình"
@@ -151,15 +198,48 @@ export function TranslatePage({
         </div>
       </div>
 
+      {lastReplace && config.replace_show_undo_original && (
+        <div className="undo-banner">
+          <div className="undo-banner-body">
+            <div className="row-8">
+              <span className="badge accent">
+                <RotateCcw size={14} />
+                Bản gốc vừa thay thế ({lastReplace.timestamp})
+              </span>
+              <span className="field-hint">Nhấn Ctrl+Z ở ứng dụng đích hoặc sao chép lại bản gốc:</span>
+            </div>
+            <div className="undo-banner-text">{lastReplace.original}</div>
+          </div>
+          <div className="row-8">
+            <Button
+              variant="secondary"
+              onClick={() => handleCopy(lastReplace.original, "Đã sao chép bản gốc để hoàn tác")}
+            >
+              <Copy size={16} />
+              Chép bản gốc
+            </Button>
+            <Button
+              variant="ghost"
+              iconOnly
+              title="Đóng thông báo hoàn tác"
+              aria-label="Đóng thông báo hoàn tác"
+              onClick={onDismissReplace}
+            >
+              <X size={16} />
+            </Button>
+          </div>
+        </div>
+      )}
+
       <Card title="Tác vụ tức thì" description="Rê chuột vào từng nút để xem mô tả và phím tắt toàn cục tương ứng.">
         <div className="row-8">
           <Button
             variant="primary"
             disabled={busy}
-            data-tip={actionTip("Chọn vùng, dịch một lần và vẽ đè lên chữ gốc", "region_to_overlay")}
+            data-tip={actionTip("Chọn vùng, dịch một lần và vẽ đè lên chữ gốc (bấm vào overlay hoặc Esc để đóng)", "region_to_overlay")}
             data-tip-align="left"
             title={actionTip("Chọn vùng, dịch một lần và vẽ đè lên chữ gốc", "region_to_overlay")}
-            onClick={() => runAction(api.regionToOverlay, "Đã hiện overlay bản dịch tại chỗ")}
+            onClick={() => runAction(api.regionToOverlay, "Đã hiện overlay (bấm vào overlay hoặc nhấn Esc để đóng)")}
           >
             <Layers size={16} />
             Vùng → Overlay tại chỗ
@@ -196,14 +276,18 @@ export function TranslatePage({
           </Button>
           <Button
             variant="secondary"
-            disabled={busy}
-            data-tip={actionTip("Copy văn bản đang bôi đen, dịch rồi dán đè tại chỗ", "selected_text_replace")}
+            disabled={busy || !config.replace_enabled}
+            data-tip={
+              config.replace_enabled
+                ? actionTip("Copy văn bản đang bôi đen, dịch rồi dán đè tại chỗ", "selected_text_replace")
+                : "Đang tắt trong Cài đặt → Dịch văn bản"
+            }
             data-tip-align="left"
             title={actionTip("Copy văn bản đang bôi đen, dịch rồi dán đè tại chỗ", "selected_text_replace")}
             onClick={() => runAction(api.selectedTextReplace, "Đã thay thế văn bản tại chỗ")}
           >
             <Replace size={16} />
-            Dịch & thay thế
+            Dịch &amp; thay thế
           </Button>
         </div>
       </Card>
@@ -214,28 +298,51 @@ export function TranslatePage({
           <div className="row-8">
             <select
               className="ui-select"
-              aria-label="Dịch vụ dịch"
-              value={currentServiceValue(config)}
+              aria-label="Bộ dịch văn bản"
+              value={currentTextServiceValue(config)}
               onChange={(e) => {
-                const parsed = parseServiceValue(e.target.value);
-                onUpdateConfig({
-                  translator: parsed.translator,
-                  ...(parsed.llm_model ? { llm_model: parsed.llm_model } : {}),
-                });
+                const parsed = parseTextServiceValue(e.target.value);
+                onUpdateConfig(parsed);
               }}
             >
+              <option value="">Mặc định ({defaultServiceLabel})</option>
               {serviceOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
               ))}
             </select>
-            <Languages size={16} color="var(--text-muted)" />
+            <select
+              className="ui-select"
+              aria-label="Ngôn ngữ nguồn"
+              value={config.text_source_language}
+              onChange={(e) => onUpdateConfig({ text_source_language: e.target.value })}
+            >
+              {SOURCE_LANGUAGES.map(([label, code]) => (
+                <option key={code} value={code}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <Button
+              variant="ghost"
+              iconOnly
+              disabled={config.text_source_language === "auto"}
+              title={
+                config.text_source_language === "auto"
+                  ? "Chọn ngôn ngữ nguồn cụ thể để đảo chiều"
+                  : "Đảo chiều ngôn ngữ nguồn và đích"
+              }
+              aria-label="Đảo chiều ngôn ngữ"
+              onClick={handleSwapLanguages}
+            >
+              <ArrowLeftRight size={16} />
+            </Button>
             <select
               className="ui-select"
               aria-label="Ngôn ngữ đích"
-              value={config.target_language}
-              onChange={(e) => onUpdateConfig({ target_language: e.target.value })}
+              value={config.text_target_language}
+              onChange={(e) => onUpdateConfig({ text_target_language: e.target.value })}
             >
               {LANGUAGES.map(([label, code]) => (
                 <option key={code} value={code}>
@@ -251,11 +358,16 @@ export function TranslatePage({
             <textarea
               className="ui-textarea"
               rows={6}
-              placeholder="Nhập hoặc dán văn bản cần dịch… (Ctrl+Enter để dịch)"
+              placeholder={submitPlaceholder}
               value={sourceText}
               onChange={(e) => setSourceText(e.target.value)}
               onKeyDown={(e) => {
-                if (e.ctrlKey && e.key === "Enter") {
+                if (config.text_submit_shortcut === "enter") {
+                  if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+                    e.preventDefault();
+                    handleTranslate();
+                  }
+                } else if (e.ctrlKey && e.key === "Enter") {
                   e.preventDefault();
                   handleTranslate();
                 }
@@ -297,6 +409,9 @@ export function TranslatePage({
                 <Copy size={16} />
                 Sao chép bản dịch
               </Button>
+              {config.text_auto_copy_result && (
+                <span className="field-hint">Tự sao chép đang bật</span>
+              )}
             </div>
           </div>
         </div>
@@ -321,24 +436,33 @@ export function TranslatePage({
       </Card>
 
       <Card
-        title={`Lịch sử dịch trong phiên (${history.length})`}
+        title={`Lịch sử dịch (${history.length}/${config.text_history_limit})`}
         headerRight={
-          history.length > 0 && (
-            <Button variant="ghost" onClick={() => setConfirmClearHistory(true)}>
-              <Trash2 size={16} />
-              Xoá lịch sử
-            </Button>
-          )
+          <div className="row-8">
+            {!config.text_keep_history && (
+              <span className="badge warning">Đang tắt lưu lịch sử</span>
+            )}
+            {history.length > 0 && (
+              <Button variant="ghost" onClick={() => setConfirmClearHistory(true)}>
+                <Trash2 size={16} />
+                Xoá lịch sử
+              </Button>
+            )}
+          </div>
         }
       >
         {history.length === 0 ? (
           <div className="empty-state">
             <Languages size={20} />
-            <span>Chưa có bản dịch nào trong phiên này.</span>
+            <span>
+              {config.text_keep_history
+                ? "Chưa có bản dịch nào được lưu."
+                : "Tính năng lưu lịch sử đang tắt trong Cài đặt → Dịch văn bản."}
+            </span>
           </div>
         ) : (
           <div className="stack-8">
-            {history.slice(0, 12).map((item) => (
+            {history.slice(0, config.text_history_limit).map((item) => (
               <div key={item.id} className="history-item">
                 <div className="row-8" style={{ justifyContent: "space-between" }}>
                   <div className="row-8">
@@ -347,10 +471,21 @@ export function TranslatePage({
                     </span>
                     <span className="field-hint">{item.timestamp}</span>
                   </div>
-                  <Button variant="ghost" onClick={() => handleCopy(item.translated)}>
-                    <Copy size={16} />
-                    Sao chép
-                  </Button>
+                  <div className="row-8">
+                    {item.source_kind === "replace" && (
+                      <Button
+                        variant="ghost"
+                        onClick={() => handleCopy(item.original, "Đã sao chép bản gốc")}
+                      >
+                        <RotateCcw size={16} />
+                        Bản gốc
+                      </Button>
+                    )}
+                    <Button variant="ghost" onClick={() => handleCopy(item.translated)}>
+                      <Copy size={16} />
+                      Sao chép
+                    </Button>
+                  </div>
                 </div>
                 <div className="field-hint selectable-text">{item.original}</div>
                 <div className="selectable-text" style={{ fontWeight: 500 }}>
@@ -365,7 +500,7 @@ export function TranslatePage({
       <Dialog
         open={confirmClearHistory}
         title="Xoá toàn bộ lịch sử dịch?"
-        description="Hành động này sẽ xoá danh sách các bản dịch gần đây trong phiên hiện tại."
+        description="Hành động này sẽ xoá toàn bộ danh sách lịch sử dịch đã lưu."
         confirmLabel="Xoá lịch sử"
         danger
         onClose={() => setConfirmClearHistory(false)}

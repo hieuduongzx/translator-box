@@ -1,4 +1,4 @@
-pub const APP_VERSION: &str = "2.0.0";
+pub const APP_VERSION: &str = "2.1.0";
 pub const APP_NAME: &str = "Translator2k";
 pub const APP_ID: &str = "Translator2k";
 pub const PUBLISHER: &str = "hieuduongzx";

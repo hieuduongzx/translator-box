@@ -87,6 +87,23 @@ pub struct AppConfig {
     pub custom_providers: Vec<CustomAiProvider>,
     pub translation_glossary: Vec<GlossaryEntry>,
 
+    // Dedicated Text Translation & Replace settings
+    pub text_source_language: String,
+    pub text_target_language: String,
+    pub text_translator: String,
+    pub text_llm_model: String,
+    pub text_auto_copy_result: bool,
+    pub text_keep_history: bool,
+    pub text_persist_history: bool,
+    pub text_history_limit: u32,
+    pub text_submit_shortcut: String,
+    pub auto_clipboard_max_chars: u32,
+    pub replace_enabled: bool,
+    pub replace_preserve_formatting: bool,
+    pub replace_show_undo_original: bool,
+    pub replace_restore_clipboard: bool,
+    pub replace_paste_delay_ms: u32,
+
     // Soniox Realtime Audio settings
     pub soniox_api_key: String,
     pub soniox_audio_source: String,
@@ -166,6 +183,22 @@ impl Default for AppConfig {
             custom_providers: Vec::new(),
             translation_glossary: Vec::new(),
 
+            text_source_language: "auto".to_string(),
+            text_target_language: String::new(),
+            text_translator: String::new(),
+            text_llm_model: String::new(),
+            text_auto_copy_result: false,
+            text_keep_history: true,
+            text_persist_history: true,
+            text_history_limit: 30,
+            text_submit_shortcut: "ctrl_enter".to_string(),
+            auto_clipboard_max_chars: 5000,
+            replace_enabled: true,
+            replace_preserve_formatting: true,
+            replace_show_undo_original: true,
+            replace_restore_clipboard: true,
+            replace_paste_delay_ms: 60,
+
             soniox_api_key: String::new(),
             soniox_audio_source: "system".to_string(),
             soniox_input_device: String::new(),
@@ -229,6 +262,10 @@ pub fn config_path() -> PathBuf {
 
 pub fn legacy_python_config_path() -> PathBuf {
     config_dir().join("python-config.json")
+}
+
+pub fn history_path() -> PathBuf {
+    config_dir().join("history.json")
 }
 
 impl AppConfig {
@@ -301,6 +338,35 @@ impl AppConfig {
         if self.replace_target_language.trim().is_empty() {
             self.replace_target_language = "en".to_string();
         }
+        if self.text_source_language.trim().is_empty() {
+            self.text_source_language = "auto".to_string();
+        } else {
+            self.text_source_language = self.text_source_language.trim().to_string();
+        }
+        if self.text_target_language.trim().is_empty() {
+            self.text_target_language = self.target_language.clone();
+        } else {
+            self.text_target_language = self.text_target_language.trim().to_string();
+        }
+        if let Some(replacement) = retired_model_replacement(&self.text_llm_model) {
+            self.text_llm_model = replacement.to_string();
+        }
+        self.text_translator = self.text_translator.trim().to_string();
+        self.text_llm_model = self.text_llm_model.trim().to_string();
+        if !self.text_translator.is_empty()
+            && self.text_translator != "google"
+            && self.text_translator != "bing"
+            && !self.ai_provider_configured(&self.text_translator)
+        {
+            self.text_translator.clear();
+            self.text_llm_model.clear();
+        }
+        self.text_history_limit = self.text_history_limit.clamp(5, 200);
+        if !matches!(self.text_submit_shortcut.as_str(), "ctrl_enter" | "enter") {
+            self.text_submit_shortcut = "ctrl_enter".to_string();
+        }
+        self.auto_clipboard_max_chars = self.auto_clipboard_max_chars.clamp(200, 20_000);
+        self.replace_paste_delay_ms = self.replace_paste_delay_ms.clamp(20, 500);
         if !matches!(self.soniox_audio_source.as_str(), "microphone" | "system") {
             self.soniox_audio_source = "system".to_string();
         }
@@ -515,30 +581,47 @@ impl AppConfig {
 
     /// Resolve active translator into `(service, endpoint, api_key, model)`.
     pub fn resolve_llm(&self) -> (String, String, String, String) {
-        if self.translator == "google" || self.translator == "bing" {
-            return (self.translator.clone(), String::new(), String::new(), String::new());
+        self.resolve_provider(&self.translator, &self.llm_model)
+    }
+
+    /// Resolve dedicated text translator (falls back to global translator when empty).
+    pub fn resolve_text_llm(&self) -> (String, String, String, String) {
+        if self.text_translator.trim().is_empty() {
+            return self.resolve_llm();
         }
-        if !self.ai_provider_configured(&self.translator) {
+        let model = if self.text_llm_model.trim().is_empty() {
+            &self.llm_model
+        } else {
+            &self.text_llm_model
+        };
+        self.resolve_provider(&self.text_translator, model)
+    }
+
+    fn resolve_provider(&self, translator: &str, model_pref: &str) -> (String, String, String, String) {
+        if translator == "google" || translator == "bing" {
+            return (translator.to_string(), String::new(), String::new(), String::new());
+        }
+        if !self.ai_provider_configured(translator) {
             return ("google".to_string(), String::new(), String::new(), String::new());
         }
-        if let Some(builtin) = builtin_provider_by_id(&self.translator) {
-            let models = self.provider_models(&self.translator);
-            let model = if models.contains(&self.llm_model) {
-                self.llm_model.clone()
+        if let Some(builtin) = builtin_provider_by_id(translator) {
+            let models = self.provider_models(translator);
+            let model = if models.iter().any(|m| m == model_pref) {
+                model_pref.to_string()
             } else {
                 models.first().cloned().unwrap_or_default()
             };
             return (
                 "llm".to_string(),
                 builtin.endpoint.to_string(),
-                self.provider_api_key(&self.translator),
+                self.provider_api_key(translator),
                 model,
             );
         }
-        if let Some(cid) = self.translator.strip_prefix("custom:") {
+        if let Some(cid) = translator.strip_prefix("custom:") {
             if let Some(p) = self.custom_providers.iter().find(|p| p.id == cid) {
-                let model = if p.models.contains(&self.llm_model) {
-                    self.llm_model.clone()
+                let model = if p.models.iter().any(|m| m == model_pref) {
+                    model_pref.to_string()
                 } else {
                     p.models.first().cloned().unwrap_or_default()
                 };
@@ -547,6 +630,15 @@ impl AppConfig {
         }
         let _ = BUILTIN_AI_PROVIDERS;
         ("google".to_string(), String::new(), String::new(), String::new())
+    }
+
+    /// Effective hotkey map for OS registration (disables replace hotkey when replace mode is off).
+    pub fn effective_hotkeys(&self) -> BTreeMap<String, String> {
+        let mut map = self.hotkeys.clone();
+        if !self.replace_enabled {
+            map.insert("selected_text_replace".to_string(), String::new());
+        }
+        map
     }
 }
 
@@ -559,8 +651,18 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.sanitize();
         assert_eq!(cfg.target_language, "vi");
+        assert_eq!(cfg.text_source_language, "auto");
+        assert_eq!(cfg.text_target_language, "vi");
         assert_eq!(cfg.replace_target_language, "en");
         assert_eq!(cfg.ui_theme, "system");
+        assert!(cfg.replace_enabled);
+        assert!(cfg.replace_preserve_formatting);
+        assert!(cfg.replace_show_undo_original);
+        assert!(cfg.replace_restore_clipboard);
+        assert_eq!(cfg.replace_paste_delay_ms, 60);
+        assert_eq!(cfg.text_history_limit, 30);
+        assert_eq!(cfg.text_submit_shortcut, "ctrl_enter");
+        assert_eq!(cfg.auto_clipboard_max_chars, 5000);
         assert_eq!(cfg.hotkeys.get("selected_text_replace").map(String::as_str), Some("alt+b"));
     }
 
@@ -568,7 +670,50 @@ mod tests {
     fn retires_deprecated_models() {
         let mut cfg = AppConfig::default();
         cfg.llm_model = "gpt-4o".to_string();
+        cfg.text_llm_model = "gemini-2.5-flash".to_string();
         cfg.sanitize();
         assert_eq!(cfg.llm_model, "gpt-6-luna");
+        assert_eq!(cfg.text_llm_model, "gemini-3.8-flash");
+    }
+
+    #[test]
+    fn text_translator_overrides_and_falls_back() {
+        let mut cfg = AppConfig::default();
+        cfg.translator = "google".to_string();
+        cfg.text_translator = "bing".to_string();
+        cfg.sanitize();
+        assert_eq!(cfg.resolve_llm().0, "google");
+        assert_eq!(cfg.resolve_text_llm().0, "bing");
+
+        cfg.text_translator = String::new();
+        assert_eq!(cfg.resolve_text_llm().0, "google");
+    }
+
+    #[test]
+    fn disabling_replace_clears_effective_hotkey_but_preserves_saved_combo() {
+        let mut cfg = AppConfig::default();
+        cfg.replace_enabled = false;
+        cfg.sanitize();
+        assert_eq!(cfg.hotkeys.get("selected_text_replace").map(String::as_str), Some("alt+b"));
+        assert_eq!(
+            cfg.effective_hotkeys()
+                .get("selected_text_replace")
+                .map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn sanitizes_text_translation_bounds() {
+        let mut cfg = AppConfig::default();
+        cfg.text_history_limit = 999;
+        cfg.auto_clipboard_max_chars = 10;
+        cfg.replace_paste_delay_ms = 5;
+        cfg.text_submit_shortcut = "invalid".to_string();
+        cfg.sanitize();
+        assert_eq!(cfg.text_history_limit, 200);
+        assert_eq!(cfg.auto_clipboard_max_chars, 200);
+        assert_eq!(cfg.replace_paste_delay_ms, 20);
+        assert_eq!(cfg.text_submit_shortcut, "ctrl_enter");
     }
 }

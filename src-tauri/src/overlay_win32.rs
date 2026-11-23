@@ -290,7 +290,7 @@ pub fn exclude_hwnd_from_capture(_hwnd_raw: isize) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Native Win32 Transparent Click-Through Translation Overlay Manager
+// Native Win32 Transparent Click-to-Dismiss Translation Overlay Manager
 // ---------------------------------------------------------------------------
 
 enum OverlayCmd {
@@ -302,10 +302,14 @@ enum OverlayCmd {
     },
     Close(String),
     ClearAll,
+    SetEscSuspended(bool),
+    #[cfg(all(test, windows))]
+    ListHwnds(mpsc::Sender<Vec<isize>>),
 }
 
 pub struct OverlayManager {
     tx: Mutex<Option<mpsc::Sender<OverlayCmd>>>,
+    active_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(windows)]
     thread_id: std::sync::atomic::AtomicU32,
 }
@@ -313,6 +317,8 @@ pub struct OverlayManager {
 impl OverlayManager {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel::<OverlayCmd>();
+        let active_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active_clone = active_count.clone();
         #[cfg(windows)]
         let tid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         #[cfg(windows)]
@@ -322,10 +328,10 @@ impl OverlayManager {
             .name("win32-overlays".into())
             .spawn(move || {
                 #[cfg(windows)]
-                run_overlay_window_thread(rx, tid_clone);
+                run_overlay_window_thread(rx, tid_clone, active_clone);
                 #[cfg(not(windows))]
                 {
-                    let _ = rx;
+                    let _ = (rx, active_clone);
                 }
             })
             .expect("Failed to spawn overlay manager thread");
@@ -340,6 +346,7 @@ impl OverlayManager {
             }
             Self {
                 tx: Mutex::new(Some(tx)),
+                active_count,
                 thread_id: std::sync::atomic::AtomicU32::new(
                     tid.load(std::sync::atomic::Ordering::Acquire),
                 ),
@@ -349,8 +356,13 @@ impl OverlayManager {
         {
             Self {
                 tx: Mutex::new(Some(tx)),
+                active_count,
             }
         }
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active_count.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn show(&self, key: &str, bbox: [i32; 4], src_size: (u32, u32), items: Vec<OverlayItem>) {
@@ -377,6 +389,26 @@ impl OverlayManager {
             let _ = tx.send(OverlayCmd::ClearAll);
             self.wake();
         }
+    }
+
+    /// Temporarily suspend global Esc dismissal (e.g. while interactive region selector is open).
+    pub fn set_esc_suspended(&self, suspended: bool) {
+        if let Some(ref tx) = *self.tx.lock() {
+            let _ = tx.send(OverlayCmd::SetEscSuspended(suspended));
+            self.wake();
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    fn list_hwnds(&self) -> Vec<isize> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Some(ref tx) = *self.tx.lock() {
+            let _ = tx.send(OverlayCmd::ListHwnds(reply_tx));
+            self.wake();
+        }
+        reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_default()
     }
 
     fn wake(&self) {
@@ -478,6 +510,7 @@ fn update_layered_rgba(
 fn run_overlay_window_thread(
     rx: mpsc::Receiver<OverlayCmd>,
     tid_out: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    active_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -486,12 +519,24 @@ fn run_overlay_window_thread(
     use windows::Win32::UI::HiDpi::{
         SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        PeekMessageW, RegisterClassW, ShowWindow, MSG, PM_NOREMOVE, SW_SHOWNOACTIVATE, WM_APP,
-        WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT, WS_POPUP,
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+        LoadCursorW, PeekMessageW, PostThreadMessageW, RegisterClassW, SetCursor, SetTimer,
+        ShowWindow, IDC_HAND, MA_NOACTIVATE, MSG, PM_NOREMOVE, SW_SHOWNOACTIVATE, WM_APP,
+        WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_RBUTTONDOWN, WM_SETCURSOR,
+        WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_POPUP,
+    };
+
+    const WM_OVERLAY_CMD: u32 = WM_APP + 2;
+    const WM_OVERLAY_DISMISS_ONE: u32 = WM_APP + 3;
+    const WM_OVERLAY_DISMISS_ALL: u32 = WM_APP + 4;
+    const OVERLAY_ESC_HOTKEY_ID: i32 = 0x544B;
+    const OVERLAY_ESC_TIMER_ID: usize = 0x544C;
+    const VK_ESCAPE: u32 = 0x1B;
 
     unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
@@ -499,6 +544,48 @@ fn run_overlay_window_thread(
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        match msg {
+            WM_MOUSEACTIVATE => {
+                // Clicks dismiss without stealing focus from the app underneath.
+                return LRESULT(MA_NOACTIVATE as isize);
+            }
+            WM_SETCURSOR => {
+                if let Ok(hand) = LoadCursorW(None, IDC_HAND) {
+                    SetCursor(hand);
+                    return LRESULT(1);
+                }
+            }
+            WM_LBUTTONDOWN => {
+                let _ = PostThreadMessageW(
+                    GetCurrentThreadId(),
+                    WM_OVERLAY_DISMISS_ONE,
+                    WPARAM(hwnd.0 as usize),
+                    LPARAM(0),
+                );
+                return LRESULT(0);
+            }
+            WM_RBUTTONDOWN => {
+                let _ = PostThreadMessageW(
+                    GetCurrentThreadId(),
+                    WM_OVERLAY_DISMISS_ALL,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+                return LRESULT(0);
+            }
+            WM_KEYDOWN => {
+                if wparam.0 == VK_ESCAPE as usize {
+                    let _ = PostThreadMessageW(
+                        GetCurrentThreadId(),
+                        WM_OVERLAY_DISMISS_ALL,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                    return LRESULT(0);
+                }
+            }
+            _ => {}
+        }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
@@ -509,6 +596,7 @@ fn run_overlay_window_thread(
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinst.into(),
+            hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -519,48 +607,57 @@ fn run_overlay_window_thread(
         tid_out.store(GetCurrentThreadId(), std::sync::atomic::Ordering::Release);
 
         let mut windows_map: HashMap<String, HWND> = HashMap::new();
+        let mut esc_suspended = false;
+        let mut esc_hotkey_active = false;
+        let mut esc_timer_id: usize = 0;
+        let mut esc_was_down = false;
+
+        let sync_state = |map: &HashMap<String, HWND>,
+                          suspended: bool,
+                          hk_active: &mut bool,
+                          timer_id: &mut usize,
+                          was_down: &mut bool| {
+            active_count.store(map.len(), std::sync::atomic::Ordering::Release);
+            let want_esc = !map.is_empty() && !suspended;
+            if want_esc {
+                if !*hk_active && *timer_id == 0 {
+                    if RegisterHotKey(None, OVERLAY_ESC_HOTKEY_ID, MOD_NOREPEAT, VK_ESCAPE).is_ok()
+                    {
+                        *hk_active = true;
+                    } else {
+                        *was_down = (GetAsyncKeyState(VK_ESCAPE as i32) as u16 & 0x8000) != 0;
+                        *timer_id = SetTimer(None, OVERLAY_ESC_TIMER_ID, 50, None);
+                    }
+                }
+            } else {
+                if *hk_active {
+                    let _ = UnregisterHotKey(None, OVERLAY_ESC_HOTKEY_ID);
+                    *hk_active = false;
+                }
+                if *timer_id != 0 {
+                    let _ = KillTimer(None, *timer_id);
+                    *timer_id = 0;
+                }
+                *was_down = false;
+            }
+        };
+
         let mut msg = MSG::default();
 
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if msg.message == WM_APP + 2 {
-                while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        OverlayCmd::Show {
-                            key,
-                            bbox,
-                            src_size,
-                            items,
-                        } => {
-                            let [l, t, r, b] = bbox;
-                            let w = (r - l).max(1);
-                            let h = (b - t).max(1);
-                            let hwnd = *windows_map.entry(key).or_insert_with(|| {
-                                let h_win = CreateWindowExW(
-                                    WS_EX_LAYERED
-                                        | WS_EX_TRANSPARENT
-                                        | WS_EX_TOPMOST
-                                        | WS_EX_TOOLWINDOW
-                                        | WS_EX_NOACTIVATE,
-                                    class_name,
-                                    w!("TranslatorBox Overlay"),
-                                    WS_POPUP,
-                                    l,
-                                    t,
-                                    w,
-                                    h,
-                                    None,
-                                    None,
-                                    hinst,
-                                    None,
-                                )
-                                .unwrap_or_default();
-                                if !h_win.0.is_null() {
-                                    exclude_hwnd_from_capture(h_win.0 as isize);
-                                    let _ = ShowWindow(h_win, SW_SHOWNOACTIVATE);
-                                }
-                                h_win
-                            });
-                            if !hwnd.0.is_null() {
+            match msg.message {
+                WM_OVERLAY_CMD => {
+                    while let Ok(cmd) = rx.try_recv() {
+                        match cmd {
+                            OverlayCmd::Show {
+                                key,
+                                bbox,
+                                src_size,
+                                items,
+                            } => {
+                                let [l, t, r, b] = bbox;
+                                let w = (r - l).max(1);
+                                let h = (b - t).max(1);
                                 let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
                                 draw_items_onto_rgba(
                                     &mut rgba,
@@ -570,23 +667,138 @@ fn run_overlay_window_thread(
                                     src_size.1,
                                     &items,
                                 );
-                                update_layered_rgba(hwnd, l, t, w, h, &rgba);
+                                let has_visible = rgba.chunks_exact(4).any(|px| px[3] > 0);
+                                if !has_visible {
+                                    if let Some(old_hwnd) = windows_map.remove(&key) {
+                                        let _ = DestroyWindow(old_hwnd);
+                                    }
+                                    continue;
+                                }
+
+                                // Notice: WS_EX_LAYERED without WS_EX_TRANSPARENT gives per-pixel
+                                // alpha hit-testing via UpdateLayeredWindow(ULW_ALPHA):
+                                // alpha == 0 pixels pass clicks straight through to apps underneath,
+                                // while painted text patches (alpha > 0) receive clicks to dismiss!
+                                let hwnd = *windows_map.entry(key).or_insert_with(|| {
+                                    let h_win = CreateWindowExW(
+                                        WS_EX_LAYERED
+                                            | WS_EX_TOPMOST
+                                            | WS_EX_TOOLWINDOW
+                                            | WS_EX_NOACTIVATE,
+                                        class_name,
+                                        w!("Translator2k Overlay"),
+                                        WS_POPUP,
+                                        l,
+                                        t,
+                                        w,
+                                        h,
+                                        None,
+                                        None,
+                                        hinst,
+                                        None,
+                                    )
+                                    .unwrap_or_default();
+                                    if !h_win.0.is_null() {
+                                        exclude_hwnd_from_capture(h_win.0 as isize);
+                                        let _ = ShowWindow(h_win, SW_SHOWNOACTIVATE);
+                                    }
+                                    h_win
+                                });
+                                if !hwnd.0.is_null() {
+                                    update_layered_rgba(hwnd, l, t, w, h, &rgba);
+                                }
                             }
-                        }
-                        OverlayCmd::Close(key) => {
-                            if let Some(hwnd) = windows_map.remove(&key) {
-                                let _ = DestroyWindow(hwnd);
+                            OverlayCmd::Close(key) => {
+                                if let Some(hwnd) = windows_map.remove(&key) {
+                                    let _ = DestroyWindow(hwnd);
+                                }
                             }
-                        }
-                        OverlayCmd::ClearAll => {
-                            for (_, hwnd) in windows_map.drain() {
-                                let _ = DestroyWindow(hwnd);
+                            OverlayCmd::ClearAll => {
+                                for (_, hwnd) in windows_map.drain() {
+                                    let _ = DestroyWindow(hwnd);
+                                }
+                            }
+                            OverlayCmd::SetEscSuspended(suspended) => {
+                                esc_suspended = suspended;
+                            }
+                            #[cfg(all(test, windows))]
+                            OverlayCmd::ListHwnds(reply) => {
+                                let list: Vec<isize> =
+                                    windows_map.values().map(|h| h.0 as isize).collect();
+                                let _ = reply.send(list);
                             }
                         }
                     }
+                    sync_state(
+                        &windows_map,
+                        esc_suspended,
+                        &mut esc_hotkey_active,
+                        &mut esc_timer_id,
+                        &mut esc_was_down,
+                    );
                 }
-            } else {
-                DispatchMessageW(&msg);
+                WM_OVERLAY_DISMISS_ONE => {
+                    let target_ptr = msg.wParam.0 as *mut std::ffi::c_void;
+                    let found_key = windows_map
+                        .iter()
+                        .find_map(|(k, h)| if h.0 == target_ptr { Some(k.clone()) } else { None });
+                    if let Some(key) = found_key {
+                        if let Some(hwnd) = windows_map.remove(&key) {
+                            let _ = DestroyWindow(hwnd);
+                        }
+                    }
+                    sync_state(
+                        &windows_map,
+                        esc_suspended,
+                        &mut esc_hotkey_active,
+                        &mut esc_timer_id,
+                        &mut esc_was_down,
+                    );
+                }
+                WM_OVERLAY_DISMISS_ALL => {
+                    for (_, hwnd) in windows_map.drain() {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    sync_state(
+                        &windows_map,
+                        esc_suspended,
+                        &mut esc_hotkey_active,
+                        &mut esc_timer_id,
+                        &mut esc_was_down,
+                    );
+                }
+                WM_HOTKEY if msg.wParam.0 as i32 == OVERLAY_ESC_HOTKEY_ID => {
+                    for (_, hwnd) in windows_map.drain() {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    sync_state(
+                        &windows_map,
+                        esc_suspended,
+                        &mut esc_hotkey_active,
+                        &mut esc_timer_id,
+                        &mut esc_was_down,
+                    );
+                }
+                WM_TIMER if esc_timer_id != 0 && msg.wParam.0 == esc_timer_id => {
+                    let is_down = (GetAsyncKeyState(VK_ESCAPE as i32) as u16 & 0x8000) != 0;
+                    if is_down && !esc_was_down {
+                        for (_, hwnd) in windows_map.drain() {
+                            let _ = DestroyWindow(hwnd);
+                        }
+                        sync_state(
+                            &windows_map,
+                            esc_suspended,
+                            &mut esc_hotkey_active,
+                            &mut esc_timer_id,
+                            &mut esc_was_down,
+                        );
+                    } else {
+                        esc_was_down = is_down;
+                    }
+                }
+                _ => {
+                    DispatchMessageW(&msg);
+                }
             }
         }
     }
@@ -1182,4 +1394,99 @@ pub fn edit_screen_region(initial: [i32; 4], mode: &str) -> Result<Option<[i32; 
 #[cfg(not(windows))]
 pub fn edit_screen_region(_initial: [i32; 4], _mode: &str) -> Result<Option<[i32; 4]>, String> {
     Err("Chỉnh vùng màn hình chỉ hỗ trợ Windows.".to_string())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, IsWindow, PostMessageW, GWL_EXSTYLE, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_RBUTTONDOWN, WS_EX_TRANSPARENT,
+    };
+
+    fn sample_item(text: &str) -> OverlayItem {
+        OverlayItem {
+            bbox: [4, 4, 180, 40],
+            text: text.to_string(),
+            source_text: "Hello".to_string(),
+            bg: [20, 20, 24],
+            fg: [255, 255, 255],
+            patch_rect: Some([4, 4, 180, 40]),
+            patch_rgb: None,
+            patch_size: None,
+            ink_rect: Some([8, 8, 176, 36]),
+            stroke_thickness: 1.0,
+            source_lines: 1,
+            line_ink: 18.0,
+            outline: None,
+            align: "left".to_string(),
+            room: Some([4, 4, 180, 40]),
+        }
+    }
+
+    fn wait_until(cond: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(2) {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        cond()
+    }
+
+    #[test]
+    fn overlay_dismisses_on_click_and_clear_without_blocking() {
+        let mgr = OverlayManager::new();
+        mgr.show("once-1", [100, 100, 320, 180], (220, 80), vec![sample_item("Xin chào")]);
+        mgr.show("once-2", [360, 100, 580, 180], (220, 80), vec![sample_item("Thế giới")]);
+        assert!(wait_until(|| mgr.active_count() == 2));
+
+        let hwnds = mgr.list_hwnds();
+        assert_eq!(hwnds.len(), 2);
+        let hwnd1 = HWND(hwnds[0] as *mut std::ffi::c_void);
+        let ex_style = unsafe { GetWindowLongW(hwnd1, GWL_EXSTYLE) as u32 };
+        assert_eq!(ex_style & WS_EX_TRANSPARENT.0, 0);
+
+        // Left-clicking one overlay dismisses ONLY that overlay and destroys its HWND
+        unsafe {
+            let _ = PostMessageW(hwnd1, WM_LBUTTONDOWN, WPARAM(1), LPARAM(0x0014_0014));
+        }
+        assert!(wait_until(|| mgr.active_count() == 1));
+        assert!(wait_until(|| unsafe { !IsWindow(hwnd1).as_bool() }));
+
+        // Remaining overlay dismisses on right-click (dismiss all) and destroys its HWND
+        let rem = mgr.list_hwnds();
+        assert_eq!(rem.len(), 1);
+        let hwnd2 = HWND(rem[0] as *mut std::ffi::c_void);
+        unsafe {
+            let _ = PostMessageW(hwnd2, WM_RBUTTONDOWN, WPARAM(2), LPARAM(0x0014_0014));
+        }
+        assert!(wait_until(|| mgr.active_count() == 0));
+        assert!(wait_until(|| unsafe { !IsWindow(hwnd2).as_bool() }));
+    }
+
+    #[test]
+    fn fullscreen_and_multi_overlays_dismiss_on_esc_and_clear() {
+        let mgr = OverlayManager::new();
+        mgr.show("full", [0, 0, 1280, 720], (1280, 720), vec![sample_item("Toàn màn hình")]);
+        mgr.show("live-1", [40, 40, 260, 120], (220, 80), vec![sample_item("Vùng live 1")]);
+        mgr.show("live-2", [300, 40, 520, 120], (220, 80), vec![sample_item("Vùng live 2")]);
+        assert!(wait_until(|| mgr.active_count() == 3));
+
+        let hwnds = mgr.list_hwnds();
+        assert_eq!(hwnds.len(), 3);
+        let first = HWND(hwnds[0] as *mut std::ffi::c_void);
+        // Pressing Escape on any overlay dismisses ALL overlays
+        unsafe {
+            let _ = PostMessageW(first, WM_KEYDOWN, WPARAM(0x1B), LPARAM(0));
+        }
+        assert!(wait_until(|| mgr.active_count() == 0));
+        for raw in hwnds {
+            let h = HWND(raw as *mut std::ffi::c_void);
+            assert!(wait_until(|| unsafe { !IsWindow(h).as_bool() }));
+        }
+    }
 }

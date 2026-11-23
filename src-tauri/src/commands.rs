@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fs;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::Local;
@@ -11,7 +12,7 @@ use crate::capture::{capture_region, encode_rgb_to_data_url, grab_clipboard_imag
 use crate::clipboard_ops::{
     copy_selected_text, paste_replacement, write_clipboard_text, ClipboardWatcher,
 };
-use crate::config::{AppConfig, MainWindowGeometry};
+use crate::config::{history_path, AppConfig, MainWindowGeometry};
 use crate::constants::DEFAULT_HOTKEYS;
 use crate::desktop_apps::{list_desktop_applications, DesktopApplication};
 use crate::hotkeys::HotkeyManager;
@@ -29,11 +30,13 @@ use crate::overlay_win32::{
 use crate::soniox::{
     list_audio_devices, AudioDeviceOption, SonioxManager, SonioxStartParams, SonioxStatePayload,
 };
-use crate::translate::{translate_regions, translate_text, TranslateParams};
+use crate::translate::{
+    translate_regions, translate_text, translate_text_with_formatting, TranslateParams,
+};
 use crate::updater::{download_asset, find_update, run_installer, ReleaseInfo};
 use crate::version::{APP_ID, APP_NAME, APP_VERSION, GITHUB_RELEASES_URL, GITHUB_REPO, PUBLISHER};
 
-const HISTORY_LIMIT: usize = 30;
+static NEXT_ONCE_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -43,6 +46,47 @@ pub struct HistoryEntry {
     pub original: String,
     pub translated: String,
     pub target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplaceCompletedPayload {
+    pub original: String,
+    pub translated: String,
+    pub target_language: String,
+    pub timestamp: String,
+}
+
+pub fn load_persisted_history(cfg: &AppConfig) -> Vec<HistoryEntry> {
+    if !cfg.text_keep_history || !cfg.text_persist_history {
+        return Vec::new();
+    }
+    let path = history_path();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut entries = serde_json::from_str::<Vec<HistoryEntry>>(&raw).unwrap_or_default();
+    entries.truncate(cfg.text_history_limit.clamp(5, 200) as usize);
+    entries
+}
+
+fn save_persisted_history(entries: &[HistoryEntry]) {
+    let path = history_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(payload) = serde_json::to_string_pretty(entries) {
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, payload.as_bytes()).is_ok() {
+            let _ = fs::rename(&tmp, &path).or_else(|_| {
+                let _ = fs::remove_file(&path);
+                fs::rename(&tmp, &path)
+            });
+        }
+    }
+}
+
+fn clear_persisted_history() {
+    let _ = fs::remove_file(history_path());
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +130,14 @@ impl AppState {
         if translated.trim().is_empty() {
             return;
         }
+        let (keep, persist, limit) = {
+            let cfg = self.config.lock();
+            (
+                cfg.text_keep_history,
+                cfg.text_persist_history,
+                cfg.text_history_limit.clamp(5, 200) as usize,
+            )
+        };
         let entry = HistoryEntry {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Local::now().format("%H:%M:%S").to_string(),
@@ -94,10 +146,14 @@ impl AppState {
             translated: translated.to_string(),
             target_language: target.to_string(),
         };
-        let mut guard = self.history.lock();
-        guard.insert(0, entry.clone());
-        guard.truncate(HISTORY_LIMIT);
-        drop(guard);
+        if keep {
+            let mut guard = self.history.lock();
+            guard.insert(0, entry.clone());
+            guard.truncate(limit);
+            if persist {
+                save_persisted_history(&guard);
+            }
+        }
         let _ = app.emit("translation-result", entry);
     }
 
@@ -106,6 +162,7 @@ impl AppState {
         let (service, llm_endpoint, llm_api_key, llm_model) = cfg.resolve_llm();
         TranslateParams {
             service,
+            source: "auto".to_string(),
             target: target_override
                 .map(String::from)
                 .unwrap_or_else(|| cfg.target_language.clone()),
@@ -113,6 +170,45 @@ impl AppState {
             llm_api_key,
             llm_model,
             glossary: cfg.translation_glossary.clone(),
+        }
+    }
+
+    pub fn build_text_translate_params(
+        &self,
+        source_override: Option<&str>,
+        target_override: Option<&str>,
+    ) -> TranslateParams {
+        let cfg = self.config.lock();
+        let (service, llm_endpoint, llm_api_key, llm_model) = cfg.resolve_text_llm();
+        let source = source_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| cfg.text_source_language.clone());
+        let target = target_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| cfg.text_target_language.clone());
+        TranslateParams {
+            service,
+            source,
+            target,
+            llm_endpoint,
+            llm_api_key,
+            llm_model,
+            glossary: cfg.translation_glossary.clone(),
+        }
+    }
+
+    pub fn maybe_auto_copy(&self, translated: &str) {
+        if translated.trim().is_empty() {
+            return;
+        }
+        if self.config.lock().text_auto_copy_result {
+            if write_clipboard_text(translated).is_ok() {
+                self.clipboard.mark_internal_write(translated);
+            }
         }
     }
 }
@@ -150,15 +246,34 @@ pub fn save_config(
     // Always preserve Rust-tracked main window geometry so frontend edits never clobber it.
     config.main_window_geometry = state.config.lock().main_window_geometry.clone();
     config.sanitize();
-    let hotkeys_changed = state.config.lock().hotkeys != config.hotkeys;
+    let prev_effective_hotkeys = state.config.lock().effective_hotkeys();
+    let next_effective_hotkeys = config.effective_hotkeys();
+    let hotkeys_changed = prev_effective_hotkeys != next_effective_hotkeys;
     let auto_clip = config.auto_translate_clipboard;
+    let auto_clip_max = config.auto_clipboard_max_chars as usize;
+    let keep_history = config.text_keep_history;
+    let persist_history = config.text_persist_history;
+    let history_limit = config.text_history_limit.clamp(5, 200) as usize;
 
     config.save()?;
     *state.config.lock() = config.clone();
+    state.clipboard.set_max_chars(auto_clip_max);
     state.clipboard.set_enabled(auto_clip);
 
+    {
+        let mut hist = state.history.lock();
+        if hist.len() > history_limit {
+            hist.truncate(history_limit);
+        }
+        if keep_history && persist_history {
+            save_persisted_history(&hist);
+        } else if !persist_history {
+            clear_persisted_history();
+        }
+    }
+
     if hotkeys_changed {
-        if let Err(warn) = state.hotkeys.apply(&config.hotkeys) {
+        if let Err(warn) = state.hotkeys.apply(&next_effective_hotkeys) {
             emit_status(&app, &warn, "error");
         }
     }
@@ -174,6 +289,7 @@ pub fn get_history(state: State<'_, Arc<AppState>>) -> Vec<HistoryEntry> {
 #[tauri::command]
 pub fn clear_history(state: State<'_, Arc<AppState>>) {
     state.history.lock().clear();
+    clear_persisted_history();
 }
 
 #[tauri::command]
@@ -189,11 +305,13 @@ pub async fn translate_text_cmd(
     state: State<'_, Arc<AppState>>,
     text: String,
     target: Option<String>,
+    source: Option<String>,
 ) -> Result<TranslateResultPayload, String> {
-    let params = state.build_translate_params(target.as_deref());
+    let params = state.build_text_translate_params(source.as_deref(), target.as_deref());
     emit_status(&app, "Đang dịch văn bản…", "busy");
     match translate_text(&text, &params).await {
         Ok(translated) => {
+            state.maybe_auto_copy(&translated);
             state.record_history(&app, "text", &text, &translated, &params.target);
             emit_status(&app, "Đã dịch xong", "ready");
             Ok(TranslateResultPayload {
@@ -214,9 +332,10 @@ pub async fn run_region_to_text(
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
     emit_status(app, "Chọn vùng màn hình cần dịch…", "busy");
-    let bbox = tokio::task::spawn_blocking(select_screen_region)
-        .await
-        .map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
+    state.overlays.set_esc_suspended(true);
+    let sel_res = tokio::task::spawn_blocking(select_screen_region).await;
+    state.overlays.set_esc_suspended(false);
+    let bbox = sel_res.map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
     let Some(bbox) = bbox else {
         emit_status(app, "Đã huỷ chọn vùng", "ready");
         return Ok(TranslateResultPayload {
@@ -259,6 +378,7 @@ pub async fn run_region_to_text(
 
     let params = state.build_translate_params(None);
     let translated = translate_text(&original, &params).await?;
+    state.maybe_auto_copy(&translated);
     state.record_history(app, "screen", &original, &translated, &params.target);
     emit_status(app, "Đã dịch vùng màn hình", "ready");
     Ok(TranslateResultPayload {
@@ -273,9 +393,10 @@ pub async fn run_region_to_overlay(
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
     emit_status(app, "Chọn vùng để vẽ overlay bản dịch…", "busy");
-    let bbox = tokio::task::spawn_blocking(select_screen_region)
-        .await
-        .map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
+    state.overlays.set_esc_suspended(true);
+    let sel_res = tokio::task::spawn_blocking(select_screen_region).await;
+    state.overlays.set_esc_suspended(false);
+    let bbox = sel_res.map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
     let Some(bbox) = bbox else {
         emit_status(app, "Đã huỷ chọn vùng", "ready");
         return Ok(TranslateResultPayload {
@@ -348,7 +469,11 @@ pub async fn run_region_to_overlay(
         })
         .collect();
 
-    state.overlays.show("once", bbox, (sw, sh), items);
+    let overlay_key = format!(
+        "once-{}",
+        NEXT_ONCE_OVERLAY_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    state.overlays.show(&overlay_key, bbox, (sw, sh), items);
     let original = merged
         .iter()
         .map(|r| r.text.as_str())
@@ -356,7 +481,11 @@ pub async fn run_region_to_overlay(
         .join("\n");
     let translated = translated_list.join("\n");
     state.record_history(app, "overlay", &original, &translated, &params.target);
-    emit_status(app, "Đã hiện overlay bản dịch", "ready");
+    emit_status(
+        app,
+        "Đã hiện overlay (bấm vào overlay hoặc nhấn Esc để đóng)",
+        "ready",
+    );
     Ok(TranslateResultPayload {
         original,
         translated,
@@ -447,6 +576,9 @@ pub async fn run_clipboard_image(
         None
     };
 
+    if !replace_image {
+        state.maybe_auto_copy(&translated);
+    }
     state.record_history(app, "clipboard-image", &original, &translated, &params.target);
     emit_status(app, "Đã dịch ảnh clipboard", "ready");
     Ok(TranslateResultPayload {
@@ -460,28 +592,72 @@ pub async fn run_selected_text_replace(
     app: &AppHandle,
     state: &Arc<AppState>,
 ) -> Result<TranslateResultPayload, String> {
+    let (
+        replace_enabled,
+        replace_target,
+        preserve_formatting,
+        show_undo_original,
+        restore_clipboard,
+        paste_delay_ms,
+    ) = {
+        let cfg = state.config.lock();
+        (
+            cfg.replace_enabled,
+            cfg.replace_target_language.clone(),
+            cfg.replace_preserve_formatting,
+            cfg.replace_show_undo_original,
+            cfg.replace_restore_clipboard,
+            cfg.replace_paste_delay_ms as u64,
+        )
+    };
+    if !replace_enabled {
+        let msg = "Chế độ Dịch & thay thế tại chỗ đang tắt trong Cài đặt → Dịch văn bản.";
+        emit_status(app, msg, "ready");
+        return Err(msg.to_string());
+    }
+
     emit_status(app, "Đang lấy văn bản đang bôi đen…", "busy");
-    let (selected, previous_clip) = tokio::task::spawn_blocking(copy_selected_text)
-        .await
-        .map_err(|e| format!("Lỗi đọc vùng chọn: {e}"))??;
+    let (selected, previous_clip) =
+        tokio::task::spawn_blocking(move || copy_selected_text(preserve_formatting))
+            .await
+            .map_err(|e| format!("Lỗi đọc vùng chọn: {e}"))??;
     state.clipboard.mark_internal_write(&selected);
 
-    let replace_target = state.config.lock().replace_target_language.clone();
-    let params = state.build_translate_params(Some(&replace_target));
+    let params = state.build_text_translate_params(None, Some(&replace_target));
     emit_status(app, "Đang dịch để thay thế tại chỗ…", "busy");
-    let translated = translate_text(&selected, &params).await?;
+    let translated =
+        translate_text_with_formatting(&selected, &params, preserve_formatting).await?;
 
     let tr_clone = translated.clone();
-    let prev_clone = previous_clip.clone();
+    let restore_clone = if restore_clipboard {
+        previous_clip.clone()
+    } else {
+        None
+    };
     state.clipboard.mark_internal_write(&translated);
-    tokio::task::spawn_blocking(move || paste_replacement(&tr_clone, prev_clone.as_deref()))
-        .await
-        .map_err(|e| format!("Lỗi dán bản dịch: {e}"))??;
-    if let Some(ref prev) = previous_clip {
-        state.clipboard.mark_internal_write(prev);
+    tokio::task::spawn_blocking(move || {
+        paste_replacement(&tr_clone, restore_clone.as_deref(), paste_delay_ms)
+    })
+    .await
+    .map_err(|e| format!("Lỗi dán bản dịch: {e}"))??;
+    if restore_clipboard {
+        if let Some(ref prev) = previous_clip {
+            state.clipboard.mark_internal_write(prev);
+        }
     }
 
     state.record_history(app, "replace", &selected, &translated, &params.target);
+    if show_undo_original {
+        let _ = app.emit(
+            "replace-completed",
+            ReplaceCompletedPayload {
+                original: selected.clone(),
+                translated: translated.clone(),
+                target_language: params.target.clone(),
+                timestamp: Local::now().format("%H:%M:%S").to_string(),
+            },
+        );
+    }
     emit_status(app, "Đã thay thế văn bản tại chỗ", "ready");
     Ok(TranslateResultPayload {
         original: selected,
@@ -624,9 +800,10 @@ pub async fn live_add_region(
     mode: String,
 ) -> Result<Option<LiveRegionInfo>, String> {
     emit_status(&app, "Kéo chọn vùng màn hình cho Live…", "busy");
-    let bbox = tokio::task::spawn_blocking(select_screen_region)
-        .await
-        .map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
+    state.overlays.set_esc_suspended(true);
+    let sel_res = tokio::task::spawn_blocking(select_screen_region).await;
+    state.overlays.set_esc_suspended(false);
+    let bbox = sel_res.map_err(|e| format!("Lỗi chọn vùng: {e}"))??;
     let Some(bbox) = bbox else {
         emit_status(&app, "Đã huỷ thêm vùng Live", "ready");
         return Ok(None);
@@ -662,9 +839,10 @@ pub async fn live_edit_region(
     );
     let initial = target.bbox;
     let mode = target.mode;
-    let edited = tokio::task::spawn_blocking(move || edit_screen_region(initial, &mode))
-        .await
-        .map_err(|e| format!("Lỗi chỉnh vùng: {e}"))??;
+    state.overlays.set_esc_suspended(true);
+    let edit_res = tokio::task::spawn_blocking(move || edit_screen_region(initial, &mode)).await;
+    state.overlays.set_esc_suspended(false);
+    let edited = edit_res.map_err(|e| format!("Lỗi chỉnh vùng: {e}"))??;
     if let Some(new_bbox) = edited {
         state.live.update_region_bbox(id, new_bbox);
         {
@@ -875,7 +1053,7 @@ pub fn reset_hotkeys(
         cfg.save()?;
         cfg.clone()
     };
-    let _ = state.hotkeys.apply(&updated.hotkeys);
+    let _ = state.hotkeys.apply(&updated.effective_hotkeys());
     let _ = app.emit("config-updated", updated.clone());
     Ok(updated)
 }

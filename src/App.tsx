@@ -24,7 +24,7 @@ import { AudioPage } from "./pages/AudioPage";
 import { HotkeysPage } from "./pages/HotkeysPage";
 import { LivePage } from "./pages/LivePage";
 import { OcrPage } from "./pages/OcrPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { SettingsPage, type SettingsTab } from "./pages/SettingsPage";
 import { TranslatePage } from "./pages/TranslatePage";
 import { HudWindow } from "./windows/HudWindow";
 import { LiveOutputWindow } from "./windows/LiveOutputWindow";
@@ -33,6 +33,7 @@ import type {
   AppMeta,
   HistoryEntry,
   LiveStatePayload,
+  ReplaceCompletedPayload,
   SonioxStatePayload,
   StatusEvent,
 } from "./types";
@@ -51,9 +52,11 @@ function applyTheme(theme: AppConfig["ui_theme"]) {
 function MainApp() {
   const { toast } = useToast();
   const [activePage, setActivePage] = useState("translate");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [meta, setMeta] = useState<AppMeta | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [lastReplace, setLastReplace] = useState<ReplaceCompletedPayload | null>(null);
   const [status, setStatus] = useState<StatusEvent>({ text: "Sẵn sàng", state: "ready" });
   const [liveState, setLiveState] = useState<LiveStatePayload>({
     running: false,
@@ -97,13 +100,30 @@ function MainApp() {
       api.onConfigUpdated((cfg) => {
         setConfig(cfg);
         applyTheme(cfg.ui_theme);
+        setHistory((prev) => prev.slice(0, cfg.text_history_limit));
       }),
       api.onTranslationResult((entry) => {
-        setHistory((prev) => [entry, ...prev].slice(0, 30));
+        setConfig((cur) => {
+          if (!cur || cur.text_keep_history) {
+            const limit = cur?.text_history_limit ?? 30;
+            setHistory((prev) => [entry, ...prev].slice(0, limit));
+          }
+          return cur;
+        });
+      }),
+      api.onReplaceCompleted((payload) => {
+        setLastReplace(payload);
       }),
       api.onLiveState(setLiveState),
       api.onSonioxState(setSonioxState),
-      api.onNavigate((page) => setActivePage(page)),
+      api.onNavigate((page) => {
+        if (page === "settings:text") {
+          setSettingsTab("text");
+          setActivePage("settings");
+        } else {
+          setActivePage(page);
+        }
+      }),
     ];
 
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -200,6 +220,12 @@ function MainApp() {
               <TranslatePage
                 config={config}
                 history={history}
+                lastReplace={lastReplace}
+                onDismissReplace={() => setLastReplace(null)}
+                onOpenTextSettings={() => {
+                  setSettingsTab("text");
+                  setActivePage("settings");
+                }}
                 onUpdateConfig={updateConfig}
                 onHistoryCleared={() => setHistory([])}
               />
@@ -237,7 +263,13 @@ function MainApp() {
               />
             )}
             {activePage === "settings" && (
-              <SettingsPage config={config} meta={meta} onUpdateConfig={updateConfig} />
+              <SettingsPage
+                config={config}
+                meta={meta}
+                activeTab={settingsTab}
+                onTabChange={setSettingsTab}
+                onUpdateConfig={updateConfig}
+              />
             )}
           </div>
         </main>

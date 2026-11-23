@@ -50,6 +50,22 @@ export interface AppConfig {
   custom_providers: CustomAiProvider[];
   translation_glossary: GlossaryEntry[];
 
+  text_source_language: string;
+  text_target_language: string;
+  text_translator: string;
+  text_llm_model: string;
+  text_auto_copy_result: boolean;
+  text_keep_history: boolean;
+  text_persist_history: boolean;
+  text_history_limit: number;
+  text_submit_shortcut: "ctrl_enter" | "enter";
+  auto_clipboard_max_chars: number;
+  replace_enabled: boolean;
+  replace_preserve_formatting: boolean;
+  replace_show_undo_original: boolean;
+  replace_restore_clipboard: boolean;
+  replace_paste_delay_ms: number;
+
   soniox_api_key: string;
   soniox_audio_source: "microphone" | "system";
   soniox_input_device: string;
@@ -115,6 +131,13 @@ export interface HistoryEntry {
   original: string;
   translated: string;
   target_language: string;
+}
+
+export interface ReplaceCompletedPayload {
+  original: string;
+  translated: string;
+  target_language: string;
+  timestamp: string;
 }
 
 export interface TranslateResultPayload {

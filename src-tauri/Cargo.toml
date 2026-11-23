@@ -1,6 +1,6 @@
 [package]
 name = "translator-box"
-version = "2.0.0"
+version = "2.1.0"
 description = "Translator2k — Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch audio realtime trên Windows"
 authors = ["hieuduongzx"]
 edition = "2021"

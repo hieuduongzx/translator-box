@@ -2,38 +2,13 @@ import { useEffect, useState } from "react";
 import { Keyboard, RotateCcw, X } from "lucide-react";
 import { Button, Card, Dialog, useToast } from "../components/ui";
 import { api } from "../lib/api";
-import { HOTKEY_ACTIONS, formatHotkey } from "../lib/constants";
+import { HOTKEY_ACTIONS, eventToCombo, formatHotkey } from "../lib/constants";
 import type { AppConfig } from "../types";
 
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onConfigReplaced: (cfg: AppConfig) => void;
-}
-
-function eventToCombo(e: KeyboardEvent): string | null {
-  const key = e.key.toLowerCase();
-  if (["control", "alt", "shift", "meta"].includes(key)) return null;
-  const parts: string[] = [];
-  if (e.ctrlKey) parts.push("ctrl");
-  if (e.altKey) parts.push("alt");
-  if (e.shiftKey) parts.push("shift");
-  if (e.metaKey) parts.push("win");
-
-  const mapped =
-    key === " "
-      ? "space"
-      : key === "arrowup"
-        ? "up"
-        : key === "arrowdown"
-          ? "down"
-          : key === "arrowleft"
-            ? "left"
-            : key === "arrowright"
-              ? "right"
-              : key;
-  parts.push(mapped);
-  return parts.join("+");
 }
 
 export function HotkeysPage({ config, onUpdateConfig, onConfigReplaced }: Props) {

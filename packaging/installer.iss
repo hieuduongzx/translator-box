@@ -1,6 +1,6 @@
 ﻿; Inno Setup script cho Translator2k (Rust + Tauri 2).
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.1.0"
 #endif
 
 #define AppName "Translator2k"

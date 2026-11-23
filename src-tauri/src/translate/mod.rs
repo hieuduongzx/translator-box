@@ -12,12 +12,13 @@ use regex::{Regex, RegexBuilder};
 use crate::config::GlossaryEntry;
 use crate::ocr::TextRegion;
 
-static TRANSLATION_CACHE: Lazy<Mutex<LruCache<(String, String, String), String>>> =
+static TRANSLATION_CACHE: Lazy<Mutex<LruCache<(String, String, String, String), String>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap())));
 
 #[derive(Debug, Clone)]
 pub struct TranslateParams {
     pub service: String,
+    pub source: String,
     pub target: String,
     pub llm_endpoint: String,
     pub llm_api_key: String,
@@ -161,24 +162,69 @@ pub fn split_proportionally(translated: &str, sources: &[String]) -> Vec<String>
     result
 }
 
+pub fn split_leading_trailing_ws(text: &str) -> (&str, &str, &str) {
+    let start = text
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(text.len());
+    let end = text
+        .rfind(|c: char| !c.is_whitespace())
+        .map(|i| i + text[i..].chars().next().map_or(0, char::len_utf8))
+        .unwrap_or(start);
+    (&text[..start], &text[start..end], &text[end..])
+}
+
+pub fn normalize_inline_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub async fn translate_text(text: &str, params: &TranslateParams) -> Result<String, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+    translate_text_with_formatting(text, params, true).await
+}
+
+pub async fn translate_text_with_formatting(
+    text: &str,
+    params: &TranslateParams,
+    preserve_formatting: bool,
+) -> Result<String, String> {
+    let (prefix, core, suffix) = split_leading_trailing_ws(text);
+    if core.is_empty() {
         return Ok(String::new());
     }
-    if params.service == "llm" {
-        return llm::translate_llm(
-            trimmed,
+
+    let had_crlf = core.contains("\r\n");
+    let prepared = if preserve_formatting {
+        core.replace("\r\n", "\n")
+    } else {
+        normalize_inline_text(core)
+    };
+
+    let translated_core = if params.service == "llm" {
+        llm::translate_llm(
+            &prepared,
+            &params.source,
             &params.target,
             &params.llm_endpoint,
             &params.llm_api_key,
             &params.llm_model,
             &params.glossary,
+            preserve_formatting,
         )
-        .await;
+        .await?
+    } else {
+        let list = translate_many(&[prepared], params).await?;
+        list.into_iter().next().unwrap_or_default()
+    };
+
+    if preserve_formatting {
+        let formatted = if had_crlf {
+            translated_core.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            translated_core
+        };
+        Ok(format!("{prefix}{formatted}{suffix}"))
+    } else {
+        Ok(normalize_inline_text(&translated_core))
     }
-    let list = translate_many(&[trimmed.to_string()], params).await?;
-    Ok(list.into_iter().next().unwrap_or_default())
 }
 
 pub async fn translate_many(
@@ -188,6 +234,11 @@ pub async fn translate_many(
     if texts.is_empty() {
         return Ok(Vec::new());
     }
+    let source = if params.source.trim().is_empty() {
+        "auto".to_string()
+    } else {
+        params.source.trim().to_string()
+    };
     let entries = normalize_glossary(&params.glossary);
     let gloss_hash = if entries.is_empty() {
         String::new()
@@ -213,7 +264,7 @@ pub async fn translate_many(
                 continue;
             }
             let norm = clean.split_whitespace().collect::<Vec<_>>().join(" ");
-            let key = (service_key.clone(), params.target.clone(), norm);
+            let key = (service_key.clone(), source.clone(), params.target.clone(), norm);
             if let Some(hit) = cache.get(&key) {
                 results[i] = hit.clone();
             } else if let Some(&pos) = pending_idx.get(clean) {
@@ -231,7 +282,8 @@ pub async fn translate_many(
 
     let unique: Vec<String> = pending.iter().map(|(s, _)| s.clone()).collect();
     let (outbound, mapping) = apply_glossary_placeholders(&unique, &entries);
-    let raw_translated = translate_service_many(&outbound, &params.target, &params.service).await?;
+    let raw_translated =
+        translate_service_many(&outbound, &source, &params.target, &params.service).await?;
     let translated = restore_glossary_placeholders(raw_translated, &mapping);
 
     let mut cache = TRANSLATION_CACHE.lock();
@@ -241,7 +293,7 @@ pub async fn translate_many(
         }
         if !val.is_empty() {
             let norm = src.split_whitespace().collect::<Vec<_>>().join(" ");
-            cache.put((service_key.clone(), params.target.clone(), norm), val);
+            cache.put((service_key.clone(), source.clone(), params.target.clone(), norm), val);
         }
     }
     Ok(results)
@@ -249,25 +301,26 @@ pub async fn translate_many(
 
 async fn translate_service_many(
     texts: &[String],
+    source: &str,
     target: &str,
     service: &str,
 ) -> Result<Vec<String>, String> {
     if service == "bing" {
-        if let Ok(res) = bing::translate_bing_many(texts, target).await {
+        if let Ok(res) = bing::translate_bing_many(texts, source, target).await {
             if res.len() == texts.len() && res.iter().all(|s| !s.trim().is_empty()) {
                 return Ok(res);
             }
         }
-        return google::translate_google_many(texts, target).await;
+        return google::translate_google_many(texts, source, target).await;
     }
 
     if google::google_cooldown_remaining() > 0.0 {
-        return translate_bing_while_google_cools(texts, target).await;
+        return translate_bing_while_google_cools(texts, source, target).await;
     }
-    match google::translate_google_many(texts, target).await {
+    match google::translate_google_many(texts, source, target).await {
         Ok(res) => Ok(res),
         Err(err) if err.contains("429") || err.contains("giới hạn") => {
-            translate_bing_while_google_cools(texts, target).await
+            translate_bing_while_google_cools(texts, source, target).await
         }
         Err(err) => Err(err),
     }
@@ -275,9 +328,10 @@ async fn translate_service_many(
 
 async fn translate_bing_while_google_cools(
     texts: &[String],
+    source: &str,
     target: &str,
 ) -> Result<Vec<String>, String> {
-    if let Ok(res) = bing::translate_bing_many(texts, target).await {
+    if let Ok(res) = bing::translate_bing_many(texts, source, target).await {
         if res.len() == texts.len() && res.iter().all(|s| !s.trim().is_empty()) {
             return Ok(res);
         }
@@ -374,5 +428,14 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
+    }
+
+    #[test]
+    fn preserves_leading_and_trailing_whitespace() {
+        let (pre, core, suf) = split_leading_trailing_ws("  \nHello world\r\n  ");
+        assert_eq!(pre, "  \n");
+        assert_eq!(core, "Hello world");
+        assert_eq!(suf, "\r\n  ");
+        assert_eq!(normalize_inline_text("Hello\r\n   world\t!"), "Hello world !");
     }
 }

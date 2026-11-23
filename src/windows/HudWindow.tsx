@@ -25,6 +25,7 @@ import {
   Play,
   Power,
   Replace,
+  RotateCcw,
   Scan,
   Settings,
   Square,
@@ -46,6 +47,7 @@ import {
 import type {
   AppConfig,
   LiveStatePayload,
+  ReplaceCompletedPayload,
   SonioxStatePayload,
   StatusEvent,
 } from "../types";
@@ -70,6 +72,7 @@ export function HudWindow() {
   const [openMenu, setOpenMenu] = useState<MenuId>(null);
   const [pinned, setPinned] = useState(true);
   const [barHidden, setBarHidden] = useState(false);
+  const [lastReplace, setLastReplace] = useState<ReplaceCompletedPayload | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const configRef = useRef<AppConfig | null>(null);
   const lastDownRef = useRef<{ t: number; x: number; y: number } | null>(null);
@@ -105,6 +108,7 @@ export function HudWindow() {
         document.documentElement.setAttribute("data-theme", resolved);
       }),
       api.onTranslationResult((entry) => setText(entry.translated)),
+      api.onReplaceCompleted((payload) => setLastReplace(payload)),
       api.onStatus(setStatus),
       api.onLiveState(setLiveState),
       api.onSonioxState(setSonioxState),
@@ -590,6 +594,16 @@ export function HudWindow() {
                   </span>
                 )}
               </button>
+              <div className="hud-menu-sep" />
+              <button
+                type="button"
+                className="hud-menu-item"
+                title="Mở tab Cài đặt riêng cho Dịch văn bản và Replace"
+                onClick={() => runAndClose(() => api.openMainWindow("settings:text"))}
+              >
+                <Settings size={16} />
+                <span>Cài đặt dịch văn bản…</span>
+              </button>
             </div>
           )}
         </div>
@@ -887,6 +901,39 @@ export function HudWindow() {
           )}
         </div>
       </div>
+      )}
+
+      {/* Replace undo-original strip */}
+      {lastReplace && config?.replace_show_undo_original && (
+        <div className="hud-undo-bar">
+          <RotateCcw size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <span className="hud-undo-text" title={lastReplace.original}>
+            Bản gốc: {lastReplace.original}
+          </span>
+          <button
+            type="button"
+            className="hud-bar-btn"
+            style={{ height: 22, padding: "0 6px", fontSize: 11.5 }}
+            onClick={() => {
+              api.copyText(lastReplace.original).catch(() => {});
+              setStatus({ text: "Đã sao chép bản gốc để hoàn tác", state: "ready" });
+            }}
+            title="Sao chép bản gốc để dán lại / hoàn tác"
+          >
+            <Copy size={14} />
+            Chép gốc
+          </button>
+          <button
+            type="button"
+            className="hud-bar-btn icon-only"
+            style={{ height: 22, width: 22 }}
+            onClick={() => setLastReplace(null)}
+            title="Đóng"
+            aria-label="Đóng thanh bản gốc"
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
 
       {/* Transparent translation output pane */}

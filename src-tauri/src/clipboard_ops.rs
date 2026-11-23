@@ -1,10 +1,10 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-/// Maximum chars for auto-translate on Ctrl+C (avoid translating whole source files).
-pub const AUTO_CLIPBOARD_MAX_CHARS: usize = 5000;
+/// Default maximum chars for auto-translate on Ctrl+C (avoid translating whole source files).
+pub const DEFAULT_AUTO_CLIPBOARD_MAX_CHARS: usize = 5000;
 
 #[cfg(windows)]
 pub fn is_clipboard_sensitive() -> bool {
@@ -189,7 +189,7 @@ fn send_ctrl_key(vk_char: u16) {
 
 /// Simulate Ctrl+C to capture currently selected text from the focused window.
 #[cfg(windows)]
-pub fn copy_selected_text() -> Result<(String, Option<String>), String> {
+pub fn copy_selected_text(preserve_whitespace: bool) -> Result<(String, Option<String>), String> {
     wait_modifiers_released(Duration::from_secs(1));
     let previous = read_clipboard_text();
     let seq_before = clipboard_sequence_number();
@@ -201,9 +201,13 @@ pub fn copy_selected_text() -> Result<(String, Option<String>), String> {
     while Instant::now() < deadline {
         if clipboard_sequence_number() != seq_before {
             if let Some(txt) = read_clipboard_text() {
-                let trimmed = txt.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Ok((trimmed, previous));
+                if !txt.trim().is_empty() {
+                    let captured = if preserve_whitespace {
+                        txt
+                    } else {
+                        txt.trim().to_string()
+                    };
+                    return Ok((captured, previous));
                 }
             }
         }
@@ -216,16 +220,20 @@ pub fn copy_selected_text() -> Result<(String, Option<String>), String> {
 }
 
 #[cfg(not(windows))]
-pub fn copy_selected_text() -> Result<(String, Option<String>), String> {
+pub fn copy_selected_text(_preserve_whitespace: bool) -> Result<(String, Option<String>), String> {
     Err("Chức năng chỉ hỗ trợ Windows.".to_string())
 }
 
-/// Paste translated text into the currently focused window via Ctrl+V and restore previous clipboard.
+/// Paste translated text into the currently focused window via Ctrl+V and optionally restore previous clipboard.
 #[cfg(windows)]
-pub fn paste_replacement(text: &str, restore: Option<&str>) -> Result<(), String> {
+pub fn paste_replacement(
+    text: &str,
+    restore: Option<&str>,
+    paste_delay_ms: u64,
+) -> Result<(), String> {
     write_clipboard_text(text)?;
     wait_modifiers_released(Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(Duration::from_millis(paste_delay_ms.clamp(20, 500)));
     send_ctrl_key(0x56); // 'V'
     std::thread::sleep(Duration::from_millis(160));
     if let Some(old) = restore {
@@ -235,21 +243,27 @@ pub fn paste_replacement(text: &str, restore: Option<&str>) -> Result<(), String
 }
 
 #[cfg(not(windows))]
-pub fn paste_replacement(_text: &str, _restore: Option<&str>) -> Result<(), String> {
+pub fn paste_replacement(
+    _text: &str,
+    _restore: Option<&str>,
+    _paste_delay_ms: u64,
+) -> Result<(), String> {
     Err("Chức năng chỉ hỗ trợ Windows.".to_string())
 }
 
 /// Manages suppression & monitoring for auto-translate on Ctrl+C.
 pub struct ClipboardWatcher {
     enabled: AtomicBool,
+    max_chars: AtomicUsize,
     suppress_until_seq: AtomicU32,
     last_seen_text: Mutex<String>,
 }
 
 impl ClipboardWatcher {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, max_chars: usize) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
+            max_chars: AtomicUsize::new(max_chars.clamp(200, 20_000)),
             suppress_until_seq: AtomicU32::new(clipboard_sequence_number()),
             last_seen_text: Mutex::new(read_clipboard_text().unwrap_or_default()),
         }
@@ -262,6 +276,11 @@ impl ClipboardWatcher {
                 .store(clipboard_sequence_number(), Ordering::Relaxed);
             *self.last_seen_text.lock() = read_clipboard_text().unwrap_or_default();
         }
+    }
+
+    pub fn set_max_chars(&self, max_chars: usize) {
+        self.max_chars
+            .store(max_chars.clamp(200, 20_000), Ordering::Relaxed);
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -290,7 +309,8 @@ impl ClipboardWatcher {
         }
         let text = read_clipboard_text()?;
         let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed.chars().count() > AUTO_CLIPBOARD_MAX_CHARS {
+        let limit = self.max_chars.load(Ordering::Relaxed);
+        if trimmed.is_empty() || trimmed.chars().count() > limit {
             return None;
         }
         let mut last = self.last_seen_text.lock();

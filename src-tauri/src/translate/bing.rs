@@ -38,11 +38,20 @@ static BING_SESSION: Lazy<tokio::sync::Mutex<Option<BingSession>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
 static BING_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn bing_target(target: &str) -> &str {
-    match target {
+fn bing_lang(code: &str) -> &str {
+    match code {
         "zh-CN" => "zh-Hans",
         "zh-TW" => "zh-Hant",
         other => other,
+    }
+}
+
+fn bing_source(source: &str) -> &str {
+    let trimmed = source.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        "auto-detect"
+    } else {
+        bing_lang(trimmed)
     }
 }
 
@@ -138,7 +147,7 @@ fn bing_chunks(text: &str) -> Vec<String> {
     chunks
 }
 
-async fn translate_bing_chunk(text: &str, to: &str) -> Result<String, String> {
+async fn translate_bing_chunk(text: &str, from: &str, to: &str) -> Result<String, String> {
     let mut last_err = None;
     for attempt in 0..2 {
         let session = get_bing_session(attempt > 0).await?;
@@ -148,7 +157,8 @@ async fn translate_bing_chunk(text: &str, to: &str) -> Result<String, String> {
             session.ig, session.iid
         );
         let body = format!(
-            "fromLang=auto-detect&text={}&to={}&token={}&key={}",
+            "fromLang={}&text={}&to={}&token={}&key={}",
+            urlencoding::encode(from),
             urlencoding::encode(text),
             urlencoding::encode(to),
             urlencoding::encode(&session.token),
@@ -196,24 +206,29 @@ async fn translate_bing_chunk(text: &str, to: &str) -> Result<String, String> {
     Err(last_err.unwrap_or_else(|| "Bing không trả về bản dịch.".to_string()))
 }
 
-pub async fn translate_bing(text: &str, target: &str) -> Result<String, String> {
-    let to = bing_target(target);
+pub async fn translate_bing(text: &str, source: &str, target: &str) -> Result<String, String> {
+    let from = bing_source(source);
+    let to = bing_lang(target);
     let mut parts = Vec::new();
     for chunk in bing_chunks(text) {
-        parts.push(translate_bing_chunk(&chunk, to).await?);
+        parts.push(translate_bing_chunk(&chunk, from, to).await?);
     }
     Ok(parts.join("\n"))
 }
 
-pub async fn translate_bing_many(texts: &[String], target: &str) -> Result<Vec<String>, String> {
+pub async fn translate_bing_many(
+    texts: &[String],
+    source: &str,
+    target: &str,
+) -> Result<Vec<String>, String> {
     if texts.len() == 1 {
-        return Ok(vec![translate_bing(&texts[0], target).await?]);
+        return Ok(vec![translate_bing(&texts[0], source, target).await?]);
     }
     let flat: Vec<String> = texts
         .iter()
         .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
-    let combined = translate_bing(&flat.join("\n"), target).await?;
+    let combined = translate_bing(&flat.join("\n"), source, target).await?;
     let lines: Vec<String> = combined
         .lines()
         .map(|l| l.trim().to_string())

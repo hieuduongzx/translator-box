@@ -197,11 +197,13 @@ fn llm_content_from_body(raw: &str) -> String {
 
 pub async fn translate_llm(
     text: &str,
+    source: &str,
     target: &str,
     endpoint: &str,
     api_key: &str,
     model: &str,
     glossary: &[GlossaryEntry],
+    preserve_formatting: bool,
 ) -> Result<String, String> {
     let endpoint = endpoint.trim().trim_end_matches('/');
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
@@ -215,9 +217,19 @@ pub async fn translate_llm(
     }
 
     let language = target_language_name(target);
+    let source_clause = if source.trim().is_empty() || source.eq_ignore_ascii_case("auto") {
+        String::new()
+    } else {
+        format!(" from {}", target_language_name(source.trim()))
+    };
+    let format_clause = if preserve_formatting {
+        "preserve line breaks, paragraph spacing, and meaning"
+    } else {
+        "merge unnecessary hard line wraps into clean natural text while preserving meaning"
+    };
     let glossary_hint = glossary_prompt_hint(text, glossary);
     let system_prompt = format!(
-        "Translate the user's text into {language}. Return only the translation, preserve line breaks and meaning. Do not add explanations, labels, quotes, or markdown.{glossary_hint}"
+        "Translate the user's text{source_clause} into {language}. Return only the translation, {format_clause}. Do not add explanations, labels, quotes, or markdown.{glossary_hint}"
     );
 
     let base_payload = json!({
