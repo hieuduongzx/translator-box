@@ -174,21 +174,22 @@ async fn download_file(url: &str, dest: &PathBuf) -> Result<(), String> {
         .timeout(std::time::Duration::from_secs(300))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Translator2k/2.1")
         .build()
-        .map_err(|e| format!("Lỗi HTTP client: {e}"))?;
+        .map_err(|_| "Không khởi tạo được kết nối mạng, vui lòng thử lại sau.".to_string())?;
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("Không tải được model ({url}): {e}"))?;
+        .map_err(|_| "Không kết nối được để tải mô hình OCR, vui lòng thử lại sau.".to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Tải model thất bại (HTTP {}) tại {url}", resp.status()));
+        return Err("Tải mô hình OCR không thành công, vui lòng thử lại sau.".to_string());
     }
     let tmp = dest.with_extension("download");
     let mut file =
         fs::File::create(&tmp).map_err(|e| format!("Không tạo được file model tạm: {e}"))?;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| format!("Lỗi khi tải model: {e}"))?;
+        let bytes = chunk
+            .map_err(|_| "Tải mô hình OCR bị gián đoạn, vui lòng thử lại sau.".to_string())?;
         file.write_all(&bytes)
             .map_err(|e| format!("Lỗi ghi file model: {e}"))?;
     }

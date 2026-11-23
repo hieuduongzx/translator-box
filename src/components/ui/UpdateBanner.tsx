@@ -88,8 +88,8 @@ export const UpdateBanner: React.FC<UpdateBannerProps> = ({ appName, updater }) 
 
             {state.status === "verifying" && (
               <>
-                <strong>Đang xác minh bản cập nhật v{ver}...</strong>
-                <span className="updater-banner-meta">Kiểm tra mã băm SHA-256 và chữ ký số</span>
+                <strong>Đang kiểm tra tệp cập nhật v{ver}...</strong>
+                <span className="updater-banner-meta">Đang xác minh tính toàn vẹn trước khi cài đặt</span>
               </>
             )}
 

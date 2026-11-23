@@ -666,8 +666,12 @@ impl SonioxManager {
                 // Connect WebSocket with Authorization: Bearer header
                 let mut req = match SONIOX_WEBSOCKET_URL.into_client_request() {
                     Ok(r) => r,
-                    Err(e) => {
-                        emit("idle", Some(format!("Lỗi URL Soniox: {e}")), None);
+                    Err(_) => {
+                        emit(
+                            "idle",
+                            Some("Không kết nối được dịch vụ dịch âm thanh, vui lòng thử lại sau.".to_string()),
+                            None,
+                        );
                         break;
                     }
                 };

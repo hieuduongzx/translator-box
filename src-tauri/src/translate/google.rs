@@ -257,7 +257,9 @@ async fn post_google(
     let resp = req
         .send()
         .await
-        .map_err(|e| GoogleCallError::Other(format!("Không kết nối được dịch vụ dịch: {e}")))?;
+        .map_err(|_| {
+            GoogleCallError::Other("Không kết nối được dịch vụ dịch, vui lòng thử lại sau.".to_string())
+        })?;
 
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();

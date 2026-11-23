@@ -341,7 +341,12 @@ impl UpdaterManager {
             .user_agent(format!("{}/{}", self.config.app_name, self.config.current_version))
             .timeout(Duration::from_secs(20))
             .build()
-            .map_err(|e| format!("Không khởi tạo được HTTP client: {e}"))?;
+            .map_err(|e| {
+                eprintln!("[updater] failed to build HTTP client: {e}");
+                let user_err = "Không kết nối được, thử lại sau.".to_string();
+                self.set_error(&user_err);
+                user_err
+            })?;
 
         let fetch_res = client
             .get(&manifest_url)
@@ -352,21 +357,28 @@ impl UpdaterManager {
         let manifest: UpdateManifest = match fetch_res {
             Ok(resp) => {
                 if !resp.status().is_success() {
-                    let err = format!("Máy chủ cập nhật trả về HTTP {}", resp.status().as_u16());
+                    eprintln!(
+                        "[updater] manifest fetch {} returned HTTP {}",
+                        manifest_url,
+                        resp.status().as_u16()
+                    );
+                    let err = "Không kết nối được, thử lại sau.".to_string();
                     self.set_error(&err);
                     return Err(err);
                 }
                 match resp.json::<UpdateManifest>().await {
                     Ok(m) => m,
                     Err(e) => {
-                        let err = format!("Tệp manifest cập nhật không hợp lệ: {e}");
+                        eprintln!("[updater] invalid update manifest JSON from {manifest_url}: {e}");
+                        let err = "Tệp cập nhật không hợp lệ, thử lại sau.".to_string();
                         self.set_error(&err);
                         return Err(err);
                     }
                 }
             }
             Err(e) => {
-                let err = format!("Không kết nối được máy chủ cập nhật: {e}");
+                eprintln!("[updater] failed to fetch manifest {manifest_url}: {e}");
+                let err = "Không kết nối được, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
@@ -374,10 +386,11 @@ impl UpdaterManager {
 
         let now_iso = Utc::now().to_rfc3339();
         if !manifest.app.eq_ignore_ascii_case(&self.config.slug) {
-            let err = format!(
-                "Manifest không khớp ứng dụng (nhận '{}', cần '{}')",
+            eprintln!(
+                "[updater] manifest app mismatch: got '{}', expected '{}'",
                 manifest.app, self.config.slug
             );
+            let err = "Tệp cập nhật không hợp lệ, thử lại sau.".to_string();
             self.set_error(&err);
             return Err(err);
         }
@@ -398,10 +411,11 @@ impl UpdaterManager {
         }
 
         let Some(entry) = select_file_entry(&manifest, &self.detected_kind) else {
-            let err = format!(
-                "Không tìm thấy tệp cập nhật phù hợp ({}) trong bản v{}",
+            eprintln!(
+                "[updater] no matching artifact for kind '{}' in v{}",
                 self.detected_kind, manifest.version
             );
+            let err = "Chưa có bản cập nhật phù hợp cho máy này.".to_string();
             self.set_error(&err);
             return Err(err);
         };
@@ -505,7 +519,8 @@ impl UpdaterManager {
         );
         if let Some(parent) = staged_path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
-                let err = format!("Không tạo được thư mục tạm để tải bản cập nhật: {e}");
+                eprintln!("[updater] failed to create staging dir {:?}: {e}", parent);
+                let err = "Không lưu được tệp cập nhật, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
@@ -516,17 +531,28 @@ impl UpdaterManager {
             .user_agent(format!("{}/{}", self.config.app_name, self.config.current_version))
             .connect_timeout(Duration::from_secs(20))
             .build()
-            .map_err(|e| format!("Không khởi tạo được HTTP client: {e}"))?;
+            .map_err(|e| {
+                eprintln!("[updater] failed to build download HTTP client: {e}");
+                let user_err = "Không kết nối được, thử lại sau.".to_string();
+                self.set_error(&user_err);
+                user_err
+            })?;
 
         let resp = match client.get(&download_url).send().await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                let err = format!("Tải bản cập nhật thất bại (HTTP {})", r.status().as_u16());
+                eprintln!(
+                    "[updater] download {} returned HTTP {}",
+                    download_url,
+                    r.status().as_u16()
+                );
+                let err = "Không tải được bản cập nhật, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
             Err(e) => {
-                let err = format!("Lỗi kết nối khi tải bản cập nhật: {e}");
+                eprintln!("[updater] download failed for {download_url}: {e}");
+                let err = "Không kết nối được, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
@@ -545,7 +571,8 @@ impl UpdaterManager {
         let mut file = match File::create(&part_path) {
             Ok(f) => f,
             Err(e) => {
-                let err = format!("Không tạo được tệp tạm: {e}");
+                eprintln!("[updater] failed to create temp file {:?}: {e}", part_path);
+                let err = "Không lưu được tệp cập nhật, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
@@ -577,7 +604,8 @@ impl UpdaterManager {
                 Err(e) => {
                     drop(file);
                     let _ = fs::remove_file(&part_path);
-                    let err = format!("Tải xuống bị gián đoạn: {e}");
+                    eprintln!("[updater] download stream interrupted for {download_url}: {e}");
+                    let err = "Tải xuống bị gián đoạn, thử lại sau.".to_string();
                     self.set_error(&err);
                     return Err(err);
                 }
@@ -586,7 +614,8 @@ impl UpdaterManager {
             if let Err(e) = file.write_all(&chunk) {
                 drop(file);
                 let _ = fs::remove_file(&part_path);
-                let err = format!("Lỗi ghi tệp cập nhật: {e}");
+                eprintln!("[updater] write error to {:?}: {e}", part_path);
+                let err = "Không lưu được tệp cập nhật, thử lại sau.".to_string();
                 self.set_error(&err);
                 return Err(err);
             }
@@ -610,7 +639,8 @@ impl UpdaterManager {
         if let Err(e) = file.flush() {
             drop(file);
             let _ = fs::remove_file(&part_path);
-            let err = format!("Lỗi đồng bộ tệp xuống ổ đĩa: {e}");
+            eprintln!("[updater] flush error on {:?}: {e}", part_path);
+            let err = "Không lưu được tệp cập nhật, thử lại sau.".to_string();
             self.set_error(&err);
             return Err(err);
         }
@@ -642,7 +672,8 @@ impl UpdaterManager {
         }
         if let Err(e) = fs::rename(&part_path, &staged_path) {
             let _ = fs::remove_file(&part_path);
-            let err = format!("Không thể hoàn tất tệp cập nhật: {e}");
+            eprintln!("[updater] rename {:?} -> {:?} failed: {e}", part_path, staged_path);
+            let err = "Không lưu được tệp cập nhật, thử lại sau.".to_string();
             self.set_error(&err);
             return Err(err);
         }
@@ -921,23 +952,31 @@ pub fn verify_hash_and_signature(
     entry: &UpdateFileEntry,
 ) -> Result<(), String> {
     if entry.size > 0 && actual_size != entry.size {
-        return Err(format!(
-            "Kích thước tệp không khớp (tải {} byte, manifest {} byte)",
-            actual_size, entry.size
-        ));
+        eprintln!(
+            "[updater] size mismatch for {}: got {} bytes, expected {} bytes",
+            entry.filename, actual_size, entry.size
+        );
+        return Err("Tệp cập nhật không hợp lệ, thử lại sau.".to_string());
     }
 
     if !actual_sha256.eq_ignore_ascii_case(entry.sha256.trim()) {
-        return Err("Mã băm SHA-256 không khớp — tệp có thể bị lỗi hoặc bị thay đổi.".to_string());
+        eprintln!(
+            "[updater] SHA-256 mismatch for {}: got {}, expected {}",
+            entry.filename, actual_sha256, entry.sha256
+        );
+        return Err("Tệp cập nhật không hợp lệ, thử lại sau.".to_string());
     }
 
     if !config.public_key_b64.trim().is_empty() {
-        let sig_b64 = entry
+        let Some(sig_b64) = entry
             .signature
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Bản cập nhật thiếu chữ ký số Ed25519.".to_string())?;
+        else {
+            eprintln!("[updater] missing Ed25519 signature for {}", entry.filename);
+            return Err("Tệp cập nhật không hợp lệ, thử lại sau.".to_string());
+        };
 
         verify_ed25519_signature(
             &config.public_key_b64,
@@ -964,27 +1003,42 @@ pub fn verify_ed25519_signature(
     size: u64,
     sha256: &str,
 ) -> Result<(), String> {
+    let invalid = || "Tệp cập nhật không hợp lệ, thử lại sau.".to_string();
+
     let pub_bytes = base64::engine::general_purpose::STANDARD
         .decode(public_key_b64.trim())
-        .map_err(|e| format!("Khóa công khai Ed25519 không hợp lệ: {e}"))?;
-    let pub_arr: [u8; 32] = pub_bytes
-        .try_into()
-        .map_err(|_| "Khóa công khai Ed25519 phải dài đúng 32 byte.".to_string())?;
-    let verifying_key = VerifyingKey::from_bytes(&pub_arr)
-        .map_err(|e| format!("Không nạp được khóa công khai Ed25519: {e}"))?;
+        .map_err(|e| {
+            eprintln!("[updater] invalid Ed25519 public key base64: {e}");
+            invalid()
+        })?;
+    let pub_arr: [u8; 32] = pub_bytes.try_into().map_err(|_| {
+        eprintln!("[updater] Ed25519 public key length must be 32 bytes");
+        invalid()
+    })?;
+    let verifying_key = VerifyingKey::from_bytes(&pub_arr).map_err(|e| {
+        eprintln!("[updater] failed to parse Ed25519 public key: {e}");
+        invalid()
+    })?;
 
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(signature_b64.trim())
-        .map_err(|e| format!("Chữ ký Ed25519 không hợp lệ: {e}"))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| "Chữ ký Ed25519 phải dài đúng 64 byte.".to_string())?;
+        .map_err(|e| {
+            eprintln!("[updater] invalid Ed25519 signature base64: {e}");
+            invalid()
+        })?;
+    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+        eprintln!("[updater] Ed25519 signature length must be 64 bytes");
+        invalid()
+    })?;
     let signature = Signature::from_bytes(&sig_arr);
 
     let payload = canonical_sign_payload(slug, version, kind, filename, size, sha256);
     verifying_key
         .verify_strict(payload.as_bytes(), &signature)
-        .map_err(|_| "Xác minh chữ ký số Ed25519 thất bại — từ chối cài đặt.".to_string())
+        .map_err(|_| {
+            eprintln!("[updater] Ed25519 signature verification failed for {slug} v{version} ({filename})");
+            invalid()
+        })
 }
 
 fn verify_staged_file(
@@ -993,13 +1047,18 @@ fn verify_staged_file(
     manifest_version: &str,
     entry: &UpdateFileEntry,
 ) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|e| format!("Không đọc được tệp cập nhật: {e}"))?;
+    let mut file = File::open(path).map_err(|e| {
+        eprintln!("[updater] failed to open staged file {:?}: {e}", path);
+        "Tệp cập nhật không hợp lệ, thử lại sau.".to_string()
+    })?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut size: u64 = 0;
     loop {
-        let n = std::io::Read::read(&mut file, &mut buf)
-            .map_err(|e| format!("Lỗi đọc tệp cập nhật: {e}"))?;
+        let n = std::io::Read::read(&mut file, &mut buf).map_err(|e| {
+            eprintln!("[updater] failed to read staged file {:?}: {e}", path);
+            "Tệp cập nhật không hợp lệ, thử lại sau.".to_string()
+        })?;
         if n == 0 {
             break;
         }

@@ -54,7 +54,7 @@ export const UpdateSettingsCard: React.FC<UpdateSettingsCardProps> = ({
         <div>
           <div className="updater-settings-title">Cập nhật {appName}</div>
           <div className="updater-settings-subtitle">
-            Kiểm tra và tải bản mới trực tiếp từ Cloudflare R2, có xác minh SHA-256 và chữ ký số.
+            Tự kiểm tra và tải bản mới, kiểm tra an toàn trước khi cài đặt.
           </div>
         </div>
         <div className="updater-settings-badges">
@@ -131,7 +131,7 @@ export const UpdateSettingsCard: React.FC<UpdateSettingsCardProps> = ({
           {verifying && (
             <>
               <Loader2 size={16} className="updater-spin" color="var(--accent)" />
-              <span>Đang kiểm tra mã băm SHA-256 và chữ ký số...</span>
+              <span>Đang kiểm tra tệp cập nhật...</span>
             </>
           )}
           {ready && state?.available && (

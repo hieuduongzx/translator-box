@@ -98,7 +98,7 @@ async fn get_bing_session(force: bool) -> Result<BingSession, String> {
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
-        .map_err(|e| format!("Không kết nối được Bing: {e}"))?;
+        .map_err(|_| "Không kết nối được Bing Dịch, vui lòng thử lại sau.".to_string())?;
     let page = resp
         .text()
         .await
@@ -170,7 +170,7 @@ async fn translate_bing_chunk(text: &str, from: &str, to: &str) -> Result<String
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("Lỗi gọi Bing: {e}"))?;
+            .map_err(|_| "Không kết nối được Bing Dịch, vui lòng thử lại sau.".to_string())?;
         let status = resp.status().as_u16();
         if matches!(status, 400 | 401 | 403) && attempt == 0 {
             last_err = Some(format!("Bing trả HTTP {status}"));
