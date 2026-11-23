@@ -49,10 +49,10 @@ export const UpdateSettingsCard: React.FC<UpdateSettingsCardProps> = ({
     (state?.status === "up-to-date" ? currentVer : null);
 
   return (
-    <div className="ui-card updater-settings-card" data-app-name={appName}>
+    <div className="updater-settings-card">
       <div className="updater-settings-header">
         <div>
-          <div className="updater-settings-title">Cập nhật</div>
+          <div className="updater-settings-title">Cập nhật {appName}</div>
           <div className="updater-settings-subtitle">
             Kiểm tra và tải bản mới trực tiếp từ Cloudflare R2, có xác minh SHA-256 và chữ ký số.
           </div>

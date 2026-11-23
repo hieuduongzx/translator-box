@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { BookOpen, Bot, ExternalLink, Plus, Save, Trash2 } from "lucide-react";
-import { Button, Card, Dialog, useToast } from "../components/ui";
+import { Button, Card, ConfirmDialog, Dialog } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import { BUILTIN_AI_PROVIDERS } from "../lib/constants";
 import type { AppConfig, CustomAiProvider, GlossaryEntry } from "../types";
 
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
 function formatGlossary(entries: GlossaryEntry[]): string {
@@ -27,8 +29,7 @@ function parseGlossary(raw: string): GlossaryEntry[] {
   return out;
 }
 
-export function AiProvidersPage({ config, onUpdateConfig }: Props) {
-  const { toast } = useToast();
+export function AiProvidersPage({ config, onUpdateConfig, onToast: toast }: Props) {
   const [glossaryText, setGlossaryText] = useState(() =>
     formatGlossary(config.translation_glossary)
   );
@@ -235,9 +236,17 @@ export function AiProvidersPage({ config, onUpdateConfig }: Props) {
       <Dialog
         open={dialogOpen}
         title={editing ? "Sửa nhà cung cấp tùy chỉnh" : "Thêm nhà cung cấp tùy chỉnh"}
-        confirmLabel="Lưu"
         onClose={() => setDialogOpen(false)}
-        onConfirm={saveCustomProvider}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setDialogOpen(false)}>
+              Hủy
+            </Button>
+            <Button variant="primary" onClick={saveCustomProvider}>
+              Lưu
+            </Button>
+          </>
+        }
       >
         <div className="stack-12">
           <div className="stack-8">
@@ -281,13 +290,13 @@ export function AiProvidersPage({ config, onUpdateConfig }: Props) {
         </div>
       </Dialog>
 
-      <Dialog
+      <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={`Xoá nhà cung cấp "${deleteTarget?.name}"?`}
-        description="Nhà cung cấp và danh sách mô hình của nó sẽ bị gỡ khỏi cấu hình."
+        message="Nhà cung cấp và danh sách mô hình của nó sẽ bị gỡ khỏi cấu hình."
         confirmLabel="Xoá"
-        danger
-        onClose={() => setDeleteTarget(null)}
+        confirmVariant="danger"
+        onCancel={() => setDeleteTarget(null)}
         onConfirm={async () => {
           if (!deleteTarget) return;
           const next = config.custom_providers.filter((p) => p.id !== deleteTarget.id);

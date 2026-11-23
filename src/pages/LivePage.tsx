@@ -11,7 +11,8 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { Button, Card, Dialog, useToast } from "../components/ui";
+import { Button, Card, ConfirmDialog } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { LIVE_TRIGGER_MODES, formatHotkey } from "../lib/constants";
 import type { AppConfig, DesktopApplication, LiveStatePayload } from "../types";
@@ -21,6 +22,7 @@ interface Props {
   liveState: LiveStatePayload;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onLiveStateChange: (state: LiveStatePayload) => void;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
 export function LivePage({
@@ -28,8 +30,8 @@ export function LivePage({
   liveState,
   onUpdateConfig,
   onLiveStateChange,
+  onToast: toast,
 }: Props) {
-  const { toast } = useToast();
   const [apps, setApps] = useState<DesktopApplication[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -344,13 +346,13 @@ export function LivePage({
         </div>
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={Boolean(deleteRegionTarget)}
         title={`Xoá vùng Live #${deleteRegionTarget?.index}?`}
-        description="Vùng này và lớp phủ bản dịch tương ứng sẽ bị gỡ khỏi danh sách Live."
+        message="Vùng này và lớp phủ bản dịch tương ứng sẽ bị gỡ khỏi danh sách Live."
         confirmLabel="Xoá vùng"
-        danger
-        onClose={() => setDeleteRegionTarget(null)}
+        confirmVariant="danger"
+        onCancel={() => setDeleteRegionTarget(null)}
         onConfirm={async () => {
           if (!deleteRegionTarget) return;
           const st = await api.liveRemoveRegion(deleteRegionTarget.id);
@@ -360,13 +362,13 @@ export function LivePage({
         }}
       />
 
-      <Dialog
+      <ConfirmDialog
         open={confirmClear}
         title="Xoá toàn bộ vùng Live?"
-        description="Tất cả các vùng Live đã lưu và lớp phủ liên quan sẽ bị xoá."
+        message="Tất cả các vùng Live đã lưu và lớp phủ liên quan sẽ bị xoá."
         confirmLabel="Xoá tất cả"
-        danger
-        onClose={() => setConfirmClear(false)}
+        confirmVariant="danger"
+        onCancel={() => setConfirmClear(false)}
         onConfirm={async () => {
           const st = await api.liveClearRegions();
           onLiveStateChange(st);

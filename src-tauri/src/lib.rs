@@ -22,32 +22,12 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 static EXPLICIT_QUIT: AtomicBool = AtomicBool::new(false);
 
 pub fn request_explicit_quit() {
     EXPLICIT_QUIT.store(true, Ordering::SeqCst);
-}
-
-pub fn persist_main_window_geometry(app: &AppHandle) {
-    let Some(state) = app.try_state::<Arc<AppState>>() else {
-        return;
-    };
-    let final_geom = if let Some(win) = app.get_webview_window("main") {
-        let mut live = state.live_main_geometry.lock();
-        if win.is_visible().unwrap_or(false) {
-            *live = window_state::capture_window_geometry(&win, &live);
-        }
-        live.clone()
-    } else {
-        return;
-    };
-    let mut cfg = state.config.lock();
-    if cfg.main_window_geometry != final_geom {
-        cfg.main_window_geometry = final_geom;
-        let _ = cfg.save();
-    }
 }
 
 pub fn open_or_focus_main_window(app: &AppHandle) {
@@ -58,27 +38,9 @@ pub fn open_or_focus_main_window(app: &AppHandle) {
         return;
     }
 
-    let saved = app
-        .try_state::<Arc<AppState>>()
-        .map(|st| st.config.lock().main_window_geometry.clone())
-        .unwrap_or_default();
-    let placement = window_state::resolve_initial_main_placement(&saved);
-
-    if let Some(st) = app.try_state::<Arc<AppState>>() {
-        st.pending_main_maximize
-            .store(placement.maximized, Ordering::SeqCst);
-        *st.live_main_geometry.lock() = config::MainWindowGeometry {
-            x: Some(placement.x_phys),
-            y: Some(placement.y_phys),
-            w: Some(placement.w_logical.round() as u32),
-            h: Some(placement.h_logical.round() as u32),
-            maximized: placement.maximized,
-        };
-    }
-
     let Ok(win) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Translator2k")
-        .inner_size(placement.w_logical, placement.h_logical)
+        .inner_size(window_state::MIN_DEFAULT_W, window_state::MIN_DEFAULT_H)
         .min_inner_size(window_state::MIN_WINDOW_W, window_state::MIN_WINDOW_H)
         .decorations(false)
         .resizable(true)
@@ -88,25 +50,10 @@ pub fn open_or_focus_main_window(app: &AppHandle) {
         return;
     };
 
-    window_state::apply_placement_hidden(&win, &placement);
-
-    let app_for_events = app.clone();
-    let win_for_events = win.clone();
-    win.on_window_event(move |event| match event {
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            if !win_for_events.is_visible().unwrap_or(false) {
-                return;
-            }
-            if let Some(st) = app_for_events.try_state::<Arc<AppState>>() {
-                let mut live = st.live_main_geometry.lock();
-                *live = window_state::capture_window_geometry(&win_for_events, &live);
-            }
-        }
-        WindowEvent::CloseRequested { .. } => {
-            persist_main_window_geometry(&app_for_events);
-        }
-        _ => {}
-    });
+    let lifecycle = window_state::WindowLifecycle::init_and_apply(&win, "Translator2k");
+    if let Some(st) = app.try_state::<Arc<AppState>>() {
+        *st.main_window_lifecycle.lock() = Some(lifecycle);
+    }
 }
 
 pub fn open_or_focus_hud_window(app: &AppHandle) -> Result<(), String> {
@@ -278,7 +225,6 @@ fn dispatch_hotkey_action(app: AppHandle, action: String) {
                 Ok(())
             }
             "quit" => {
-                persist_main_window_geometry(&app);
                 EXPLICIT_QUIT.store(true, Ordering::SeqCst);
                 state.overlays.clear_all();
                 state.soniox.stop();
@@ -383,7 +329,6 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 app.state::<Arc<AppState>>().overlays.clear_all();
             }
             "tray_quit" => {
-                persist_main_window_geometry(app);
                 EXPLICIT_QUIT.store(true, Ordering::SeqCst);
                 let st = app.state::<Arc<AppState>>();
                 st.overlays.clear_all();
@@ -441,7 +386,6 @@ pub fn run() {
             });
             let _ = hotkeys.apply(&initial_hotkeys);
 
-            let initial_main_geom = cfg.main_window_geometry.clone();
             let state = Arc::new(AppState {
                 config: Arc::new(Mutex::new(cfg)),
                 history: Mutex::new(initial_history),
@@ -450,8 +394,7 @@ pub fn run() {
                 overlays,
                 live,
                 soniox,
-                live_main_geometry: Mutex::new(initial_main_geom),
-                pending_main_maximize: AtomicBool::new(false),
+                main_window_lifecycle: Mutex::new(None),
             });
             app.manage(state.clone());
 
@@ -531,7 +474,6 @@ pub fn run() {
                         api.prevent_exit();
                         trim_working_set();
                     } else {
-                        persist_main_window_geometry(app_handle);
                         if let Some(st) = app_handle.try_state::<Arc<AppState>>() {
                             st.overlays.clear_all();
                             st.soniox.stop();

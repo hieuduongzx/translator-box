@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::Local;
@@ -12,7 +12,7 @@ use crate::capture::{capture_region, encode_rgb_to_data_url, grab_clipboard_imag
 use crate::clipboard_ops::{
     copy_selected_text, paste_replacement, write_clipboard_text, ClipboardWatcher,
 };
-use crate::config::{history_path, AppConfig, MainWindowGeometry};
+use crate::config::{history_path, AppConfig};
 use crate::constants::DEFAULT_HOTKEYS;
 use crate::desktop_apps::{list_desktop_applications, DesktopApplication};
 use crate::hotkeys::HotkeyManager;
@@ -111,8 +111,7 @@ pub struct AppState {
     pub overlays: Arc<OverlayManager>,
     pub live: Arc<LiveController>,
     pub soniox: Arc<SonioxManager>,
-    pub live_main_geometry: Mutex<MainWindowGeometry>,
-    pub pending_main_maximize: AtomicBool,
+    pub main_window_lifecycle: Mutex<Option<crate::window_state::WindowLifecycle>>,
 }
 
 impl AppState {
@@ -761,18 +760,17 @@ pub async fn open_main_window(app: AppHandle, page: Option<String>) {
 #[tauri::command]
 pub fn show_main_window(app: AppHandle, state: State<'_, Arc<AppState>>) {
     if let Some(win) = app.get_webview_window("main") {
-        let should_max = state.pending_main_maximize.swap(false, Ordering::SeqCst);
-        if should_max {
-            let _ = win.maximize();
+        if let Some(lifecycle) = state.main_window_lifecycle.lock().as_ref() {
+            lifecycle.reveal(&win);
+        } else {
+            let _ = win.show();
+            let _ = win.set_focus();
         }
-        let _ = win.show();
-        let _ = win.set_focus();
     }
 }
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle, state: State<'_, Arc<AppState>>) {
-    crate::persist_main_window_geometry(&app);
     crate::request_explicit_quit();
     state.overlays.clear_all();
     state.soniox.stop();

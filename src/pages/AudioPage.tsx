@@ -10,7 +10,8 @@ import {
   Trash2,
   Volume2,
 } from "lucide-react";
-import { Button, Card, Toggle, useToast } from "../components/ui";
+import { Button, Card, Switch } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { SONIOX_LANGUAGES } from "../lib/constants";
 import type { AppConfig, AudioDeviceOption, SonioxStatePayload } from "../types";
@@ -20,6 +21,7 @@ interface Props {
   sonioxState: SonioxStatePayload;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onSonioxChange: (state: SonioxStatePayload) => void;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
 const STATE_LABELS: Record<string, { text: string; tone: string }> = {
@@ -36,8 +38,8 @@ export function AudioPage({
   sonioxState,
   onUpdateConfig,
   onSonioxChange,
+  onToast: toast,
 }: Props) {
-  const { toast } = useToast();
   const [micDevices, setMicDevices] = useState<AudioDeviceOption[]>([]);
   const [sysDevices, setSysDevices] = useState<AudioDeviceOption[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
@@ -356,7 +358,7 @@ export function AudioPage({
             <span className="field-label">Tách từng người nói</span>
             <span className="field-hint">Gắn nhãn Người 1, Người 2 trong cuộc họp hoặc phim.</span>
           </div>
-          <Toggle
+          <Switch
             checked={config.soniox_speaker_diarization}
             onChange={(v) => onUpdateConfig({ soniox_speaker_diarization: v })}
           />

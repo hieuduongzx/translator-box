@@ -1,62 +1,124 @@
 import { useEffect, type ReactNode } from "react";
-import { Button } from "./Button";
+import { X } from "lucide-react";
+import { Button, type ButtonVariant } from "./Button";
 
 export interface DialogProps {
   open: boolean;
   title: string;
   description?: string;
-  children?: ReactNode;
-  confirmLabel?: string;
-  cancelLabel?: string;
-  danger?: boolean;
-  onConfirm?: () => void;
+  wide?: boolean;
+  maxWidth?: number;
+  disableClose?: boolean;
   onClose: () => void;
+  footer?: ReactNode;
+  children?: ReactNode;
 }
 
 export function Dialog({
   open,
   title,
   description,
-  children,
-  confirmLabel = "Xác nhận",
-  cancelLabel = "Huỷ",
-  danger = false,
-  onConfirm,
+  wide = false,
+  maxWidth,
+  disableClose = false,
   onClose,
+  footer,
+  children,
 }: DialogProps) {
   useEffect(() => {
-    if (!open) return;
+    if (!open || disableClose) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, disableClose, onClose]);
 
   if (!open) return null;
 
+  const handleClose = () => {
+    if (!disableClose) onClose();
+  };
+
   return (
-    <div className="ui-dialog-backdrop" onClick={onClose}>
+    <div
+      className="ui-dialog-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) handleClose();
+      }}
+    >
       <div
-        className="ui-dialog"
+        className={`ui-dialog${wide ? " wide" : ""}`}
         role="dialog"
         aria-modal="true"
-        onClick={(e) => e.stopPropagation()}
+        aria-label={title}
+        style={maxWidth ? { maxWidth } : undefined}
       >
-        <h3 className="ui-dialog-title">{title}</h3>
-        {description && <p className="ui-dialog-body">{description}</p>}
-        {children && <div className="ui-dialog-body">{children}</div>}
-        <div className="ui-dialog-actions">
-          <Button variant="secondary" onClick={onClose}>
-            {cancelLabel}
+        <div className="ui-dialog-header">
+          <div>
+            <h2 className="ui-dialog-title">{title}</h2>
+            {description && <p className="ui-dialog-desc">{description}</p>}
+          </div>
+          <Button
+            variant="ghost"
+            iconOnly
+            disabled={disableClose}
+            onClick={handleClose}
+            title="Đóng"
+            aria-label="Đóng hộp thoại"
+          >
+            <X size={16} />
           </Button>
-          {onConfirm && (
-            <Button variant={danger ? "danger" : "primary"} onClick={onConfirm}>
-              {confirmLabel}
-            </Button>
-          )}
         </div>
+
+        {children && <div className="ui-dialog-body">{children}</div>}
+        {footer && <div className="ui-dialog-footer">{footer}</div>}
       </div>
     </div>
+  );
+}
+
+export interface ConfirmDialogProps {
+  open: boolean;
+  title: string;
+  message: ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  confirmVariant?: ButtonVariant;
+  loading?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Xác nhận",
+  cancelLabel = "Hủy",
+  confirmVariant = "danger",
+  loading = false,
+  onConfirm,
+  onCancel,
+}: ConfirmDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      title={title}
+      disableClose={loading}
+      onClose={onCancel}
+      footer={
+        <>
+          <Button variant="secondary" disabled={loading} onClick={onCancel}>
+            {cancelLabel}
+          </Button>
+          <Button variant={confirmVariant} loading={loading} onClick={onConfirm}>
+            {confirmLabel}
+          </Button>
+        </>
+      }
+    >
+      <div className="ui-confirm-msg">{message}</div>
+    </Dialog>
   );
 }

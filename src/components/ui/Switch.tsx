@@ -1,21 +1,22 @@
-export interface ToggleProps {
+export interface SwitchProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
+  disabled?: boolean;
   ariaLabel?: string;
 }
 
-export function Toggle({ checked, onChange, ariaLabel }: ToggleProps) {
+export function Switch({ checked, onChange, disabled = false, ariaLabel }: SwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
-      className="ui-toggle"
-      data-checked={checked ? "true" : "false"}
+      disabled={disabled}
+      className={`ui-switch${checked ? " checked" : ""}`}
       onClick={() => onChange(!checked)}
     >
-      <span className="ui-toggle-thumb" />
+      <span className="ui-switch-thumb" />
     </button>
   );
 }

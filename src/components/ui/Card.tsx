@@ -1,26 +1,38 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
-export interface CardProps {
-  title?: string;
-  description?: string;
+export interface CardProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  title?: ReactNode;
+  description?: ReactNode;
   headerRight?: ReactNode;
-  children: ReactNode;
-  className?: string;
+  flush?: boolean;
+  children?: ReactNode;
 }
 
-export function Card({ title, description, headerRight, children, className = "" }: CardProps) {
+export function Card({
+  title,
+  description,
+  headerRight,
+  flush = false,
+  className = "",
+  children,
+  ...rest
+}: CardProps) {
+  const classes = ["ui-card", flush ? "ui-card-flush" : "", className]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <section className={`ui-card ${className}`.trim()}>
+    <div className={classes} {...rest}>
       {(title || description || headerRight) && (
         <div className="ui-card-header">
           <div>
-            {title && <h2 className="ui-card-title">{title}</h2>}
+            {title && <h3 className="ui-card-title">{title}</h3>}
             {description && <p className="ui-card-desc">{description}</p>}
           </div>
           {headerRight}
         </div>
       )}
       {children}
-    </section>
+    </div>
   );
 }

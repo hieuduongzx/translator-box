@@ -1,126 +1,151 @@
 import type { ReactNode } from "react";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 
 export interface SidebarItem {
   id: string;
   label: string;
   icon: ReactNode;
-  badge?: string;
+  badge?: string | number;
+  badgeVariant?: "neutral" | "warning" | "accent";
 }
 
 export interface SidebarProps {
   items: SidebarItem[];
-  footerItems?: SidebarItem[];
   activeId: string;
-  collapsed: boolean;
-  version?: string;
-  hasUpdate?: boolean;
   onSelect: (id: string) => void;
+  collapsed: boolean;
   onToggleCollapse: () => void;
+  settingsId?: string;
+  settingsLabel?: string;
+  settingsBadge?: string;
+  hasUpdate?: boolean;
+  version?: string;
   onVersionClick?: () => void;
+  children?: ReactNode;
+  footerExtra?: ReactNode;
 }
 
 export function Sidebar({
   items,
-  footerItems = [],
   activeId,
-  collapsed,
-  version,
-  hasUpdate = false,
   onSelect,
+  collapsed,
   onToggleCollapse,
+  settingsId = "settings",
+  settingsLabel = "Cài đặt",
+  settingsBadge,
+  hasUpdate = false,
+  version,
   onVersionClick,
+  children,
+  footerExtra,
 }: SidebarProps) {
-  const versionTag = version ? `v${version.replace(/^v/i, "")}` : "";
+  const cleanVersion = version ? (version.startsWith("v") ? version : `v${version}`) : "";
+  const settingsActive = activeId === settingsId;
+  const collapsedSettingsTitle = cleanVersion
+    ? hasUpdate
+      ? `${settingsLabel} · ${cleanVersion} (Có bản cập nhật mới)`
+      : `${settingsLabel} · ${cleanVersion}`
+    : hasUpdate
+      ? `${settingsLabel} (Có bản cập nhật mới)`
+      : settingsLabel;
+
+  const handleVersionClick = () => {
+    if (onVersionClick) {
+      onVersionClick();
+    } else {
+      onSelect(settingsId);
+    }
+  };
 
   return (
-    <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
-      <nav className="sidebar-nav" aria-label="Điều hướng chính">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`sidebar-item ${activeId === item.id ? "active" : ""}`}
-            onClick={() => onSelect(item.id)}
-            title={
-              collapsed
-                ? item.badge
-                  ? `${item.label} (${item.badge})`
-                  : item.label
-                : undefined
-            }
-            aria-label={item.label}
-          >
-            <span className="sidebar-icon-wrap">{item.icon}</span>
-            {!collapsed && (
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{item.label}</span>
-            )}
-            {!collapsed && item.badge && <span className="sidebar-badge">{item.badge}</span>}
-          </button>
-        ))}
-      </nav>
-
-      <div className="sidebar-footer">
-        {footerItems.map((item) => {
-          const isSettings = item.id === "settings";
-          const collapsedTip =
-            isSettings && versionTag
-              ? `${item.label} · ${versionTag}${hasUpdate ? " (Có bản cập nhật mới)" : ""}`
-              : item.label;
+    <aside className={`ui-sidebar${collapsed ? " collapsed" : ""}`}>
+      <nav
+        className={`ui-sidebar-nav${!collapsed && children ? " has-body" : ""}`}
+        aria-label="Điều hướng chính"
+      >
+        {items.map((item) => {
+          const isActive = activeId === item.id;
           return (
             <button
               key={item.id}
               type="button"
-              className={`sidebar-item ${activeId === item.id ? "active" : ""}`}
-              onClick={() => onSelect(item.id)}
-              title={collapsed ? collapsedTip : undefined}
+              className={`ui-sidebar-item${isActive ? " active" : ""}`}
+              aria-current={isActive ? "page" : undefined}
               aria-label={item.label}
+              title={collapsed ? item.label : undefined}
+              onClick={() => onSelect(item.id)}
             >
-              <span className="sidebar-icon-wrap">
-                {item.icon}
-                {collapsed && isSettings && hasUpdate && <span className="sidebar-update-dot" />}
-              </span>
-              {!collapsed && (
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{item.label}</span>
-              )}
-              {!collapsed && isSettings && hasUpdate && (
-                <span className="sidebar-badge">Mới</span>
+              <span className="ui-sidebar-icon">{item.icon}</span>
+              {!collapsed && <span className="ui-sidebar-label">{item.label}</span>}
+              {!collapsed && item.badge !== undefined && item.badge !== "" && (
+                <span
+                  className={`ui-sidebar-badge${
+                    item.badgeVariant && item.badgeVariant !== "neutral"
+                      ? ` ${item.badgeVariant}`
+                      : ""
+                  }`}
+                >
+                  {item.badge}
+                </span>
               )}
             </button>
           );
         })}
+      </nav>
+
+      {!collapsed && children && <div className="ui-sidebar-body">{children}</div>}
+
+      <div className="ui-sidebar-footer">
+        {!collapsed && footerExtra}
+
         <button
           type="button"
-          className="sidebar-item"
-          onClick={onToggleCollapse}
-          title={
-            collapsed
-              ? versionTag
-                ? `Mở rộng thanh bên (${versionTag})`
-                : "Mở rộng thanh bên"
-              : "Thu gọn thanh bên"
-          }
-          aria-label={collapsed ? "Mở rộng thanh bên" : "Thu gọn thanh bên"}
+          className={`ui-sidebar-item${settingsActive ? " active" : ""}`}
+          aria-current={settingsActive ? "page" : undefined}
+          aria-label={settingsLabel}
+          title={collapsed ? collapsedSettingsTitle : undefined}
+          onClick={() => onSelect(settingsId)}
         >
-          <span className="sidebar-icon-wrap">
-            {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          <span className="ui-sidebar-icon">
+            <Settings size={20} />
           </span>
-          {!collapsed && <span>Thu gọn</span>}
+          {!collapsed && <span className="ui-sidebar-label">{settingsLabel}</span>}
+          {!collapsed && settingsBadge && (
+            <span className="ui-sidebar-badge accent">{settingsBadge}</span>
+          )}
+          {hasUpdate && !settingsBadge && (
+            <span className="ui-sidebar-dot" aria-label="Có bản cập nhật mới" />
+          )}
         </button>
 
-        {!collapsed && versionTag && (
+        <button
+          type="button"
+          className="ui-sidebar-item"
+          aria-label={collapsed ? "Mở rộng thanh bên" : "Thu gọn thanh bên"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Mở rộng thanh bên" : "Thu gọn thanh bên"}
+          onClick={onToggleCollapse}
+        >
+          <span className="ui-sidebar-icon">
+            {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </span>
+          {!collapsed && <span className="ui-sidebar-label">Thu gọn</span>}
+        </button>
+
+        {!collapsed && cleanVersion && (
           <button
             type="button"
-            className="sidebar-version"
-            onClick={onVersionClick}
+            className="ui-sidebar-version"
             title={
               hasUpdate
-                ? `Phiên bản hiện tại ${versionTag} — Có bản cập nhật mới`
-                : `Phiên bản hiện tại ${versionTag}`
+                ? `Phiên bản ${cleanVersion} — Có bản cập nhật mới, nhấn để mở Cài đặt`
+                : `Phiên bản ${cleanVersion} — Nhấn để mở Cài đặt & kiểm tra cập nhật`
             }
+            onClick={handleVersionClick}
           >
-            <span>{versionTag}</span>
-            {hasUpdate && <span className="sidebar-update-dot" />}
+            <span>{cleanVersion}</span>
+            {hasUpdate && <span className="ui-sidebar-dot" aria-hidden="true" />}
           </button>
         )}
       </div>

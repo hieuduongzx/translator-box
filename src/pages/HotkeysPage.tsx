@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Keyboard, RotateCcw, X } from "lucide-react";
-import { Button, Card, Dialog, useToast } from "../components/ui";
+import { Button, Card, ConfirmDialog } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { HOTKEY_ACTIONS, eventToCombo, formatHotkey } from "../lib/constants";
 import type { AppConfig } from "../types";
@@ -9,10 +10,15 @@ interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onConfigReplaced: (cfg: AppConfig) => void;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
-export function HotkeysPage({ config, onUpdateConfig, onConfigReplaced }: Props) {
-  const { toast } = useToast();
+export function HotkeysPage({
+  config,
+  onUpdateConfig,
+  onConfigReplaced,
+  onToast: toast,
+}: Props) {
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
@@ -107,12 +113,13 @@ export function HotkeysPage({ config, onUpdateConfig, onConfigReplaced }: Props)
         })}
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={confirmReset}
         title="Khôi phục toàn bộ phím tắt mặc định?"
-        description="Mọi phím tắt tuỳ chỉnh sẽ được đặt lại theo cấu hình ban đầu."
+        message="Mọi phím tắt tuỳ chỉnh sẽ được đặt lại theo cấu hình ban đầu."
         confirmLabel="Khôi phục"
-        onClose={() => setConfirmReset(false)}
+        confirmVariant="primary"
+        onCancel={() => setConfirmReset(false)}
         onConfirm={async () => {
           try {
             const updated = await api.resetHotkeys();

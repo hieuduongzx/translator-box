@@ -10,7 +10,9 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { Button, Card, Toggle, UpdateSettingsCard, useToast } from "../components/ui";
+import { Button, Card, Switch } from "../components/ui";
+import { UpdateSettingsCard } from "../components/ui/UpdateSettingsCard";
+import type { ToastKind } from "../hooks";
 import type { UseUpdaterResult } from "../hooks/useUpdater";
 import {
   LANGUAGES,
@@ -34,6 +36,7 @@ interface Props {
   activeTab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
 export function SettingsPage({
@@ -44,8 +47,8 @@ export function SettingsPage({
   activeTab,
   onTabChange,
   onUpdateConfig,
+  onToast: toast,
 }: Props) {
-  const { toast } = useToast();
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
 
   useEffect(() => {
@@ -343,7 +346,7 @@ export function SettingsPage({
                   Khi tắt, phím tắt thay thế sẽ ngừng hoạt động để tránh dán nhầm khi gõ văn bản.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.replace_enabled}
                 onChange={(v) => onUpdateConfig({ replace_enabled: v })}
               />
@@ -392,7 +395,7 @@ export function SettingsPage({
                   Giữ nguyên khoảng trắng đầu/cuối và cấu trúc xuống dòng. Tắt để gộp dòng gọn khi dịch đoạn copy từ PDF.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.replace_preserve_formatting}
                 onChange={(v) => onUpdateConfig({ replace_preserve_formatting: v })}
               />
@@ -405,7 +408,7 @@ export function SettingsPage({
                   Hiển thị thanh lưu bản gốc trên HUD và Dịch nhanh để sao chép/hoàn tác lại chỉ với một bấm.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.replace_show_undo_original}
                 onChange={(v) => onUpdateConfig({ replace_show_undo_original: v })}
               />
@@ -418,7 +421,7 @@ export function SettingsPage({
                   Trả lại nội dung clipboard trước đó sau khi dán đè; tắt nếu muốn giữ bản dịch trong clipboard.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.replace_restore_clipboard}
                 onChange={(v) => onUpdateConfig({ replace_restore_clipboard: v })}
               />
@@ -488,7 +491,7 @@ export function SettingsPage({
                   Tự động đưa bản dịch vào clipboard sau khi dịch văn bản (không gây lặp với tự dịch Ctrl+C).
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.text_auto_copy_result}
                 onChange={(v) => onUpdateConfig({ text_auto_copy_result: v })}
               />
@@ -501,7 +504,7 @@ export function SettingsPage({
                   Tự phát hiện văn bản copy ở bất kỳ ứng dụng nào (bỏ qua mật khẩu từ trình quản lý mật khẩu).
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.auto_translate_clipboard}
                 onChange={(v) => onUpdateConfig({ auto_translate_clipboard: v })}
               />
@@ -550,7 +553,7 @@ export function SettingsPage({
                   Ghi lại bản gốc và bản dịch để tra cứu hoặc sao chép lại nhanh trong trang Dịch nhanh.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.text_keep_history}
                 onChange={(v) => onUpdateConfig({ text_keep_history: v })}
               />
@@ -586,7 +589,7 @@ export function SettingsPage({
                   Lưu danh sách lịch sử xuống máy để không bị mất khi đóng ứng dụng.
                 </span>
               </div>
-              <Toggle
+              <Switch
                 checked={config.text_persist_history}
                 onChange={(v) => onUpdateConfig({ text_persist_history: v })}
               />

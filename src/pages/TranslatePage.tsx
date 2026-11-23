@@ -16,7 +16,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { Button, Card, Dialog, useToast } from "../components/ui";
+import { Button, Card, ConfirmDialog } from "../components/ui";
+import { usePersistentState, type ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import {
   LANGUAGES,
@@ -38,16 +39,7 @@ interface Props {
   onOpenTextSettings: () => void;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
   onHistoryCleared: () => void;
-}
-
-const HISTORY_FILTER_KEY = "translator2k.ui.historyFilter";
-
-function loadHistoryFilter(): string {
-  try {
-    return localStorage.getItem(HISTORY_FILTER_KEY) || "all";
-  } catch {
-    return "all";
-  }
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
 export function TranslatePage({
@@ -58,23 +50,18 @@ export function TranslatePage({
   onOpenTextSettings,
   onUpdateConfig,
   onHistoryCleared,
+  onToast: toast,
 }: Props) {
-  const { toast } = useToast();
   const [sourceText, setSourceText] = useState("");
   const [resultText, setResultText] = useState("");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
-  const [historyFilter, setHistoryFilterState] = useState<string>(loadHistoryFilter);
-
-  const setHistoryFilter = (val: string) => {
-    setHistoryFilterState(val);
-    try {
-      localStorage.setItem(HISTORY_FILTER_KEY, val);
-    } catch {
-      // ignore
-    }
-  };
+  const [historyFilter, setHistoryFilter] = usePersistentState<string>(
+    "translator2k.ui.historyFilter",
+    "all",
+    { validate: (v): v is string => typeof v === "string" && v.length > 0 }
+  );
 
   const filteredHistory =
     historyFilter === "all"
@@ -538,13 +525,13 @@ export function TranslatePage({
         )}
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={confirmClearHistory}
         title="Xoá toàn bộ lịch sử dịch?"
-        description="Hành động này sẽ xoá toàn bộ danh sách lịch sử dịch đã lưu."
+        message="Hành động này sẽ xoá toàn bộ danh sách lịch sử dịch đã lưu."
         confirmLabel="Xoá lịch sử"
-        danger
-        onClose={() => setConfirmClearHistory(false)}
+        confirmVariant="danger"
+        onCancel={() => setConfirmClearHistory(false)}
         onConfirm={async () => {
           await api.clearHistory();
           onHistoryCleared();

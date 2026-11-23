@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Palette, RotateCcw } from "lucide-react";
-import { Button, Card, Dialog, Toggle, useToast } from "../components/ui";
+import { Button, Card, ConfirmDialog, Switch } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import {
   HUD_FONT_OPTIONS,
   HUD_STYLE_PRESETS,
@@ -15,10 +16,10 @@ import type { AppConfig } from "../types";
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
-export function AppearancePage({ config, onUpdateConfig }: Props) {
-  const { toast } = useToast();
+export function AppearancePage({ config, onUpdateConfig, onToast: toast }: Props) {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const bgCss = resolveHudBackgroundCss(config);
@@ -231,7 +232,7 @@ export function AppearancePage({ config, onUpdateConfig }: Props) {
             <span className="field-label">Hiển thị nền hộp phía sau chữ</span>
             <span className="field-hint">Tắt để chữ nổi trong suốt kiểu phụ đề phim.</span>
           </div>
-          <Toggle
+          <Switch
             checked={config.hud_background_enabled && !config.hud_frame_transparent}
             onChange={(v) => onUpdateConfig(buildHudBackgroundPatch(config, v))}
           />
@@ -284,7 +285,7 @@ export function AppearancePage({ config, onUpdateConfig }: Props) {
             <span className="field-label">Khung trong suốt hoàn toàn</span>
             <span className="field-hint">Tạm bỏ nền hộp bất kể màu nền đang chọn.</span>
           </div>
-          <Toggle
+          <Switch
             checked={config.hud_frame_transparent}
             onChange={(v) => onUpdateConfig({ hud_frame_transparent: v })}
           />
@@ -294,19 +295,20 @@ export function AppearancePage({ config, onUpdateConfig }: Props) {
           <div className="field-meta">
             <span className="field-label">Ghim HUD luôn nổi trên cùng</span>
           </div>
-          <Toggle
+          <Switch
             checked={config.hud_pinned}
             onChange={(v) => onUpdateConfig({ hud_pinned: v })}
           />
         </div>
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={confirmReset}
         title="Đặt lại kiểu chữ khung dịch về mặc định?"
-        description="Các tuỳ chỉnh màu sắc, cỡ chữ và nền sẽ trở về bộ 'Phụ đề phim'."
+        message="Các tuỳ chỉnh màu sắc, cỡ chữ và nền sẽ trở về bộ 'Phụ đề phim'."
         confirmLabel="Đặt lại"
-        onClose={() => setConfirmReset(false)}
+        confirmVariant="primary"
+        onCancel={() => setConfirmReset(false)}
         onConfirm={async () => {
           await onUpdateConfig({
             ...HUD_STYLE_PRESETS[0].values,

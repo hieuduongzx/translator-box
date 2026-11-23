@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AudioLines,
@@ -9,16 +8,18 @@ import {
   Palette,
   Radio,
   ScanText,
-  Settings,
 } from "lucide-react";
+import { Sidebar, TitleBar, Toast, type SidebarItem } from "./components/ui";
+import { UpdateBanner } from "./components/ui/UpdateBanner";
 import {
-  Sidebar,
-  TitleBar,
-  ToastProvider,
-  UpdateBanner,
+  isThemeMode,
+  themeStorageKey,
+  useAppVersion,
+  usePersistentState,
+  useTheme,
   useToast,
-  type SidebarItem,
-} from "./components/ui";
+  type ToastKind,
+} from "./hooks";
 import { useUpdater } from "./hooks/useUpdater";
 import { api } from "./lib/api";
 import { AiProvidersPage } from "./pages/AiProvidersPage";
@@ -51,46 +52,37 @@ const VALID_PAGES = new Set([
   "hotkeys",
   "settings",
 ]);
-const PAGE_STORAGE_KEY = "translator2k.ui.activePage";
-const SETTINGS_TAB_STORAGE_KEY = "translator2k.ui.settingsTab";
 
-function loadInitialPage(): string {
-  try {
-    const raw = localStorage.getItem(PAGE_STORAGE_KEY);
-    if (raw && VALID_PAGES.has(raw)) return raw;
-  } catch {
-    // ignore
-  }
-  return "translate";
+function isValidPage(v: unknown): v is string {
+  return typeof v === "string" && VALID_PAGES.has(v);
 }
 
-function loadInitialSettingsTab(): SettingsTab {
-  try {
-    const raw = localStorage.getItem(SETTINGS_TAB_STORAGE_KEY);
-    if (raw === "general" || raw === "text") return raw;
-  } catch {
-    // ignore
-  }
-  return "general";
-}
-
-function applyTheme(theme: AppConfig["ui_theme"]) {
-  try {
-    localStorage.setItem("translator2k_theme", theme);
-  } catch {
-    // ignore
-  }
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const resolved = theme === "system" ? (prefersDark ? "dark" : "light") : theme;
-  document.documentElement.setAttribute("data-theme", resolved);
+function isValidSettingsTab(v: unknown): v is SettingsTab {
+  return v === "general" || v === "text";
 }
 
 function MainApp() {
-  const { toast } = useToast();
+  const { toasts, showToast, dismissToast } = useToast(4, 4200);
+  const { setTheme } = useTheme("translator2k");
+  const appVersion = useAppVersion();
   const updater = useUpdater();
-  const [activePage, setActivePageState] = useState<string>(loadInitialPage);
-  const [settingsTab, setSettingsTabState] = useState<SettingsTab>(loadInitialSettingsTab);
-  const [appVersion, setAppVersion] = useState<string>("");
+
+  const [activePage, setActivePage] = usePersistentState<string>(
+    "translator2k.ui.activePage",
+    "translate",
+    { validate: isValidPage }
+  );
+  const [settingsTab, setSettingsTab] = usePersistentState<SettingsTab>(
+    "translator2k.ui.settingsTab",
+    "general",
+    { validate: isValidSettingsTab }
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>(
+    "translator2k.ui.sidebarCollapsed",
+    false,
+    { validate: (v): v is boolean => typeof v === "boolean" }
+  );
+
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [meta, setMeta] = useState<AppMeta | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -108,32 +100,14 @@ function MainApp() {
     blocks: [],
   });
 
-  const setActivePage = useCallback((page: string) => {
-    const safe = VALID_PAGES.has(page) ? page : "translate";
-    setActivePageState(safe);
-    try {
-      localStorage.setItem(PAGE_STORAGE_KEY, safe);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const setSettingsTab = useCallback((tab: SettingsTab) => {
-    setSettingsTabState(tab);
-    try {
-      localStorage.setItem(SETTINGS_TAB_STORAGE_KEY, tab);
-    } catch {
-      // ignore
-    }
-  }, []);
+  const notify = useCallback(
+    (message: string, kind: ToastKind = "info") => {
+      showToast(kind, message);
+    },
+    [showToast]
+  );
 
   useEffect(() => {
-    getVersion()
-      .then((ver) => {
-        if (ver) setAppVersion(ver);
-      })
-      .catch(() => {});
-
     Promise.all([
       api.getConfig(),
       api.getAppMeta(),
@@ -144,13 +118,25 @@ function MainApp() {
       .then(([cfg, m, hist, live, sx]) => {
         setConfig(cfg);
         setMeta(m);
-        if (m?.version) {
-          setAppVersion((prev) => prev || m.version);
-        }
         setHistory(hist);
         setLiveState(live);
         setSonioxState(sx);
-        applyTheme(cfg.ui_theme);
+        if (isThemeMode(cfg.ui_theme)) {
+          try {
+            if (!localStorage.getItem(themeStorageKey("translator2k"))) {
+              setTheme(cfg.ui_theme);
+            }
+          } catch {
+            setTheme(cfg.ui_theme);
+          }
+        }
+        try {
+          if (localStorage.getItem("translator2k.ui.sidebarCollapsed") === null) {
+            setSidebarCollapsed(cfg.sidebar_collapsed);
+          }
+        } catch {
+          setSidebarCollapsed(cfg.sidebar_collapsed);
+        }
       })
       .catch(() => {})
       .finally(() => {
@@ -165,7 +151,9 @@ function MainApp() {
       api.onStatus(setStatus),
       api.onConfigUpdated((cfg) => {
         setConfig(cfg);
-        applyTheme(cfg.ui_theme);
+        if (isThemeMode(cfg.ui_theme)) {
+          setTheme(cfg.ui_theme);
+        }
         setHistory((prev) => prev.slice(0, cfg.text_history_limit));
       }),
       api.onTranslationResult((entry) => {
@@ -186,43 +174,38 @@ function MainApp() {
         if (page === "settings:text") {
           setSettingsTab("text");
           setActivePage("settings");
-        } else {
+        } else if (VALID_PAGES.has(page)) {
           setActivePage(page);
         }
       }),
     ];
 
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onScheme = () => {
-      setConfig((cur) => {
-        if (cur) applyTheme(cur.ui_theme);
-        return cur;
-      });
-    };
-    media.addEventListener("change", onScheme);
-
     return () => {
-      media.removeEventListener("change", onScheme);
       for (const p of unlisteners) {
         p.then((fn) => fn()).catch(() => {});
       }
     };
-  }, [setActivePage, setSettingsTab]);
+  }, [setActivePage, setSettingsTab, setSidebarCollapsed, setTheme]);
 
   const updateConfig = useCallback(
     async (patch: Partial<AppConfig>) => {
       if (!config) return;
       const merged: AppConfig = { ...config, ...patch };
       setConfig(merged);
-      if (patch.ui_theme) applyTheme(patch.ui_theme);
+      if (patch.ui_theme && isThemeMode(patch.ui_theme)) {
+        setTheme(patch.ui_theme);
+      }
+      if (typeof patch.sidebar_collapsed === "boolean") {
+        setSidebarCollapsed(patch.sidebar_collapsed);
+      }
       try {
         const saved = await api.saveConfig(merged);
         setConfig(saved);
       } catch (err) {
-        toast(String(err), "error");
+        notify(String(err), "error");
       }
     },
-    [config, toast]
+    [config, notify, setSidebarCollapsed, setTheme]
   );
 
   const resolvedVersion = appVersion || updater.state?.currentVersion || meta?.version || "";
@@ -231,10 +214,21 @@ function MainApp() {
       ["available", "downloading", "verifying", "ready"].includes(updater.state.status)
   );
 
+  const statusIndicator = (
+    <span className="titlebar-status" data-tauri-drag-region>
+      <span
+        className={`status-dot ${
+          status.state === "busy" ? "busy" : status.state === "error" ? "error" : ""
+        }`}
+      />
+      <span>{status.text}</span>
+    </span>
+  );
+
   if (!config) {
     return (
       <div className="app-shell">
-        <TitleBar title="Translator2k" status={status} />
+        <TitleBar title="Translator2k" rightContent={statusIndicator} />
         <div className="content-area loading-shell">
           <span className="field-hint">Đang tải cấu hình…</span>
         </div>
@@ -249,12 +243,14 @@ function MainApp() {
       label: "Live màn hình",
       icon: <Radio size={20} />,
       badge: liveState.running ? "ON" : undefined,
+      badgeVariant: "accent",
     },
     {
       id: "audio",
       label: "Dịch âm thanh",
       icon: <AudioLines size={20} />,
       badge: sonioxState.state !== "idle" ? "ON" : undefined,
+      badgeVariant: "accent",
     },
     { id: "ai", label: "Dịch vụ AI", icon: <Bot size={20} /> },
     { id: "ocr", label: "OCR", icon: <ScanText size={20} /> },
@@ -262,26 +258,33 @@ function MainApp() {
     { id: "hotkeys", label: "Phím tắt", icon: <Keyboard size={20} /> },
   ];
 
-  const footerItems: SidebarItem[] = [
-    { id: "settings", label: "Cài đặt", icon: <Settings size={20} /> },
-  ];
+  const handleToggleCollapse = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    void updateConfig({ sidebar_collapsed: next });
+  };
 
   return (
     <div className="app-shell">
-      <TitleBar title={meta?.name ?? "Translator2k"} status={status} />
+      <TitleBar title={meta?.name ?? "Translator2k"} rightContent={statusIndicator} />
       <UpdateBanner appName={meta?.name ?? "Translator2k"} updater={updater} />
       <div className="app-body">
         <Sidebar
           items={navItems}
-          footerItems={footerItems}
           activeId={activePage}
-          collapsed={config.sidebar_collapsed}
-          version={resolvedVersion}
-          hasUpdate={hasUpdate}
-          onSelect={setActivePage}
-          onToggleCollapse={() =>
-            updateConfig({ sidebar_collapsed: !config.sidebar_collapsed })
+          collapsed={sidebarCollapsed}
+          settingsId="settings"
+          settingsBadge={
+            updater.state?.status === "ready"
+              ? "Mới"
+              : updater.state?.status === "available"
+                ? "1"
+                : undefined
           }
+          hasUpdate={hasUpdate}
+          version={resolvedVersion}
+          onSelect={setActivePage}
+          onToggleCollapse={handleToggleCollapse}
           onVersionClick={() => {
             setSettingsTab("general");
             setActivePage("settings");
@@ -307,6 +310,7 @@ function MainApp() {
                 }}
                 onUpdateConfig={updateConfig}
                 onHistoryCleared={() => setHistory([])}
+                onToast={notify}
               />
             )}
             {activePage === "live" && (
@@ -315,6 +319,7 @@ function MainApp() {
                 liveState={liveState}
                 onUpdateConfig={updateConfig}
                 onLiveStateChange={setLiveState}
+                onToast={notify}
               />
             )}
             {activePage === "audio" && (
@@ -323,22 +328,32 @@ function MainApp() {
                 sonioxState={sonioxState}
                 onUpdateConfig={updateConfig}
                 onSonioxChange={setSonioxState}
+                onToast={notify}
               />
             )}
             {activePage === "ai" && (
-              <AiProvidersPage config={config} onUpdateConfig={updateConfig} />
+              <AiProvidersPage
+                config={config}
+                onUpdateConfig={updateConfig}
+                onToast={notify}
+              />
             )}
             {activePage === "ocr" && (
-              <OcrPage config={config} onUpdateConfig={updateConfig} />
+              <OcrPage config={config} onUpdateConfig={updateConfig} onToast={notify} />
             )}
             {activePage === "appearance" && (
-              <AppearancePage config={config} onUpdateConfig={updateConfig} />
+              <AppearancePage
+                config={config}
+                onUpdateConfig={updateConfig}
+                onToast={notify}
+              />
             )}
             {activePage === "hotkeys" && (
               <HotkeysPage
                 config={config}
                 onUpdateConfig={updateConfig}
                 onConfigReplaced={setConfig}
+                onToast={notify}
               />
             )}
             {activePage === "settings" && (
@@ -350,11 +365,13 @@ function MainApp() {
                 activeTab={settingsTab}
                 onTabChange={setSettingsTab}
                 onUpdateConfig={updateConfig}
+                onToast={notify}
               />
             )}
           </div>
         </main>
       </div>
+      <Toast toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
@@ -369,9 +386,5 @@ export function App() {
     const id = Number(label.slice("live-output-".length) || "1");
     return <LiveOutputWindow regionId={id} />;
   }
-  return (
-    <ToastProvider>
-      <MainApp />
-    </ToastProvider>
-  );
+  return <MainApp />;
 }

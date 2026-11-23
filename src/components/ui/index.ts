@@ -1,9 +1,20 @@
-export { TitleBar } from "./TitleBar";
-export { Sidebar, type SidebarItem } from "./Sidebar";
-export { Button, type ButtonVariant } from "./Button";
+export { Button } from "./Button";
+export type { ButtonProps, ButtonSize, ButtonVariant } from "./Button";
+
 export { Card } from "./Card";
-export { Dialog } from "./Dialog";
-export { ToastProvider, useToast, type ToastType } from "./Toast";
-export { Toggle } from "./Toggle";
-export { UpdateBanner } from "./UpdateBanner";
-export { UpdateSettingsCard } from "./UpdateSettingsCard";
+export type { CardProps } from "./Card";
+
+export { ConfirmDialog, Dialog } from "./Dialog";
+export type { ConfirmDialogProps, DialogProps } from "./Dialog";
+
+export { Sidebar } from "./Sidebar";
+export type { SidebarItem, SidebarProps } from "./Sidebar";
+
+export { Switch } from "./Switch";
+export type { SwitchProps } from "./Switch";
+
+export { TitleBar } from "./TitleBar";
+export type { TitleBarProps } from "./TitleBar";
+
+export { Toast } from "./Toast";
+export type { ToastProps } from "./Toast";

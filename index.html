@@ -7,10 +7,20 @@
     <script>
       (function () {
         try {
-          var pref = localStorage.getItem("translator2k_theme") || "system";
-          var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-          var resolved = pref === "system" ? (dark ? "dark" : "light") : pref;
-          document.documentElement.setAttribute("data-theme", resolved);
+          var saved =
+            localStorage.getItem("translator2k.theme") ||
+            localStorage.getItem("translator2k_theme");
+          var mode = saved === "light" || saved === "dark" ? saved : "system";
+          var effective =
+            mode === "system"
+              ? window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : mode;
+          var root = document.documentElement;
+          root.setAttribute("data-theme", effective);
+          root.style.colorScheme = effective;
+          root.style.backgroundColor = effective === "dark" ? "#111318" : "#f5f6f8";
         } catch (e) {}
       })();
     </script>

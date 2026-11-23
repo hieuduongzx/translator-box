@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, Cpu, Download, RefreshCw, ScanText } from "lucide-react";
-import { Button, Card, useToast } from "../components/ui";
+import { Button, Card } from "../components/ui";
+import type { ToastKind } from "../hooks";
 import { api } from "../lib/api";
 import { OCR_BACKENDS, OCR_ENGINES, OCR_LANGUAGES } from "../lib/constants";
 import type { AppConfig, OcrEngineStatusInfo, OcrModelInfo } from "../types";
@@ -8,10 +9,10 @@ import type { AppConfig, OcrEngineStatusInfo, OcrModelInfo } from "../types";
 interface Props {
   config: AppConfig;
   onUpdateConfig: (patch: Partial<AppConfig>) => Promise<void>;
+  onToast: (message: string, kind?: ToastKind) => void;
 }
 
-export function OcrPage({ config, onUpdateConfig }: Props) {
-  const { toast } = useToast();
+export function OcrPage({ config, onUpdateConfig, onToast: toast }: Props) {
   const [status, setStatus] = useState<OcrEngineStatusInfo | null>(null);
   const [models, setModels] = useState<OcrModelInfo[]>([]);
   const [checking, setChecking] = useState(false);
