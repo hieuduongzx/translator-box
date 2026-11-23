@@ -1,6 +1,6 @@
 [package]
 name = "translator2k"
-version = "2.1.6"
+version = "2.1.7"
 description = "Translator2k — Công cụ OCR, dịch màn hình, overlay tại chỗ, live đa vùng và dịch audio realtime trên Windows"
 authors = ["Amri2k"]
 edition = "2021"
@@ -44,7 +44,8 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 html-escape = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 cosmic-text = "0.13"
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native", "directml"] }
+# ONNX Runtime nạp động: tải một lần khi dùng OCR ONNX lần đầu (xem src/ocr/ort_runtime.rs).
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"] }
 ndarray = "0.17"
 dirs = "6"
 lru = "0.12"
@@ -74,6 +75,10 @@ windows = { version = "0.58", features = [
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
@@ -95,3 +100,24 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+# Crate nóng (OCR tiền/hậu xử lý, resize ảnh, ndarray, vẽ chữ overlay, inpaint, resampler âm thanh
+# nằm trong translator2k) giữ opt-level 3 để OCR nhanh bằng/hơn v2.1.4; phần còn lại "z" cho gọn.
+[profile.release.package.translator2k]
+opt-level = 3
+[profile.release.package.image]
+opt-level = 3
+[profile.release.package.ndarray]
+opt-level = 3
+[profile.release.package.ort]
+opt-level = 3
+[profile.release.package.fdeflate]
+opt-level = 3
+[profile.release.package.png]
+opt-level = 3
+[profile.release.package.cosmic-text]
+opt-level = 3
+[profile.release.package.swash]
+opt-level = 3
+[profile.release.package.ttf-parser]
+opt-level = 3

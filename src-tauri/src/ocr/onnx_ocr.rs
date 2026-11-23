@@ -17,7 +17,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::config::config_dir;
-use crate::ocr::{OcrEngineStatusInfo, TextRegion};
+use crate::ocr::{ort_runtime, OcrEngineStatusInfo, TextRegion};
 use crate::tasks::OcrDownloadProgressEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,11 +117,27 @@ pub fn model_paths(model_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
-pub fn model_installed(model_id: &str) -> bool {
+fn model_files_installed(model_id: &str) -> bool {
     let (det, rec, dict) = model_paths(model_id);
     [det, rec, dict]
         .iter()
         .all(|p| fs::metadata(p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false))
+}
+
+/// Sẵn sàng khi có đủ file mô hình VÀ thành phần OCR (ONNX Runtime tải khi cần).
+pub fn model_installed(model_id: &str) -> bool {
+    model_files_installed(model_id) && ort_runtime::runtime_installed()
+}
+
+const RUNTIME_SIZE_MB: f32 = (ort_runtime::RUNTIME_SIZE as f32) / (1024.0 * 1024.0);
+
+/// Dung lượng cần tải còn lại (MB) — cộng thêm thành phần OCR nếu máy chưa có.
+fn pending_size_mb(spec: &ModelSpec) -> f32 {
+    let mut mb = if model_files_installed(spec.id) { 0.0 } else { spec.size_mb };
+    if !ort_runtime::runtime_installed() {
+        mb += RUNTIME_SIZE_MB;
+    }
+    if mb == 0.0 { spec.size_mb } else { (mb * 10.0).round() / 10.0 }
 }
 
 pub fn list_models() -> Vec<OcrModelInfo> {
@@ -131,7 +147,7 @@ pub fn list_models() -> Vec<OcrModelInfo> {
             id: s.id.to_string(),
             label: s.label.to_string(),
             languages: s.languages.to_string(),
-            size_mb: s.size_mb,
+            size_mb: pending_size_mb(s),
             installed: model_installed(s.id),
             det_filename: s.det_file.to_string(),
             rec_filename: s.rec_file.to_string(),
@@ -143,11 +159,20 @@ pub fn list_models() -> Vec<OcrModelInfo> {
 pub fn status(model_id: &str, backend: &str) -> OcrEngineStatusInfo {
     let installed = model_installed(model_id);
     let backend_note = match backend {
-        "directml" => "GPU DirectML (ONNX Runtime).",
-        "cpu" => "CPU (ONNX Runtime).",
-        "auto" => "Tự động chọn DirectML / CPU (ONNX Runtime).",
-        _ => "CPU fallback (ONNX Runtime).",
+        "directml" => "Dùng card đồ hoạ (có thể chậm hơn trên một số máy).",
+        "cpu" => "CPU.",
+        "auto" => "Tự động (CPU — nhanh nhất cho mô hình OCR này).",
+        _ => "CPU.",
     };
+    if !installed && model_files_installed(model_id) {
+        return OcrEngineStatusInfo {
+            available: false,
+            detail: format!(
+                "Cần tải thành phần OCR (khoảng {:.0} MB, chỉ một lần). Vào mục OCR và bấm tải. {backend_note}",
+                RUNTIME_SIZE_MB
+            ),
+        };
+    }
     if installed {
         OcrEngineStatusInfo {
             available: true,
@@ -191,7 +216,8 @@ where
         fs::create_dir_all(parent).map_err(|e| format!("Không tạo được thư mục model: {e}"))?;
     }
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(45))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Translator2k/2.1")
         .build()
         .map_err(|_| "Không khởi tạo được kết nối mạng, vui lòng thử lại sau.".to_string())?;
@@ -199,9 +225,11 @@ where
         .get(url)
         .send()
         .await
-        .map_err(|_| "Không kết nối được để tải mô hình OCR, vui lòng thử lại sau.".to_string())?;
+        .map_err(|_| {
+            "Không kết nối được để tải dữ liệu OCR. Kiểm tra mạng rồi bấm tải lại.".to_string()
+        })?;
     if !resp.status().is_success() {
-        return Err("Tải mô hình OCR không thành công, vui lòng thử lại sau.".to_string());
+        return Err("Tải dữ liệu OCR không thành công, vui lòng bấm tải lại sau.".to_string());
     }
     let content_len = resp.content_length();
     on_chunk(0, content_len);
@@ -224,7 +252,10 @@ where
             Err(_) => {
                 drop(file);
                 let _ = fs::remove_file(&tmp);
-                return Err("Tải mô hình OCR bị gián đoạn, vui lòng thử lại sau.".to_string());
+                return Err(
+                    "Tải dữ liệu OCR bị gián đoạn (mất mạng?). Kiểm tra mạng rồi bấm tải lại."
+                        .to_string(),
+                );
             }
         };
         if let Err(e) = file.write_all(&bytes) {
@@ -259,12 +290,21 @@ where
 {
     let spec = spec_for(model_id);
     let (det, rec, dict) = model_paths(model_id);
-    let est_total_bytes = ((spec.size_mb as f64) * 1024.0 * 1024.0).round().max(1.0) as u64;
-    let steps: [(&str, &PathBuf, &str); 3] = [
-        (spec.det_url, &det, "Mô hình phát hiện chữ"),
-        (spec.rec_url, &rec, "Mô hình nhận dạng chữ"),
-        (spec.dict_url, &dict, "Từ điển ký tự"),
-    ];
+    let runtime_path = ort_runtime::runtime_path();
+    let need_runtime = !ort_runtime::runtime_installed();
+    if need_runtime {
+        // File dở dang / sai cỡ từ lần trước: xoá để tải lại sạch.
+        let _ = fs::remove_file(&runtime_path);
+    }
+    let mut est_total_bytes = ((spec.size_mb as f64) * 1024.0 * 1024.0).round().max(1.0) as u64;
+    let mut steps: Vec<(&str, &PathBuf, &str)> = Vec::with_capacity(4);
+    if need_runtime {
+        est_total_bytes += ort_runtime::RUNTIME_SIZE;
+        steps.push((ort_runtime::RUNTIME_URL, &runtime_path, "Thành phần OCR"));
+    }
+    steps.push((spec.det_url, &det, "Mô hình phát hiện chữ"));
+    steps.push((spec.rec_url, &rec, "Mô hình nhận dạng chữ"));
+    steps.push((spec.dict_url, &dict, "Từ điển ký tự"));
     let file_total = steps.len();
     let mut completed_bytes: u64 = 0;
 
@@ -293,6 +333,13 @@ where
             });
         })
         .await?;
+        if std::ptr::eq(*dest, &runtime_path) {
+            // Kiểm SHA-256 ghim cứng + chữ ký số Microsoft trước khi coi là đã có.
+            let path = runtime_path.clone();
+            tokio::task::spawn_blocking(move || ort_runtime::verify_runtime_file(&path))
+                .await
+                .map_err(|_| "Không kiểm tra được thành phần OCR, vui lòng tải lại.".to_string())??;
+        }
         completed_bytes = completed_bytes.saturating_add(step_done);
     }
 
@@ -334,14 +381,8 @@ fn inference_threads() -> usize {
     (cpus / 2).clamp(2, 8)
 }
 
-static ORT_ENV: Lazy<Result<ort::environment::Environment, String>> = Lazy::new(|| {
-    ort::init()
-        .build()
-        .map_err(|e| format!("Không khởi tạo được môi trường ONNX Runtime: {e}"))
-});
-
 fn build_session(path: &PathBuf, backend: &str) -> Result<Session, String> {
-    let env = ORT_ENV.as_ref().map_err(|e| e.clone())?;
+    let env = ort_runtime::environment()?;
     let threads = inference_threads();
     let mut builder = Session::builder(env)
         .map_err(|e| format!("Lỗi khởi tạo ONNX Runtime: {e}"))?
@@ -352,7 +393,9 @@ fn build_session(path: &PathBuf, backend: &str) -> Result<Session, String> {
         .with_inter_threads(1)
         .map_err(|e| format!("Lỗi cấu hình luồng ONNX: {e}"))?;
 
-    if backend == "directml" || backend == "auto" {
+    // "auto" dùng CPU: đo thực tế DirectML chậm ~10 lần với mô hình PP-OCR (kích thước ảnh
+    // thay đổi liên tục buộc DirectML dựng lại đồ thị). DirectML vẫn chọn được thủ công.
+    if backend == "directml" {
         if let Ok(with_dml) =
             builder
                 .clone()
@@ -625,11 +668,16 @@ pub fn recognize(
     backend: &str,
     detail_pass: bool,
 ) -> Result<(String, Vec<TextRegion>), String> {
-    if !model_installed(model_id) {
+    if !model_files_installed(model_id) {
         return Err(format!(
             "Model '{}' chưa được tải. Vào mục OCR để tải model.",
             spec_for(model_id).label
         ));
+    }
+    if !ort_runtime::runtime_installed() {
+        return Err(
+            "Thành phần OCR ngoại tuyến chưa được tải. Vào mục OCR và bấm tải mô hình.".to_string(),
+        );
     }
 
     let (work_img_owned, coord_scale) = if detail_pass {

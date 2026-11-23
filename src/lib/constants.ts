@@ -70,9 +70,9 @@ export const OCR_ENGINES: { label: string; value: "auto" | "windows" | "rapidocr
 ];
 
 export const OCR_BACKENDS: [string, string][] = [
-  ["Tự động", "auto"],
-  ["CPU · ONNX Runtime", "cpu"],
-  ["GPU · DirectML", "directml"],
+  ["Tự động (khuyên dùng)", "auto"],
+  ["CPU", "cpu"],
+  ["Dùng card đồ hoạ (có thể chậm hơn trên một số máy)", "directml"],
 ];
 
 export const LIVE_TRIGGER_MODES: { label: string; value: "hybrid" | "auto" | "input" }[] = [

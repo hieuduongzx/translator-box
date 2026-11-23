@@ -1,4 +1,5 @@
 pub mod onnx_ocr;
+pub mod ort_runtime;
 pub mod windows_ocr;
 
 use image::RgbImage;

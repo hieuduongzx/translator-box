@@ -122,7 +122,7 @@ export function OcrPage({ config, onUpdateConfig }: Props) {
           <div className="field-meta">
             <span className="field-label">Thiết bị xử lý ONNX</span>
             <span className="field-hint">
-              DirectML tận dụng GPU Windows phổ thông; CPU ổn định trên mọi máy.
+              Tự động dùng CPU vì nhanh nhất với mô hình OCR này; dùng card đồ hoạ có thể chậm hơn trên một số máy.
             </span>
           </div>
           <div className="field-control">

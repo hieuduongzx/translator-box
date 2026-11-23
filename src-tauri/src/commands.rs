@@ -1195,7 +1195,7 @@ pub async fn download_ocr_model(
         model_id: model_id.clone(),
         model_label: label.clone(),
         file_index: 1,
-        file_total: 3,
+        file_total: if crate::ocr::ort_runtime::runtime_installed() { 3 } else { 4 },
         current_file: "Đang chuẩn bị tải…".to_string(),
         downloaded_bytes: 0,
         total_bytes: 0,
